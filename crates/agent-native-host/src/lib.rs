@@ -1,0 +1,46 @@
+//! `agent-native-host` — the Rust half of the agent-native framework.
+//!
+//! Pairs with the `@agent-native/core` TypeScript SDK to turn a goal + a registry of
+//! typed actions into a permission-checked, budget-bounded, cryptographically-audited
+//! sequence of action calls against a desktop app.
+//!
+//! ## Quick start (Tauri 2 backend)
+//!
+//! ```no_run
+//! use std::collections::HashMap;
+//! use std::sync::{Arc, Mutex};
+//!
+//! use agent_native_host::{
+//!     audit::Signer,
+//!     permissions::Policy,
+//!     protocol::{AgentActionResult, AgentApprovalResponse, AgentStartRequest},
+//!     run_task, select_backend_with_default, ApprovalMap, PendingMap,
+//! };
+//!
+//! # struct AppState { pending: PendingMap, approvals: ApprovalMap, policy: Arc<Policy>, signer: Arc<Signer> }
+//! # #[derive(Default)] struct MyDeterministic;
+//! # impl agent_native_host::Inference for MyDeterministic {
+//! #     fn name(&self) -> &'static str { "deterministic" }
+//! #     fn next_step(&mut self, _: &agent_native_host::StepContext) -> Result<agent_native_host::StepDecision, String> {
+//! #         Ok(agent_native_host::StepDecision::Done { summary: "ok".into() })
+//! #     }
+//! # }
+//! # fn wire(app: tauri::AppHandle, state: AppState, req: AgentStartRequest) {
+//! let backend = select_backend_with_default(Box::new(MyDeterministic::default()));
+//! std::thread::spawn(move || {
+//!     let _ = run_task(app, state.pending, state.approvals, state.policy, state.signer, backend, req);
+//! });
+//! # }
+//! ```
+
+pub mod agent;
+pub mod audit;
+pub mod budget;
+pub mod memory;
+pub mod permissions;
+pub mod protocol;
+
+pub use agent::inference::{
+    select_backend_with_default, Inference, StepContext, StepDecision, StepRecord,
+};
+pub use agent::{run_task, ApprovalMap, PendingMap};

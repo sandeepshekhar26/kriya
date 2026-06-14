@@ -1,26 +1,24 @@
-//! Tauri backend for the agent-native note app. Hosts the agent loop and exposes two
-//! commands to the frontend: `agent_start` (begin a task) and `agent_action_result`
-//! (return the outcome of an executed action).
+//! Tauri backend for the agent-native note app. Hosts the agent loop (delegated to the
+//! `agent_native_host` crate) and exposes the IPC commands the frontend calls.
 
-mod agent;
-mod audit;
-mod budget;
-mod memory;
-mod permissions;
-mod protocol;
+mod deterministic;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use tauri::Emitter;
 
-use agent::{ApprovalMap, PendingMap};
-use audit::Signer;
-use permissions::Policy;
-use protocol::{
-    AgentActionResult, AgentApprovalResponse, AgentDone, AgentLog, AgentStartRequest, EVENT_DONE,
-    EVENT_LOG,
+use agent_native_host::{
+    audit::Signer,
+    permissions::Policy,
+    protocol::{
+        AgentActionResult, AgentApprovalResponse, AgentDone, AgentLog, AgentStartRequest,
+        EVENT_DONE, EVENT_LOG,
+    },
+    run_task, select_backend_with_default, ApprovalMap, PendingMap,
 };
+
+use deterministic::DeterministicOrganizer;
 
 pub struct AppState {
     pending: PendingMap,
@@ -42,13 +40,14 @@ fn agent_start(
     let policy = state.policy.clone();
     let signer = state.signer.clone();
 
+    let backend = select_backend_with_default(Box::new(DeterministicOrganizer::new()));
+
     std::thread::spawn(move || {
-        if let Err(err) = agent::run_task(app.clone(), pending, approvals, policy, signer, req) {
+        if let Err(err) = run_task(app.clone(), pending, approvals, policy, signer, backend, req) {
             let _ = app.emit(
                 EVENT_LOG,
                 AgentLog { step_id: None, level: "error".into(), message: err.clone(), detail: None },
             );
-            // Always release the frontend's wait, even on failure.
             let _ = app.emit(
                 EVENT_DONE,
                 AgentDone { summary: format!("Failed: {err}"), steps: 0 },
@@ -88,9 +87,11 @@ fn agent_approval_response(
 /// Read recent episodes from durable agent memory (newest first). Opens its own
 /// connection so it never contends with the agent thread.
 #[tauri::command]
-fn agent_memory_recent(limit: Option<u32>) -> Result<Vec<memory::Episode>, String> {
+fn agent_memory_recent(
+    limit: Option<u32>,
+) -> Result<Vec<agent_native_host::memory::Episode>, String> {
     let path = std::env::temp_dir().join("agent-native-memory.db");
-    let mem = memory::AgentMemory::open(&path)?;
+    let mem = agent_native_host::memory::AgentMemory::open(&path)?;
     mem.recent(limit.unwrap_or(20))
 }
 

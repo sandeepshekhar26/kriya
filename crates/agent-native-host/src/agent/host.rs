@@ -17,7 +17,7 @@ use crate::protocol::{
     AgentStartRequest, EVENT_ACTION, EVENT_APPROVAL, EVENT_DONE, EVENT_LOG,
 };
 
-use super::inference::{select_backend, StepContext, StepDecision, StepRecord};
+use super::inference::{Inference, StepContext, StepDecision, StepRecord};
 
 /// Shared registry of in-flight steps awaiting a result from the frontend.
 pub type PendingMap = Arc<Mutex<std::collections::HashMap<String, Sender<AgentActionResult>>>>;
@@ -78,9 +78,9 @@ pub fn run_task(
     approvals: ApprovalMap,
     policy: Arc<Policy>,
     signer: Arc<Signer>,
+    mut backend: Box<dyn Inference>,
     req: AgentStartRequest,
 ) -> Result<AgentDone, String> {
-    let mut backend = select_backend();
     log(
         &app,
         AgentLog::info(format!(
