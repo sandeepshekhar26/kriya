@@ -22,3 +22,4 @@ rand = "0.8"
 hex = "0.4"
 uuid = { version = "1", features = ["v4"] }
 ureq = { version = "2", features = ["json", "tls"] }
+rusqlite = { version = "0.31", features = ["bundled"] }

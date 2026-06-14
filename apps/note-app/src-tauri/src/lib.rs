@@ -5,6 +5,7 @@
 mod agent;
 mod audit;
 mod budget;
+mod memory;
 mod permissions;
 mod protocol;
 
@@ -84,6 +85,15 @@ fn agent_approval_response(
     Ok(())
 }
 
+/// Read recent episodes from durable agent memory (newest first). Opens its own
+/// connection so it never contends with the agent thread.
+#[tauri::command]
+fn agent_memory_recent(limit: Option<u32>) -> Result<Vec<memory::Episode>, String> {
+    let path = std::env::temp_dir().join("agent-native-memory.db");
+    let mem = memory::AgentMemory::open(&path)?;
+    mem.recent(limit.unwrap_or(20))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let policy_path = std::path::PathBuf::from("agent-policy.yaml");
@@ -99,7 +109,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             agent_start,
             agent_action_result,
-            agent_approval_response
+            agent_approval_response,
+            agent_memory_recent
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
