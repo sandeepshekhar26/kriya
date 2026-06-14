@@ -12,7 +12,8 @@ What's in the box:
   pauses on a guarded action. Drop in, pass `{ request, onApprove, onDeny }`.
 - **`<MemoryPanel>`** — past runs pulled from the host's durable SQLite memory via the
   `agent_memory_recent` Tauri command. Shows action id, ok/fail, timestamp, reasoning,
-  signed receipt prefix.
+  signed receipt prefix. **Step-through replay**: click an episode to open it, then use
+  Prev/Next buttons or ←/→ keys to walk through neighbouring episodes; Esc closes.
 
 ## Usage
 

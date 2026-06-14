@@ -54,13 +54,22 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
 - ✅ `create-agent-app` scaffolder — `npm create agent-app@latest my-app` produces a
   working counter-app starter (Tauri 2 + Rust host + React + SDK + all safety infra,
   locked deps). Verified end-to-end: TS compiles, `cargo check --locked` passes.
+  Generated apps now ship a `README.md` with the develop / build commands, a
+  per-app file map ("where to add features"), and a documented macOS gotcha —
+  `target/release/bundle/macos/<app>.app` shadows `tauri dev` via LaunchServices
+  after a prior release build, with a one-liner to kill it.
 - ✅ Rich dev dashboard/inspector — extracted into `@agent-native/inspector`
-  (workspace package). Filterable log (toggle levels + full-text search),
+  (workspace package, v0.2.0). Filterable log (toggle levels + full-text search),
   per-step expand, one-click JSONL export of the current run, and a `MemoryPanel`
   that reads durable past runs from the host's SQLite memory via the
-  `agent_memory_recent` Tauri command. Both reference apps now consume it; the
-  styles ship via `@agent-native/inspector/styles.css` and are themable through
-  CSS variables. Step-through / live replay of stored runs still ⬜.
+  `agent_memory_recent` Tauri command. **Step-through replay**: clicking an
+  episode in MemoryPanel opens its detail, then Prev/Next buttons (or ←/→ keys,
+  Esc to close) walk through neighbouring episodes one at a time — keyboard nav
+  is suppressed while typing in inputs so the inspector's filter box still works.
+  Both reference apps consume the package; styles ship via
+  `@agent-native/inspector/styles.css` and are themable through CSS variables.
+  Real *live* in-host pause-between-steps (so a dev can break/inspect mid-run)
+  still ⬜ — pending a host-side pause channel.
 - 🟡 CLI to dump registered actions as JSON — added in 1.1
 - ⬜ Templates, examples gallery, "build an agent app in <2 hours" tutorial
 - ⬜ OpenTelemetry traces; CI eval gate ("does my app still work with agents?")
