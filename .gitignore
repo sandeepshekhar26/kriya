@@ -19,3 +19,6 @@ coverage/
 # os
 .DS_Store
 Thumbs.db
+
+# Host crate is a library — apps own dep resolution.
+crates/agent-native-host/Cargo.lock
