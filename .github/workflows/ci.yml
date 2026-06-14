@@ -70,15 +70,17 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          # Share the cache across all three crate roots.
+          # Share the cache across both app crate roots. The host crate is a
+          # library with no committed Cargo.lock (consumers own resolution); its
+          # tests run via the note-app's lockfile, which has the alloc-no-stdlib
+          # pin that dodges the brotli/alloc-stdlib trait split.
           workspaces: |
-            crates/agent-native-host
             apps/note-app/src-tauri
             apps/task-manager/src-tauri
 
-      - name: test agent-native-host
-        working-directory: crates/agent-native-host
-        run: cargo test --locked
+      - name: test agent-native-host (via note-app lockfile)
+        working-directory: apps/note-app/src-tauri
+        run: cargo test -p agent-native-host --locked
 
       - name: cargo check note-app backend
         working-directory: apps/note-app/src-tauri
@@ -122,8 +124,13 @@ jobs:
           test -f package.json
           test -f src-tauri/Cargo.toml
           test -f src/actions.ts
-          # No unsubstituted placeholders
-          ! grep -r '{{' . --include='*.json' --include='*.toml' --include='*.rs' --include='*.ts' --include='*.tsx' --include='*.md'
+          # No unsubstituted placeholders. Match the exact tokens the scaffolder
+          # replaces — `format!` macros legitimately contain `{{` as a literal
+          # brace escape, so the test has to be specific.
+          if grep -rE '\{\{(NAME|NAME_SNAKE|TITLE|IDENTIFIER)\}\}' .; then
+            echo "ERROR: unsubstituted scaffolder placeholders found above" >&2
+            exit 1
+          fi
 
       - name: typecheck the scaffolded app against the in-repo workspace
         run: |
