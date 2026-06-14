@@ -21,9 +21,18 @@ struct Rule {
     require_approval: bool,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Budget {
+    /// Max actions the agent may take in any trailing 60-second window. `None` = no cap.
+    #[serde(default)]
+    pub max_actions_per_minute: Option<u32>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Policy {
     rules: Vec<Rule>,
+    #[serde(default)]
+    budget: Budget,
 }
 
 impl Default for Policy {
@@ -36,6 +45,7 @@ impl Default for Policy {
                 Rule { action: "delete_*".into(), allow: true, require_approval: true },
                 Rule { action: "*".into(), allow: false, require_approval: false },
             ],
+            budget: Budget::default(),
         }
     }
 }
@@ -47,6 +57,11 @@ impl Policy {
             Ok(text) => serde_yaml::from_str(&text).unwrap_or_else(|_| Policy::default()),
             Err(_) => Policy::default(),
         }
+    }
+
+    /// The configured per-minute action cap, if any.
+    pub fn max_actions_per_minute(&self) -> Option<u32> {
+        self.budget.max_actions_per_minute
     }
 
     pub fn check(&self, action_id: &str) -> Decision {

@@ -31,8 +31,9 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
 - ✅ **Human-approval queue**: host pauses on a guarded action, emits `agent://approval`,
   blocks on a per-step channel (5-min timeout = deny), frontend modal approve/deny, resumes
 - ⬜ Approval **queue UI** for multiple pending approvals + per-action policy editor in-app
-- ⬜ Budgets/rate-limits enforced (actions/min, api-calls/hr) — present in policy schema only
-- 🟡 Ed25519 signed receipts → JSONL — works; needs a **verifier** tool + tamper tests
+- 🟡 Budgets/rate-limits — actions/minute sliding-window cap enforced (host stops the run);
+  api-calls/hr still ⬜
+- 🟡 Ed25519 signed receipts → JSONL — works; **verifier** CLI delegated (see prompt) + tamper tests ⬜
 - ⬜ Policy linting + dev-mode "your policy is too permissive" warnings
 
 ## 4. State sync & protocol
