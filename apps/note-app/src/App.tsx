@@ -9,9 +9,11 @@ import {
   clearLog,
   usePendingApproval,
   respondToApproval,
+  useAwaitStep,
+  advanceStep,
   useRunCount,
 } from "./agent";
-import { AgentInspector, ApprovalModal, MemoryPanel } from "@agent-native/inspector";
+import { AgentInspector, ApprovalModal, MemoryPanel, StepGate } from "@agent-native/inspector";
 import "@agent-native/inspector/styles.css";
 
 const ORGANIZE_GOAL =
@@ -27,7 +29,9 @@ export function App() {
   const running = useAgentRunning();
   const pendingApproval = usePendingApproval();
   const log = useInspectorLog();
+  const awaitStep = useAwaitStep();
   const runCount = useRunCount();
+  const [stepMode, setStepMode] = useState(false);
 
   return (
     <div className="app">
@@ -39,18 +43,27 @@ export function App() {
           </p>
         </div>
         <div className="header-actions">
+          <label className="step-mode-toggle" title="Pause before each agent decision">
+            <input
+              type="checkbox"
+              checked={stepMode}
+              disabled={running}
+              onChange={(e) => setStepMode(e.target.checked)}
+            />
+            step mode
+          </label>
           <button onClick={seedNotes} disabled={running}>
             Seed 5 notes
           </button>
           <button
             className="primary"
-            onClick={() => runAgentTask(ORGANIZE_GOAL)}
+            onClick={() => runAgentTask(ORGANIZE_GOAL, { stepMode })}
             disabled={running || notes.length === 0}
           >
             {running ? "Agent working…" : "Run agent: organize"}
           </button>
           <button
-            onClick={() => runAgentTask(REMOVE_IDEAS_GOAL)}
+            onClick={() => runAgentTask(REMOVE_IDEAS_GOAL, { stepMode })}
             disabled={running || notes.length === 0}
             title="Agent will propose deletes, which require your approval"
           >
@@ -74,6 +87,11 @@ export function App() {
         </section>
 
         <AgentInspector log={log} onClear={clearLog} exportFilename="note-app-run.jsonl">
+          <StepGate
+            await_={awaitStep}
+            onStep={() => advanceStep(true)}
+            onStop={() => advanceStep(false)}
+          />
           <MemoryPanel refreshKey={runCount} />
         </AgentInspector>
       </main>

@@ -270,3 +270,64 @@
   color: var(--an-text-dim, #8b94a3);
   font-variant-numeric: tabular-nums;
 }
+
+/* --- StepGate --- */
+
+.an-step-gate {
+  margin-top: 12px;
+  padding: 12px 14px;
+  background: var(--an-panel-2, #1d212b);
+  border: 1px solid var(--an-accent, #7aa2f7);
+  border-radius: 8px;
+  font-size: 13px;
+}
+.an-step-gate-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.an-step-gate-badge {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--an-accent, #7aa2f7);
+  border: 1px solid var(--an-accent, #7aa2f7);
+  border-radius: 3px;
+  padding: 1px 6px;
+}
+.an-step-gate-title {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--an-text-dim, #8b94a3);
+}
+.an-step-gate-last {
+  margin: 4px 0 10px;
+  font-size: 12px;
+  color: var(--an-text-dim, #8b94a3);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.an-step-gate-last code { color: var(--an-accent, #7aa2f7); }
+.an-step-gate-first { font-style: italic; }
+.an-ok { color: var(--an-ok, #9ece6a); }
+.an-fail { color: var(--an-danger, #f7768e); }
+.an-step-gate-buttons {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.an-step-gate-buttons button {
+  background: var(--an-panel-2, #1d212b);
+  border: 1px solid var(--an-border, #232932);
+  color: var(--an-inspector-text, #e6e8eb);
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.an-step-gate-buttons .an-primary {
+  background: var(--an-accent, #7aa2f7);
+  color: #0c0e12;
+  border-color: transparent;
+  font-weight: 600;
+}

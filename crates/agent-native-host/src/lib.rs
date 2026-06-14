@@ -14,10 +14,16 @@
 //!     audit::Signer,
 //!     permissions::Policy,
 //!     protocol::{AgentActionResult, AgentApprovalResponse, AgentStartRequest},
-//!     run_task, select_backend_with_default, ApprovalMap, PendingMap,
+//!     run_task, select_backend_with_default, ApprovalMap, PendingMap, StepAdvanceMap,
 //! };
 //!
-//! # struct AppState { pending: PendingMap, approvals: ApprovalMap, policy: Arc<Policy>, signer: Arc<Signer> }
+//! # struct AppState {
+//! #     pending: PendingMap,
+//! #     approvals: ApprovalMap,
+//! #     advances: StepAdvanceMap,
+//! #     policy: Arc<Policy>,
+//! #     signer: Arc<Signer>,
+//! # }
 //! # #[derive(Default)] struct MyDeterministic;
 //! # impl agent_native_host::Inference for MyDeterministic {
 //! #     fn name(&self) -> &'static str { "deterministic" }
@@ -28,7 +34,16 @@
 //! # fn wire(app: tauri::AppHandle, state: AppState, req: AgentStartRequest) {
 //! let backend = select_backend_with_default(Box::new(MyDeterministic::default()));
 //! std::thread::spawn(move || {
-//!     let _ = run_task(app, state.pending, state.approvals, state.policy, state.signer, backend, req);
+//!     let _ = run_task(
+//!         app,
+//!         state.pending,
+//!         state.approvals,
+//!         state.advances,
+//!         state.policy,
+//!         state.signer,
+//!         backend,
+//!         req,
+//!     );
 //! });
 //! # }
 //! ```
@@ -43,4 +58,4 @@ pub mod protocol;
 pub use agent::inference::{
     select_backend_with_default, Inference, StepContext, StepDecision, StepRecord,
 };
-pub use agent::{run_task, ApprovalMap, PendingMap};
+pub use agent::{run_task, ApprovalMap, PendingMap, StepAdvanceMap};

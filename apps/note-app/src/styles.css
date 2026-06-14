@@ -26,6 +26,17 @@ body {
   padding: 24px;
 }
 
+.step-mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted, #8b94a7);
+  user-select: none;
+  cursor: pointer;
+}
+.step-mode-toggle input[disabled] { cursor: not-allowed; }
+
 header {
   display: flex;
   justify-content: space-between;

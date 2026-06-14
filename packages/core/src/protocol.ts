@@ -24,6 +24,14 @@ export interface AgentStartRequest {
   goal: string;
   state: AppState;
   tools: ToolSchema[];
+  /** Reseed history from a prior run with the same goal (durable memory). */
+  resume?: boolean;
+  /**
+   * If true, the host pauses *before each decision* and waits for the frontend
+   * to send {@link AgentStepAdvance}. Lets a developer single-step the agent
+   * the same way you'd single-step a debugger.
+   */
+  stepMode?: boolean;
 }
 
 /** host → app: the host (on behalf of the agent) wants an action executed. */
@@ -77,10 +85,33 @@ export interface AgentApprovalResponse {
   approved: boolean;
 }
 
+/**
+ * host → app: paused waiting for the developer to step. Sent only when the
+ * run was started with `stepMode: true`. The host blocks on a per-gate channel
+ * until the app calls `agent_step_advance` with the same `gateId`.
+ */
+export interface AgentAwaitStep {
+  gateId: string;
+  /** 1-indexed counter of which step the host is about to take. */
+  stepNumber: number;
+  /** Action id of the previous step (null on the first pause). */
+  lastActionId?: string | null;
+  /** Whether the previous action succeeded. */
+  lastSuccess?: boolean | null;
+}
+
+/** app → host: developer's "advance" or "stop" decision in step-mode. */
+export interface AgentStepAdvance {
+  gateId: string;
+  /** `true` proceeds to the next step; `false` ends the run gracefully. */
+  proceed: boolean;
+}
+
 /** Tauri event channel names (host → app). */
 export const AgentEvents = {
   Action: "agent://action",
   Approval: "agent://approval",
+  AwaitStep: "agent://await_step",
   Done: "agent://done",
   Log: "agent://log",
 } as const;
@@ -90,4 +121,5 @@ export const AgentCommands = {
   Start: "agent_start",
   ActionResult: "agent_action_result",
   ApprovalResponse: "agent_approval_response",
+  StepAdvance: "agent_step_advance",
 } as const;
