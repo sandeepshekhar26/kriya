@@ -53,7 +53,13 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
 - 🟡 Budgets/rate-limits — actions/minute sliding-window cap enforced (host stops the run);
   api-calls/hr still ⬜
 - 🟡 Ed25519 signed receipts → JSONL — works; **verifier** CLI delegated (see prompt) + tamper tests ⬜
-- ⬜ Policy linting + dev-mode "your policy is too permissive" warnings
+- ✅ Policy linting — `Policy::warnings()` reports on `*` rules that allow
+  everything, destructive-named patterns (delete/remove/destroy/drop/purge/wipe)
+  without `require_approval`, missing explicit catch-all, and missing
+  `budget.max_actions_per_minute`. Each concern is logged as `warn` at
+  `run_task` startup so devs see it the first time they hit Run. 4 new unit
+  tests cover wildcard allow, destructive-named without approval, missing
+  budget/wildcard, and a clean policy producing zero warnings.
 
 ## 4. State sync & protocol
 - 🟡 Request/response over Tauri IPC, full-state snapshots per step

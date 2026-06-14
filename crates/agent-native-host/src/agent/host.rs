@@ -96,6 +96,12 @@ pub fn run_task(
         )),
     );
 
+    // Lint the policy at run start. Each concern surfaces as a warn so devs
+    // notice obviously dangerous configurations the first time they hit Run.
+    for concern in policy.warnings() {
+        log(&app, AgentLog::warn(format!("policy: {concern}")));
+    }
+
     // Durable episodic memory across runs. Failure to open is non-fatal — the agent
     // still works, just without persistent recall.
     let memory = AgentMemory::open(&std::env::temp_dir().join("agent-native-memory.db")).ok();
