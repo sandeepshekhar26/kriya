@@ -66,7 +66,10 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
 - ⬜ Mobile (Flutter, SwiftUI, Jetpack Compose)
 - ⬜ Agent-native component library ("shadcn for agent-operable UI")
 - ⬜ Agent/skills registry; MCP-server generation (reverse-MCP)
-- ⬜ Reference apps beyond notes: task manager, spreadsheet, personal CRM
+- 🟡 Reference apps beyond notes: **task manager ✅** (apps/task-manager — six
+  typed actions including two approval-gated; its own `TaskPlanner` plugged into
+  the shared `agent-native-host` crate via `select_backend_with_default`).
+  Spreadsheet and personal CRM still ⬜.
 
 ## 7. Product / business (Phase 4)
 - ⬜ Open-core: Pro (multi-agent, cloud sync, audit dashboard), Enterprise (SAML, compliance)
@@ -80,12 +83,10 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
 4. ⬜ Second reference app (task manager) — proves generality, not a one-off.
 
 **Next up (in order):**
+- ✅ **Second reference app (task manager).** Shipped — two apps now share the
+  same crate, each plugging in their own scripted planner. Generality proven.
 - **Publish `agent-native-host` to crates.io + `@agent-native/core` to npm.**
-  Until both packages are public, the scaffolder template can't consume the new
-  shared crate by name and has to keep an embedded copy. Publishing unblocks
-  the template swap and is also the precondition for going public on GitHub.
-- **Then: second reference app (task manager).** A second app that consumes both
-  `@agent-native/core` and `agent-native-host` is the proof the framework is
-  generalized, not note-app-shaped. It also stress-tests the scaffolder by being
-  something *not* generated from it.
-- After those: the dev inspector (step-through + replay) is the next moat piece.
+  Until both are public, the scaffolder template still embeds the host code.
+  Publishing unblocks the template swap and is the precondition for going
+  public on GitHub.
+- After that: the dev inspector (step-through + replay) is the next moat piece.

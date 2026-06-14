@@ -1,0 +1,18 @@
+[package]
+name = "task-manager"
+version = "0.0.1"
+description = "agent-native reference task-manager app — second app on the same crate"
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "task_manager_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde_json = "1"
+agent-native-host = { path = "../../../crates/agent-native-host" }

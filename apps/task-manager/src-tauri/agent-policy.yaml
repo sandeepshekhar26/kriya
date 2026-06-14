@@ -1,0 +1,23 @@
+# Per-app agent policy. Loaded by the Rust host at startup; deny-by-default.
+# First matching rule wins.
+rules:
+  - action: "create_task"
+    allow: true
+    require_approval: false
+  - action: "complete_task"
+    allow: true
+    require_approval: false
+  - action: "set_priority"
+    allow: true
+    require_approval: false
+  - action: "delete_task"
+    allow: true
+    require_approval: true   # destructive — held for human approval
+  - action: "clear_completed"
+    allow: true
+    require_approval: true   # bulk destructive — held for human approval
+  - action: "*"
+    allow: false
+
+budget:
+  max_actions_per_minute: 60

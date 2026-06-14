@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Allows the task-manager webview to use core events and invoke app commands.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
