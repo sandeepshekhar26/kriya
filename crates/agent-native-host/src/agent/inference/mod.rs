@@ -3,10 +3,14 @@
 //!
 //! Everything behind this trait is swappable — deterministic today, an LLM tomorrow —
 //! without the host loop changing.
+//!
+//! The host crate ships three LLM backends. The "deterministic" backend (a scripted,
+//! zero-cost planner used for tests and demos) is **app-specific** and lives in each
+//! application; the app passes its deterministic as the `default` to
+//! [`select_backend_with_default`].
 
 pub mod anthropic;
 pub mod claude_cli;
-pub mod deterministic;
 pub mod ollama;
 
 use serde_json::Value;
@@ -43,13 +47,15 @@ pub trait Inference: Send {
     fn next_step(&mut self, ctx: &StepContext) -> Result<StepDecision, String>;
 }
 
-/// Select a backend from the `AGENT_BACKEND` env var. Defaults to the deterministic one.
-pub fn select_backend() -> Box<dyn Inference> {
+/// Select a backend from the `AGENT_BACKEND` env var, falling back to `default` when no
+/// LLM backend is requested. The default is whatever app-specific deterministic planner
+/// the consuming app supplies.
+pub fn select_backend_with_default(default: Box<dyn Inference>) -> Box<dyn Inference> {
     match std::env::var("AGENT_BACKEND").unwrap_or_default().as_str() {
         "claude-cli" | "claude" => Box::new(claude_cli::ClaudeCli::new()),
         "ollama" => Box::new(ollama::Ollama::new()),
         "anthropic" => Box::new(anthropic::Anthropic::new()),
-        _ => Box::new(deterministic::DeterministicOrganizer::new()),
+        _ => default,
     }
 }
 
@@ -98,7 +104,7 @@ pub(crate) fn build_prompt(ctx: &StepContext) -> String {
     };
 
     format!(
-        r#"You are the agent driving a desktop note app. Decide the SINGLE next action.
+        r#"You are the agent driving a desktop application. Decide the SINGLE next action.
 
 GOAL:
 {goal}

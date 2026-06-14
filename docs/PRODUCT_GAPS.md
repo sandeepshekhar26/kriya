@@ -54,10 +54,12 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
 - 🟡 CLI to dump registered actions as JSON — added in 1.1
 - ⬜ Templates, examples gallery, "build an agent app in <2 hours" tutorial
 - ⬜ OpenTelemetry traces; CI eval gate ("does my app still work with agents?")
-- ⬜ Extract Rust host into a shared crate (`agent-native-host`) so the scaffolder
-  template and `apps/note-app` consume one source of truth instead of duplicating
-  ~1,400 lines of Rust. Today's template ships a copy of the host code; the next
-  pass replaces that copy with a thin `Cargo.toml` dependency.
+- ✅ Extract Rust host into a shared crate (`agent-native-host`). `apps/note-app`
+  now path-depends on it and is ~110 lines of glue around `run_task` +
+  `select_backend_with_default`. Scaffolder template still ships an embedded
+  copy — the swap requires either (a) publishing the crate to crates.io and
+  using `agent-native-host = "0.1"`, or (b) restructuring the repo as a Cargo
+  workspace so the template can use a git dep. See follow-up below.
 
 ## 6. Breadth / ecosystem (the copy-resistance)
 - ⬜ Electron binding (`@agent-native/electron`) — largest JS audience
@@ -78,13 +80,12 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
 4. ⬜ Second reference app (task manager) — proves generality, not a one-off.
 
 **Next up (in order):**
-- **Extract the Rust host into a shared crate.** Today the scaffolder ships ~1,400
-  lines of duplicated host code. Pulling them into `crates/agent-native-host` (a
-  Cargo workspace member, eventually published to crates.io) eliminates the drift
-  risk *before* a third party clones the scaffold. This is the prerequisite for
-  trustworthy publishing — without it, every host bug fix is a two-place change.
+- **Publish `agent-native-host` to crates.io + `@agent-native/core` to npm.**
+  Until both packages are public, the scaffolder template can't consume the new
+  shared crate by name and has to keep an embedded copy. Publishing unblocks
+  the template swap and is also the precondition for going public on GitHub.
 - **Then: second reference app (task manager).** A second app that consumes both
-  `@agent-native/core` and the new `agent-native-host` crate is the proof the
-  framework is generalized, not note-app-shaped. It also stress-tests the
-  scaffolder by being something *not* generated from it.
+  `@agent-native/core` and `agent-native-host` is the proof the framework is
+  generalized, not note-app-shaped. It also stress-tests the scaffolder by being
+  something *not* generated from it.
 - After those: the dev inspector (step-through + replay) is the next moat piece.
