@@ -1,0 +1,10 @@
+# Pinned to a known-good stable for reproducible builds of the Tauri 2.11 tree.
+#
+# Note: the `brotli` build failure you may have seen is NOT a compiler issue — it is a
+# dependency split (brotli 8.0.3 uses alloc-no-stdlib 2.0.4 directly, while its alloc-stdlib
+# 0.2.3 pulled 3.0.0, so the `Allocator` traits don't unify). That is fixed in Cargo.lock by
+# pinning alloc-no-stdlib to a single version (2.0.4). This toolchain just keeps resolution
+# and codegen reproducible.
+[toolchain]
+channel = "1.90.0"
+components = ["rustfmt", "clippy"]

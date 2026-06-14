@@ -1,0 +1,22 @@
+# Per-app agent policy. Loaded by the Rust host at startup; if this file is missing the
+# host falls back to the same safe defaults shown here.
+#
+# Each rule matches an action id (exact, a `prefix_*` glob, or `*`). The first matching
+# rule wins. Deny-by-default: anything not matched is denied.
+rules:
+  - action: "increment"
+    allow: true
+    require_approval: false
+  - action: "set_*"
+    allow: true
+    require_approval: false
+  - action: "reset_*"
+    allow: true
+    require_approval: true   # held until a human approves
+  - action: "*"
+    allow: false
+
+# Optional rate budget. Caps how many actions the agent may take in any trailing
+# 60-second window; exceeding it stops the run. Omit `budget` for no cap.
+budget:
+  max_actions_per_minute: 60

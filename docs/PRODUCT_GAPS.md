@@ -46,11 +46,18 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
 - ⬜ Transport portability proven off-IPC (WebSocket dev inspector, gRPC cloud)
 
 ## 5. Developer experience
-- ⬜ `create-agent-app` scaffolder (like create-react-app) — **the viral on-ramp**
-- ⬜ Rich dev dashboard/inspector (step-through, replay sessions, export traces) — today: a log panel
+- ✅ `create-agent-app` scaffolder — `npm create agent-app@latest my-app` produces a
+  working counter-app starter (Tauri 2 + Rust host + React + SDK + all safety infra,
+  locked deps). Verified end-to-end: TS compiles, `cargo check --locked` passes.
+- 🟡 Rich dev dashboard/inspector — today an in-app log panel; step-through, replay
+  sessions, export traces still ⬜
 - 🟡 CLI to dump registered actions as JSON — added in 1.1
 - ⬜ Templates, examples gallery, "build an agent app in <2 hours" tutorial
 - ⬜ OpenTelemetry traces; CI eval gate ("does my app still work with agents?")
+- ⬜ Extract Rust host into a shared crate (`agent-native-host`) so the scaffolder
+  template and `apps/note-app` consume one source of truth instead of duplicating
+  ~1,400 lines of Rust. Today's template ships a copy of the host code; the next
+  pass replaces that copy with a thin `Cargo.toml` dependency.
 
 ## 6. Breadth / ecosystem (the copy-resistance)
 - ⬜ Electron binding (`@agent-native/electron`) — largest JS audience
@@ -65,7 +72,19 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
 - ⬜ Integrations marketplace (Stripe/Slack/GitHub/Salesforce via credential vaults)
 
 ## Near-term focus (what actually builds the moat next)
-1. Real inference backends (Ollama + Anthropic) → the framework is usable for real tasks.
-2. Human-approval queue + budget enforcement → the safety story that enterprises pay for.
-3. `create-agent-app` + a real inspector → the DX that drives GitHub virality.
-4. Second reference app (task manager) → proves generality, not a one-off.
+1. ✅ Real inference backends (Ollama + Anthropic) — usable for real tasks.
+2. ✅ Human-approval queue + budget enforcement — safety story enterprises pay for.
+3. 🟡 `create-agent-app` ✅ + a real inspector ⬜ — DX that drives GitHub virality.
+4. ⬜ Second reference app (task manager) — proves generality, not a one-off.
+
+**Next up (in order):**
+- **Extract the Rust host into a shared crate.** Today the scaffolder ships ~1,400
+  lines of duplicated host code. Pulling them into `crates/agent-native-host` (a
+  Cargo workspace member, eventually published to crates.io) eliminates the drift
+  risk *before* a third party clones the scaffold. This is the prerequisite for
+  trustworthy publishing — without it, every host bug fix is a two-place change.
+- **Then: second reference app (task manager).** A second app that consumes both
+  `@agent-native/core` and the new `agent-native-host` crate is the proof the
+  framework is generalized, not note-app-shaped. It also stress-tests the
+  scaffolder by being something *not* generated from it.
+- After those: the dev inspector (step-through + replay) is the next moat piece.
