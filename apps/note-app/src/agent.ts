@@ -139,7 +139,26 @@ async function ensureWired() {
     onDone?.(event.payload);
     onDone = null;
     setPendingApproval(null);
+    bumpRunCount();
   });
+}
+
+// ---- completed-run counter (drives MemoryPanel refresh) ---------------------
+
+let runCount = 0;
+const runCountListeners = new Set<() => void>();
+function bumpRunCount() {
+  runCount += 1;
+  for (const l of runCountListeners) l();
+}
+export function useRunCount(): number {
+  return useSyncExternalStore(
+    (cb) => {
+      runCountListeners.add(cb);
+      return () => runCountListeners.delete(cb);
+    },
+    () => runCount
+  );
 }
 
 /** Kick off an autonomous task. Resolves when the host reports done. */
