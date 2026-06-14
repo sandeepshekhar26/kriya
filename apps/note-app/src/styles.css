@@ -241,3 +241,65 @@ main {
   color: var(--muted);
   overflow-x: auto;
 }
+
+/* approval modal */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.modal {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 22px;
+  width: 420px;
+  max-width: calc(100vw - 40px);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+.modal h3 {
+  margin: 0 0 4px;
+  font-size: 16px;
+}
+.modal-sub {
+  margin: 0 0 14px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.modal-action {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+}
+.modal-action-id {
+  font-family: ui-monospace, monospace;
+  font-size: 13px;
+  color: #ff9e9e;
+}
+.modal-action pre {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--text);
+  overflow-x: auto;
+}
+.modal-reason {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+  font-style: italic;
+}
+.modal-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+button.danger {
+  background: #7a2f2f;
+  border-color: #b85454;
+}

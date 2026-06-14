@@ -11,8 +11,8 @@ use tauri::{AppHandle, Emitter};
 use crate::audit::{now_ms, Receipt, Signer};
 use crate::permissions::{Decision, Policy};
 use crate::protocol::{
-    AgentActionRequest, AgentActionResult, AgentDone, AgentLog, AgentStartRequest, EVENT_ACTION,
-    EVENT_DONE, EVENT_LOG,
+    AgentActionRequest, AgentActionResult, AgentApprovalRequest, AgentDone, AgentLog,
+    AgentStartRequest, EVENT_ACTION, EVENT_APPROVAL, EVENT_DONE, EVENT_LOG,
 };
 
 use super::inference::{select_backend, StepContext, StepDecision, StepRecord};
@@ -20,16 +20,60 @@ use super::inference::{select_backend, StepContext, StepDecision, StepRecord};
 /// Shared registry of in-flight steps awaiting a result from the frontend.
 pub type PendingMap = Arc<Mutex<std::collections::HashMap<String, Sender<AgentActionResult>>>>;
 
+/// Shared registry of in-flight steps awaiting a human approval decision.
+pub type ApprovalMap = Arc<Mutex<std::collections::HashMap<String, Sender<bool>>>>;
+
 const MAX_STEPS: u32 = 50;
 const RESULT_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long to wait for a human to approve a held action before treating it as denied.
+const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 
 fn log(app: &AppHandle, entry: AgentLog) {
     let _ = app.emit(EVENT_LOG, entry);
 }
 
+/// Ask the frontend for a human decision on a held action and block until it arrives
+/// (or the timeout elapses, which counts as a denial). The signing key and policy stay
+/// host-side; the agent can only *propose* an action that needs approval.
+fn request_approval(
+    app: &AppHandle,
+    approvals: &ApprovalMap,
+    step_id: &str,
+    action_id: &str,
+    params: &serde_json::Value,
+    reasoning: &str,
+) -> bool {
+    let (tx, rx) = std::sync::mpsc::channel::<bool>();
+    approvals.lock().unwrap().insert(step_id.to_string(), tx);
+
+    log(
+        app,
+        AgentLog {
+            step_id: Some(step_id.to_string()),
+            level: "warn".into(),
+            message: format!("{action_id} requires approval — waiting for a human…"),
+            detail: None,
+        },
+    );
+    let _ = app.emit(
+        EVENT_APPROVAL,
+        AgentApprovalRequest {
+            step_id: step_id.to_string(),
+            action_id: action_id.to_string(),
+            params: params.clone(),
+            reasoning: reasoning.to_string(),
+        },
+    );
+
+    let approved = rx.recv_timeout(APPROVAL_TIMEOUT).unwrap_or(false);
+    approvals.lock().unwrap().remove(step_id);
+    approved
+}
+
 pub fn run_task(
     app: AppHandle,
     pending: PendingMap,
+    approvals: ApprovalMap,
     policy: Arc<Policy>,
     signer: Arc<Signer>,
     req: AgentStartRequest,
@@ -75,18 +119,44 @@ pub fn run_task(
             StepDecision::Call { action_id, params, reasoning } => (action_id, params, reasoning),
         };
 
+        // One id correlates this step across the approval request, the action request, and
+        // the signed receipt.
+        let step_id = uuid::Uuid::new_v4().to_string();
+
         // Permission gate — the host decides, not the agent.
         match policy.check(&action_id) {
             Decision::Allow => {}
             Decision::RequiresApproval => {
+                let approved = request_approval(
+                    &app,
+                    &approvals,
+                    &step_id,
+                    &action_id,
+                    &params,
+                    &reasoning,
+                );
+                if !approved {
+                    log(
+                        &app,
+                        AgentLog {
+                            step_id: Some(step_id.clone()),
+                            level: "warn".into(),
+                            message: format!("{action_id} not approved — skipped."),
+                            detail: None,
+                        },
+                    );
+                    history.push(StepRecord { action_id, params, success: false });
+                    continue;
+                }
                 log(
                     &app,
-                    AgentLog::warn(format!(
-                        "{action_id} requires human approval; no approval queue in Phase 0 — skipping."
-                    )),
+                    AgentLog {
+                        step_id: Some(step_id.clone()),
+                        level: "info".into(),
+                        message: format!("{action_id} approved by human."),
+                        detail: None,
+                    },
                 );
-                history.push(StepRecord { action_id, params, success: false });
-                continue;
             }
             Decision::Deny => {
                 log(
@@ -99,7 +169,6 @@ pub fn run_task(
         }
 
         // Dispatch to the frontend and wait for it to run the handler.
-        let step_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = std::sync::mpsc::channel::<AgentActionResult>();
         pending.lock().unwrap().insert(step_id.clone(), tx);
 

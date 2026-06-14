@@ -60,9 +60,27 @@ export interface AgentLog {
   detail?: unknown;
 }
 
+/**
+ * host → app: this action needs a human's go-ahead before it runs (per the policy's
+ * `require_approval`). The host pauses until the app replies with an `AgentApprovalResponse`.
+ */
+export interface AgentApprovalRequest {
+  stepId: string;
+  actionId: string;
+  params: Record<string, unknown>;
+  reasoning: string;
+}
+
+/** app → host: a human's decision on a pending approval. */
+export interface AgentApprovalResponse {
+  stepId: string;
+  approved: boolean;
+}
+
 /** Tauri event channel names (host → app). */
 export const AgentEvents = {
   Action: "agent://action",
+  Approval: "agent://approval",
   Done: "agent://done",
   Log: "agent://log",
 } as const;
@@ -71,4 +89,5 @@ export const AgentEvents = {
 export const AgentCommands = {
   Start: "agent_start",
   ActionResult: "agent_action_result",
+  ApprovalResponse: "agent_approval_response",
 } as const;

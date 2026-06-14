@@ -58,6 +58,24 @@ pub struct AgentActionResult {
     pub state: Value,
 }
 
+/// host -> app: this action needs human approval before it runs.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentApprovalRequest {
+    pub step_id: String,
+    pub action_id: String,
+    pub params: Value,
+    pub reasoning: String,
+}
+
+/// app -> host: a human's decision on a pending approval.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentApprovalResponse {
+    pub step_id: String,
+    pub approved: bool,
+}
+
 /// host -> app: the task is complete.
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentDone {
@@ -88,5 +106,6 @@ impl AgentLog {
 
 /// Tauri channel/command names (kept in sync with the SDK's `AgentEvents`/`AgentCommands`).
 pub const EVENT_ACTION: &str = "agent://action";
+pub const EVENT_APPROVAL: &str = "agent://approval";
 pub const EVENT_DONE: &str = "agent://done";
 pub const EVENT_LOG: &str = "agent://log";
