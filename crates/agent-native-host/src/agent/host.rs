@@ -81,11 +81,16 @@ pub fn run_task(
     mut backend: Box<dyn Inference>,
     req: AgentStartRequest,
 ) -> Result<AgentDone, String> {
+    // Stable id for this run. Stamped on every episode written below, so a crashed
+    // run can be reconstructed end-to-end from durable memory.
+    let run_id = uuid::Uuid::new_v4().to_string();
+
     log(
         &app,
         AgentLog::info(format!(
-            "backend={} · audit pubkey={} · log={}",
+            "backend={} · run_id={} · audit pubkey={} · log={}",
             backend.name(),
+            &run_id,
             signer.public_key(),
             signer.log_path().display()
         )),
@@ -121,6 +126,47 @@ pub fn run_task(
     let mut history: Vec<StepRecord> = Vec::new();
     let mut steps: u32 = 0;
     let mut budget = BudgetTracker::new(policy.max_actions_per_minute());
+
+    // Resume path: if requested and we have a prior run for this goal, reseed
+    // history so the inference backend doesn't re-propose actions already taken.
+    // The new run gets its own run_id; resumed steps are NOT re-recorded.
+    if req.resume {
+        if let Some(m) = &memory {
+            match m.last_resumable_run(&req.goal) {
+                Ok(Some(prior)) => {
+                    let count = prior.completed.len();
+                    for step in prior.completed {
+                        history.push(StepRecord {
+                            action_id: step.action_id,
+                            params: step.params,
+                            success: step.success,
+                        });
+                    }
+                    log(
+                        &app,
+                        AgentLog::info(format!(
+                            "resumed from prior run {} — {} completed step(s) reseeded",
+                            &prior.run_id, count
+                        )),
+                    );
+                }
+                Ok(None) => {
+                    log(
+                        &app,
+                        AgentLog::info(format!(
+                            "resume requested but no prior run found for this goal — starting fresh"
+                        )),
+                    );
+                }
+                Err(err) => {
+                    log(
+                        &app,
+                        AgentLog::warn(format!("resume lookup failed: {err} — starting fresh")),
+                    );
+                }
+            }
+        }
+    }
 
     loop {
         if steps >= MAX_STEPS {
@@ -271,10 +317,13 @@ pub fn run_task(
             },
         );
 
-        // Persist this action to durable episodic memory.
+        // Persist this action to durable episodic memory, stamped with the run_id +
+        // goal so resume can reconstruct this run if the process dies.
         if let Some(m) = &memory {
             let _ = m.record(
                 signed.receipt.ts_ms,
+                &run_id,
+                &req.goal,
                 &action_id,
                 &params,
                 result.success,
