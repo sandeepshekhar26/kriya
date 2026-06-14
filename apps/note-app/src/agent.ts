@@ -15,6 +15,7 @@ import {
   getToolSchemas,
   type AgentActionRequest,
   type AgentApprovalRequest,
+  type AgentAwaitStep,
   type AgentDone,
   type AgentLog,
 } from "@agent-native/core";
@@ -98,6 +99,38 @@ export async function respondToApproval(approved: boolean): Promise<void> {
   });
 }
 
+// ---- step-mode gate (observable) --------------------------------------------
+
+let pendingAwaitStep: AgentAwaitStep | null = null;
+const awaitStepListeners = new Set<() => void>();
+function setPendingAwaitStep(req: AgentAwaitStep | null) {
+  pendingAwaitStep = req;
+  for (const l of awaitStepListeners) l();
+}
+export function useAwaitStep(): AgentAwaitStep | null {
+  return useSyncExternalStore(
+    (cb) => {
+      awaitStepListeners.add(cb);
+      return () => awaitStepListeners.delete(cb);
+    },
+    () => pendingAwaitStep
+  );
+}
+
+/** Tell the host to take the next step (proceed=true) or stop the run. */
+export async function advanceStep(proceed: boolean): Promise<void> {
+  const gate = pendingAwaitStep;
+  if (!gate) return;
+  setPendingAwaitStep(null);
+  pushLog({
+    level: proceed ? "info" : "warn",
+    message: proceed ? `step-mode: advancing step ${gate.stepNumber}` : `step-mode: stopping`,
+  });
+  await invoke(AgentCommands.StepAdvance, {
+    response: { gateId: gate.gateId, proceed },
+  });
+}
+
 // ---- event wiring -----------------------------------------------------------
 
 /** Resolver for the in-flight task, fired by the host's `done` event. */
@@ -133,12 +166,17 @@ async function ensureWired() {
     setPendingApproval(event.payload);
   });
 
+  await listen<AgentAwaitStep>(AgentEvents.AwaitStep, (event) => {
+    setPendingAwaitStep(event.payload);
+  });
+
   await listen<AgentLog>(AgentEvents.Log, (event) => pushLog(event.payload));
 
   await listen<AgentDone>(AgentEvents.Done, (event) => {
     onDone?.(event.payload);
     onDone = null;
     setPendingApproval(null);
+    setPendingAwaitStep(null);
     bumpRunCount();
   });
 }
@@ -161,11 +199,21 @@ export function useRunCount(): number {
   );
 }
 
+export interface RunOptions {
+  /** Reseed history from a prior run for the same goal (durable memory). */
+  resume?: boolean;
+  /** Pause before each decision and wait for the developer to advance. */
+  stepMode?: boolean;
+}
+
 /** Kick off an autonomous task. Resolves when the host reports done. */
-export async function runAgentTask(goal: string): Promise<AgentDone> {
+export async function runAgentTask(goal: string, opts: RunOptions = {}): Promise<AgentDone> {
   await ensureWired();
   setRunning(true);
-  pushLog({ level: "info", message: `goal: ${goal}` });
+  pushLog({
+    level: "info",
+    message: opts.stepMode ? `goal (step-mode): ${goal}` : `goal: ${goal}`,
+  });
 
   const done = new Promise<AgentDone>((resolve) => {
     onDone = resolve;
@@ -177,6 +225,8 @@ export async function runAgentTask(goal: string): Promise<AgentDone> {
         goal,
         state: store.getState(),
         tools: getToolSchemas(),
+        resume: opts.resume ?? false,
+        stepMode: opts.stepMode ?? false,
       },
     });
     const result = await done;

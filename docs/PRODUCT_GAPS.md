@@ -85,8 +85,15 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
   is suppressed while typing in inputs so the inspector's filter box still works.
   Both reference apps consume the package; styles ship via
   `@agent-native/inspector/styles.css` and are themable through CSS variables.
-  Real *live* in-host pause-between-steps (so a dev can break/inspect mid-run)
-  still ⬜ — pending a host-side pause channel.
+  ✅ Live in-host pause-between-steps shipped: `AgentStartRequest.stepMode:
+  true` makes the host pause before *each* decision and emit an
+  `agent://await_step` event with the upcoming step number + last action +
+  last outcome. A new `<StepGate>` component in the inspector renders the
+  pause card with `step →` / `stop` buttons (Space/Enter advances, Esc
+  stops, both ignore typing in inputs). Both apps wire the
+  `agent_step_advance` Tauri command. note-app surfaces a "step mode"
+  checkbox in the header. 5-minute timeout treats a wandering-off dev as a
+  stop.
 - 🟡 CLI to dump registered actions as JSON — added in 1.1
 - ⬜ Templates, examples gallery, "build an agent app in <2 hours" tutorial
 - ⬜ OpenTelemetry traces; CI eval gate ("does my app still work with agents?")

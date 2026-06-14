@@ -35,6 +35,11 @@ pub struct AgentStartRequest {
     /// continues from there. Defaults to false — set it explicitly to opt in.
     #[serde(default)]
     pub resume: bool,
+    /// If true, the host pauses *before each decision* and waits for the frontend
+    /// to send `agent_step_advance`. Lets a developer single-step the agent the
+    /// same way you'd single-step a debugger. Defaults to false (run to completion).
+    #[serde(default)]
+    pub step_mode: bool,
 }
 
 /// host -> app: execute this action on the agent's behalf.
@@ -81,6 +86,31 @@ pub struct AgentApprovalResponse {
     pub approved: bool,
 }
 
+/// host -> app: paused waiting for the developer to step. Sent only in step_mode.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentAwaitStep {
+    /// Correlation id for the pending advance. Matches the response.
+    pub gate_id: String,
+    /// 1-indexed counter of which step the host is about to take.
+    pub step_number: u32,
+    /// Action id of the previous step (None on the first pause).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_action_id: Option<String>,
+    /// Whether the previous action succeeded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_success: Option<bool>,
+}
+
+/// app -> host: developer's decision when paused — proceed or stop the run.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentStepAdvance {
+    pub gate_id: String,
+    /// `true` proceeds to the next step; `false` ends the run gracefully.
+    pub proceed: bool,
+}
+
 /// host -> app: the task is complete.
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentDone {
@@ -112,5 +142,6 @@ impl AgentLog {
 /// Tauri channel/command names (kept in sync with the SDK's `AgentEvents`/`AgentCommands`).
 pub const EVENT_ACTION: &str = "agent://action";
 pub const EVENT_APPROVAL: &str = "agent://approval";
+pub const EVENT_AWAIT_STEP: &str = "agent://await_step";
 pub const EVENT_DONE: &str = "agent://done";
 pub const EVENT_LOG: &str = "agent://log";

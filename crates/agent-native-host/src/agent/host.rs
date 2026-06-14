@@ -13,8 +13,9 @@ use crate::budget::BudgetTracker;
 use crate::memory::AgentMemory;
 use crate::permissions::{Decision, Policy};
 use crate::protocol::{
-    AgentActionRequest, AgentActionResult, AgentApprovalRequest, AgentDone, AgentLog,
-    AgentStartRequest, EVENT_ACTION, EVENT_APPROVAL, EVENT_DONE, EVENT_LOG,
+    AgentActionRequest, AgentActionResult, AgentApprovalRequest, AgentAwaitStep, AgentDone,
+    AgentLog, AgentStartRequest, EVENT_ACTION, EVENT_APPROVAL, EVENT_AWAIT_STEP, EVENT_DONE,
+    EVENT_LOG,
 };
 
 use super::inference::{Inference, StepContext, StepDecision, StepRecord};
@@ -25,10 +26,16 @@ pub type PendingMap = Arc<Mutex<std::collections::HashMap<String, Sender<AgentAc
 /// Shared registry of in-flight steps awaiting a human approval decision.
 pub type ApprovalMap = Arc<Mutex<std::collections::HashMap<String, Sender<bool>>>>;
 
+/// Shared registry of step-mode gates awaiting an advance/stop decision.
+pub type StepAdvanceMap = Arc<Mutex<std::collections::HashMap<String, Sender<bool>>>>;
+
 const MAX_STEPS: u32 = 50;
 const RESULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long to wait for a human to approve a held action before treating it as denied.
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
+/// How long to wait for a step-mode advance before treating it as a stop. Same budget as
+/// approval so a dev who walks away doesn't leave the host blocked forever.
+const STEP_TIMEOUT: Duration = Duration::from_secs(300);
 
 fn log(app: &AppHandle, entry: AgentLog) {
     let _ = app.emit(EVENT_LOG, entry);
@@ -72,10 +79,48 @@ fn request_approval(
     approved
 }
 
+/// Pause the loop and wait for the frontend to send `agent_step_advance`.
+/// Returns `true` to proceed, `false` to stop the run (developer hit Stop or the
+/// timeout elapsed). Step-mode only.
+fn await_step(
+    app: &AppHandle,
+    advances: &StepAdvanceMap,
+    step_number: u32,
+    last_action_id: Option<&str>,
+    last_success: Option<bool>,
+) -> bool {
+    let gate_id = uuid::Uuid::new_v4().to_string();
+    let (tx, rx) = std::sync::mpsc::channel::<bool>();
+    advances.lock().unwrap().insert(gate_id.clone(), tx);
+
+    log(
+        app,
+        AgentLog::info(format!(
+            "step-mode: paused before step {step_number} (gate {})",
+            &gate_id[..gate_id.len().min(8)]
+        )),
+    );
+
+    let _ = app.emit(
+        EVENT_AWAIT_STEP,
+        AgentAwaitStep {
+            gate_id: gate_id.clone(),
+            step_number,
+            last_action_id: last_action_id.map(str::to_string),
+            last_success,
+        },
+    );
+
+    let proceed = rx.recv_timeout(STEP_TIMEOUT).unwrap_or(false);
+    advances.lock().unwrap().remove(&gate_id);
+    proceed
+}
+
 pub fn run_task(
     app: AppHandle,
     pending: PendingMap,
     approvals: ApprovalMap,
+    advances: StepAdvanceMap,
     policy: Arc<Policy>,
     signer: Arc<Signer>,
     mut backend: Box<dyn Inference>,
@@ -174,11 +219,35 @@ pub fn run_task(
         }
     }
 
+    // Tracks the previous step's outcome to surface in each step-mode pause.
+    let mut last_action_id: Option<String> = None;
+    let mut last_success: Option<bool> = None;
+
     loop {
         if steps >= MAX_STEPS {
             let done = AgentDone { summary: "Stopped: reached step limit.".into(), steps };
             let _ = app.emit(EVENT_DONE, &done);
             return Ok(done);
+        }
+
+        // Step-mode: pause and wait for the developer to advance.
+        if req.step_mode {
+            let proceed = await_step(
+                &app,
+                &advances,
+                steps + 1,
+                last_action_id.as_deref(),
+                last_success,
+            );
+            if !proceed {
+                let done = AgentDone {
+                    summary: "Stopped by developer (step-mode).".into(),
+                    steps,
+                };
+                log(&app, AgentLog::info("step-mode: stop requested".to_string()));
+                let _ = app.emit(EVENT_DONE, &done);
+                return Ok(done);
+            }
         }
 
         let decision = {
@@ -338,6 +407,8 @@ pub fn run_task(
             );
         }
 
+        last_action_id = Some(action_id.clone());
+        last_success = Some(result.success);
         history.push(StepRecord {
             action_id,
             params,

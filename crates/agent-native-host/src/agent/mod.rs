@@ -1,4 +1,4 @@
 pub mod host;
 pub mod inference;
 
-pub use host::{run_task, ApprovalMap, PendingMap};
+pub use host::{run_task, ApprovalMap, PendingMap, StepAdvanceMap};
