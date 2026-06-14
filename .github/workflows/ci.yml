@@ -1,0 +1,134 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel in-flight runs on the same ref. Saves CI minutes on rapid pushes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node:
+    name: node (sdk + inspector + apps tsc)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: install workspace
+        run: npm install --no-audit --no-fund
+
+      - name: build @agent-native/core
+        run: npm run build --workspace @agent-native/core
+
+      - name: test @agent-native/core
+        run: npm run test --workspace @agent-native/core
+
+      - name: build @agent-native/inspector
+        run: npm run build --workspace @agent-native/inspector
+
+      - name: typecheck note-app
+        run: npx tsc --noEmit
+        working-directory: apps/note-app
+
+      - name: typecheck task-manager
+        run: npx tsc --noEmit
+        working-directory: apps/task-manager
+
+  rust:
+    name: rust (host crate tests + apps cargo check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tauri 2 system deps. Pulled from the Tauri 2 prerequisites page.
+      - name: install tauri system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.90.0"
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Share the cache across all three crate roots.
+          workspaces: |
+            crates/agent-native-host
+            apps/note-app/src-tauri
+            apps/task-manager/src-tauri
+
+      - name: test agent-native-host
+        working-directory: crates/agent-native-host
+        run: cargo test --locked
+
+      - name: cargo check note-app backend
+        working-directory: apps/note-app/src-tauri
+        run: cargo check --locked
+
+      - name: cargo check task-manager backend
+        working-directory: apps/task-manager/src-tauri
+        run: cargo check --locked
+
+  scaffolder-smoke:
+    name: scaffolder (generate + tsc the output)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [node]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: install workspace
+        run: npm install --no-audit --no-fund
+
+      - name: build core (needed by scaffolded app's tsc)
+        run: npm run build --workspace @agent-native/core
+
+      - name: build inspector
+        run: npm run build --workspace @agent-native/inspector
+
+      - name: scaffold a sample app
+        run: |
+          cd "$RUNNER_TEMP"
+          node "$GITHUB_WORKSPACE/packages/create-agent-app/bin/index.mjs" ci-smoke
+
+      - name: verify scaffolded files
+        run: |
+          cd "$RUNNER_TEMP/ci-smoke"
+          test -f README.md
+          test -f package.json
+          test -f src-tauri/Cargo.toml
+          test -f src/actions.ts
+          # No unsubstituted placeholders
+          ! grep -r '{{' . --include='*.json' --include='*.toml' --include='*.rs' --include='*.ts' --include='*.tsx' --include='*.md'
+
+      - name: typecheck the scaffolded app against the in-repo workspace
+        run: |
+          # Move scaffolded app under apps/ so workspace resolves @agent-native/*
+          mv "$RUNNER_TEMP/ci-smoke" "$GITHUB_WORKSPACE/apps/ci-smoke"
+          npm install --no-audit --no-fund
+          cd "$GITHUB_WORKSPACE/apps/ci-smoke"
+          npx tsc --noEmit
