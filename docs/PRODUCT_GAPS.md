@@ -20,7 +20,9 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
 - ✅ Step loop, swappable `Inference` trait, deterministic + claude-cli backends
 - 🟡 Real inference backends: Ollama (HTTP) + Anthropic API added behind the trait
   (compile-verified; live runs pending a local model / API key). OpenAI still ⬜.
-- ⬜ **Persistent memory**: episodic log + state snapshots + vector recall (SQLite + embeddings)
+- 🟡 **Persistent memory**: episodic log persisted to SQLite (every action across runs,
+  newest-first query via `agent_memory_recent`, count surfaced at run start). State
+  snapshots + vector recall still ⬜.
 - ⬜ Resume-ability (crash/pause → resume from last completed action with full context)
 - ⬜ Retry/backoff, graceful "this is too hard → escalate to frontier model" fallback
 - ⬜ Multi-agent orchestration (concurrent agents per app)

@@ -10,6 +10,7 @@ use tauri::{AppHandle, Emitter};
 
 use crate::audit::{now_ms, Receipt, Signer};
 use crate::budget::BudgetTracker;
+use crate::memory::AgentMemory;
 use crate::permissions::{Decision, Policy};
 use crate::protocol::{
     AgentActionRequest, AgentActionResult, AgentApprovalRequest, AgentDone, AgentLog,
@@ -89,6 +90,15 @@ pub fn run_task(
             signer.log_path().display()
         )),
     );
+
+    // Durable episodic memory across runs. Failure to open is non-fatal — the agent
+    // still works, just without persistent recall.
+    let memory = AgentMemory::open(&std::env::temp_dir().join("agent-native-memory.db")).ok();
+    if let Some(m) = &memory {
+        if let Ok(n) = m.count() {
+            log(&app, AgentLog::info(format!("memory: {n} past episodes on record")));
+        }
+    }
 
     let mut state = req.state.clone();
     let mut history: Vec<StepRecord> = Vec::new();
@@ -242,6 +252,18 @@ pub fn run_task(
                 detail: None,
             },
         );
+
+        // Persist this action to durable episodic memory.
+        if let Some(m) = &memory {
+            let _ = m.record(
+                signed.receipt.ts_ms,
+                &action_id,
+                &params,
+                result.success,
+                &reasoning,
+                &signed.signature,
+            );
+        }
 
         history.push(StepRecord {
             action_id,
