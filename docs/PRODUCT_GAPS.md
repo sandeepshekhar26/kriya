@@ -8,7 +8,9 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
 
 ## 1. Core SDK (`@agent-native/core`)
 - ✅ `registerAction`, typed schemas, MCP-style `getToolSchemas()`
-- 🟡 Runtime param validation (types/enum/array/required) — added in 1.1
+- ✅ Runtime param validation (types/enum/array/required) + 13-test suite
+- ⬜ Standards-compliant **JSON Schema** export (delegated — see prompt) so any MCP client
+  consumes schemas directly
 - ⬜ Action **composition** (a parent action calling child actions)
 - ⬜ Action **versioning + migrations** (v1→v2 with guides) — field exists, no machinery
 - ⬜ Framework-agnostic bindings (Vue/Svelte/Solid), not just React
@@ -16,7 +18,8 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
 
 ## 2. Agent runtime (Rust host)
 - ✅ Step loop, swappable `Inference` trait, deterministic + claude-cli backends
-- ⬜ Real inference backends: Ollama (HTTP), Anthropic API, OpenAI — behind the trait
+- 🟡 Real inference backends: Ollama (HTTP) + Anthropic API added behind the trait
+  (compile-verified; live runs pending a local model / API key). OpenAI still ⬜.
 - ⬜ **Persistent memory**: episodic log + state snapshots + vector recall (SQLite + embeddings)
 - ⬜ Resume-ability (crash/pause → resume from last completed action with full context)
 - ⬜ Retry/backoff, graceful "this is too hard → escalate to frontier model" fallback
@@ -24,8 +27,10 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
 - ⬜ Separate-process agent host (don't share Tauri's main thread) + latency profiling (<500ms p50)
 
 ## 3. Permissions, approval & audit
-- 🟡 YAML policy + deny-by-default + `RequiresApproval` decision (currently logged & skipped)
-- ⬜ **Human-approval queue**: pause, surface modal, wait, timeout, resume
+- ✅ YAML policy + deny-by-default + `RequiresApproval` decision
+- ✅ **Human-approval queue**: host pauses on a guarded action, emits `agent://approval`,
+  blocks on a per-step channel (5-min timeout = deny), frontend modal approve/deny, resumes
+- ⬜ Approval **queue UI** for multiple pending approvals + per-action policy editor in-app
 - ⬜ Budgets/rate-limits enforced (actions/min, api-calls/hr) — present in policy schema only
 - 🟡 Ed25519 signed receipts → JSONL — works; needs a **verifier** tool + tamper tests
 - ⬜ Policy linting + dev-mode "your policy is too permissive" warnings

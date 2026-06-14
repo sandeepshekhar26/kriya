@@ -14,6 +14,7 @@ import {
   dispatchAction,
   getToolSchemas,
   type AgentActionRequest,
+  type AgentApprovalRequest,
   type AgentDone,
   type AgentLog,
 } from "@agent-native/core";
@@ -64,6 +65,39 @@ export function useAgentRunning(): boolean {
   );
 }
 
+// ---- pending approval (observable) ------------------------------------------
+
+let pendingApproval: AgentApprovalRequest | null = null;
+const approvalListeners = new Set<() => void>();
+function setPendingApproval(req: AgentApprovalRequest | null) {
+  pendingApproval = req;
+  for (const l of approvalListeners) l();
+}
+export function usePendingApproval(): AgentApprovalRequest | null {
+  return useSyncExternalStore(
+    (cb) => {
+      approvalListeners.add(cb);
+      return () => approvalListeners.delete(cb);
+    },
+    () => pendingApproval
+  );
+}
+
+/** Send the human's approve/deny decision back to the host. */
+export async function respondToApproval(approved: boolean): Promise<void> {
+  const req = pendingApproval;
+  if (!req) return;
+  setPendingApproval(null);
+  pushLog({
+    stepId: req.stepId,
+    level: approved ? "info" : "warn",
+    message: `human ${approved ? "approved" : "denied"} ${req.actionId}`,
+  });
+  await invoke(AgentCommands.ApprovalResponse, {
+    response: { stepId: req.stepId, approved },
+  });
+}
+
 // ---- event wiring -----------------------------------------------------------
 
 /** Resolver for the in-flight task, fired by the host's `done` event. */
@@ -94,11 +128,17 @@ async function ensureWired() {
     });
   });
 
+  // The host holds an action that needs a human's go-ahead; surface it for the modal.
+  await listen<AgentApprovalRequest>(AgentEvents.Approval, (event) => {
+    setPendingApproval(event.payload);
+  });
+
   await listen<AgentLog>(AgentEvents.Log, (event) => pushLog(event.payload));
 
   await listen<AgentDone>(AgentEvents.Done, (event) => {
     onDone?.(event.payload);
     onDone = null;
+    setPendingApproval(null);
   });
 }
 

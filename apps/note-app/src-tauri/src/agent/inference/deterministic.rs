@@ -33,6 +33,44 @@ impl Inference for DeterministicOrganizer {
             .and_then(Value::as_array)
             .ok_or_else(|| "state.notes missing or not an array".to_string())?;
 
+        // Delete-style goals propose delete_note (which the policy holds for approval).
+        // Match explicit removal phrases so an organize goal that merely says "do not
+        // delete notes" is NOT mistaken for a deletion task.
+        let goal = ctx.goal.to_lowercase();
+        let wants_delete = ["delete every", "delete all", "remove every", "remove all"]
+            .iter()
+            .any(|p| goal.contains(p));
+        if wants_delete {
+            let target = ["work", "shopping", "personal", "ideas"]
+                .into_iter()
+                .find(|c| goal.contains(c));
+            for note in notes {
+                let id = note.get("id").and_then(Value::as_str).unwrap_or_default();
+                if id.is_empty() || self.attempted.contains(id) {
+                    continue;
+                }
+                let category = note.get("category").and_then(Value::as_str).unwrap_or_default();
+                if let Some(t) = target {
+                    if category != t {
+                        continue;
+                    }
+                }
+                let title = note.get("title").and_then(Value::as_str).unwrap_or_default();
+                self.attempted.insert(id.to_string());
+                return Ok(StepDecision::Call {
+                    action_id: "delete_note".to_string(),
+                    params: json!({ "id": id }),
+                    reasoning: format!(
+                        "Goal asks to remove {} notes; proposing to delete \"{title}\".",
+                        target.unwrap_or("matching")
+                    ),
+                });
+            }
+            return Ok(StepDecision::Done {
+                summary: "No more matching notes to remove.".to_string(),
+            });
+        }
+
         for note in notes {
             let id = note.get("id").and_then(Value::as_str).unwrap_or_default();
             let category = note.get("category").and_then(Value::as_str).unwrap_or_default();
@@ -76,6 +114,17 @@ mod tests {
 
     fn note(id: &str, title: &str, content: &str) -> Value {
         json!({ "id": id, "title": title, "content": content, "category": "" })
+    }
+
+    fn note_cat(id: &str, category: &str) -> Value {
+        json!({ "id": id, "title": id, "content": "", "category": category })
+    }
+
+    fn step(org: &mut DeterministicOrganizer, state: &Value, goal: &str) -> StepDecision {
+        let tools: Vec<ToolSchema> = vec![];
+        let history: Vec<StepRecord> = vec![];
+        let ctx = StepContext { goal, state, tools: &tools, history: &history };
+        org.next_step(&ctx).unwrap()
     }
 
     /// Drive the organizer through the full loop the host would run, applying each
@@ -127,6 +176,33 @@ mod tests {
         assert_eq!(cat(2), "personal");
         assert_eq!(cat(3), "ideas");
         assert_eq!(cat(4), "work");
+    }
+
+    #[test]
+    fn organize_goal_mentioning_delete_does_not_delete() {
+        // The organize goal can contain the word "delete" in a prohibition; it must still
+        // categorize, never propose a delete_note.
+        let state = json!({ "notes": [note("n1", "Buy groceries", "milk from the store")] });
+        let mut org = DeterministicOrganizer::new();
+        match step(&mut org, &state, "Organize notes. Do not delete notes.") {
+            StepDecision::Call { action_id, .. } => assert_eq!(action_id, "edit_note"),
+            other => panic!("expected edit_note, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remove_goal_proposes_delete_for_matching_category() {
+        let state = json!({
+            "notes": [note_cat("keep", "shopping"), note_cat("drop", "ideas")]
+        });
+        let mut org = DeterministicOrganizer::new();
+        match step(&mut org, &state, "Delete every note in the ideas category.") {
+            StepDecision::Call { action_id, params, .. } => {
+                assert_eq!(action_id, "delete_note");
+                assert_eq!(params["id"], json!("drop"));
+            }
+            other => panic!("expected delete_note for the ideas note, got {other:?}"),
+        }
     }
 }
 

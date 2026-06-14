@@ -2,11 +2,22 @@ import { useMemo, useState } from "react";
 import { createNote } from "./actions";
 import { useNotes, type Note } from "./store";
 import { seedNotes } from "./seed";
-import { runAgentTask, useAgentRunning, useInspectorLog, clearLog } from "./agent";
+import {
+  runAgentTask,
+  useAgentRunning,
+  useInspectorLog,
+  clearLog,
+  usePendingApproval,
+  respondToApproval,
+} from "./agent";
 
 const ORGANIZE_GOAL =
   "Organize every note by assigning each one a single sensible category. " +
-  "Categories you may use: work, shopping, personal, ideas. Do not create or delete notes.";
+  "Categories you may use: work, shopping, personal, ideas. Only assign categories; " +
+  "leave each note otherwise unchanged.";
+
+const REMOVE_IDEAS_GOAL =
+  "Delete every note in the ideas category. Remove each of them.";
 
 export function App() {
   const notes = useNotes();
@@ -32,6 +43,13 @@ export function App() {
           >
             {running ? "Agent working…" : "Run agent: organize"}
           </button>
+          <button
+            onClick={() => runAgentTask(REMOVE_IDEAS_GOAL)}
+            disabled={running || notes.length === 0}
+            title="Agent will propose deletes, which require your approval"
+          >
+            Run agent: remove ideas
+          </button>
         </div>
       </header>
 
@@ -50,6 +68,34 @@ export function App() {
         </section>
         <Inspector />
       </main>
+
+      <ApprovalModal />
+    </div>
+  );
+}
+
+function ApprovalModal() {
+  const req = usePendingApproval();
+  if (!req) return null;
+  return (
+    <div className="modal-backdrop">
+      <div className="modal">
+        <h3>Approval required</h3>
+        <p className="modal-sub">
+          The agent wants to run a guarded action. The host is paused until you decide.
+        </p>
+        <div className="modal-action">
+          <code className="modal-action-id">{req.actionId}</code>
+          <pre>{JSON.stringify(req.params, null, 2)}</pre>
+          {req.reasoning && <p className="modal-reason">“{req.reasoning}”</p>}
+        </div>
+        <div className="modal-buttons">
+          <button onClick={() => respondToApproval(false)}>Deny</button>
+          <button className="primary danger" onClick={() => respondToApproval(true)}>
+            Approve
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
