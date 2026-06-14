@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Allows the note-app webview to use core events and invoke app commands.","local":true,"windows":["main"],"permissions":["core:default"]}}

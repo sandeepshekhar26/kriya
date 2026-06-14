@@ -1,0 +1,132 @@
+/**
+ * Frontend half of the agent loop.
+ *
+ * The Rust host decides *which* action to call and *why*; this module executes that
+ * decision against the registry and reports the result + fresh state back. It also
+ * collects host telemetry for the inspector panel.
+ */
+
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import {
+  AgentCommands,
+  AgentEvents,
+  dispatchAction,
+  getToolSchemas,
+  type AgentActionRequest,
+  type AgentDone,
+  type AgentLog,
+} from "@agent-native/core";
+import { store } from "./store";
+import { useSyncExternalStore } from "react";
+
+// ---- inspector log (observable) ---------------------------------------------
+
+export interface InspectorEntry extends AgentLog {
+  ts: number;
+}
+
+let log: InspectorEntry[] = [];
+const logListeners = new Set<() => void>();
+function pushLog(entry: AgentLog) {
+  log = [...log, { ...entry, ts: Date.now() }];
+  for (const l of logListeners) l();
+}
+export function clearLog() {
+  log = [];
+  for (const l of logListeners) l();
+}
+export function useInspectorLog(): InspectorEntry[] {
+  return useSyncExternalStore(
+    (cb) => {
+      logListeners.add(cb);
+      return () => logListeners.delete(cb);
+    },
+    () => log
+  );
+}
+
+// ---- running state ----------------------------------------------------------
+
+let running = false;
+const runListeners = new Set<() => void>();
+function setRunning(v: boolean) {
+  running = v;
+  for (const l of runListeners) l();
+}
+export function useAgentRunning(): boolean {
+  return useSyncExternalStore(
+    (cb) => {
+      runListeners.add(cb);
+      return () => runListeners.delete(cb);
+    },
+    () => running
+  );
+}
+
+// ---- event wiring -----------------------------------------------------------
+
+/** Resolver for the in-flight task, fired by the host's `done` event. */
+let onDone: ((done: AgentDone) => void) | null = null;
+
+let wired = false;
+async function ensureWired() {
+  if (wired) return;
+  wired = true;
+
+  // The host asks us to execute an action; we run it through the SAME registry a
+  // human button uses, then return the result and the refreshed state snapshot.
+  await listen<AgentActionRequest>(AgentEvents.Action, async (event) => {
+    const { stepId, actionId, params, reasoning } = event.payload;
+    pushLog({ stepId, level: "decision", message: `${actionId}`, detail: { params, reasoning } });
+    const result = await dispatchAction(actionId, params, { caller: "agent", stepId });
+    if (!result.success) {
+      pushLog({ stepId, level: "error", message: `${actionId} failed: ${result.error}` });
+    }
+    await invoke(AgentCommands.ActionResult, {
+      result: {
+        stepId,
+        success: result.success,
+        data: result.data,
+        error: result.error,
+        state: store.getState(),
+      },
+    });
+  });
+
+  await listen<AgentLog>(AgentEvents.Log, (event) => pushLog(event.payload));
+
+  await listen<AgentDone>(AgentEvents.Done, (event) => {
+    onDone?.(event.payload);
+    onDone = null;
+  });
+}
+
+/** Kick off an autonomous task. Resolves when the host reports done. */
+export async function runAgentTask(goal: string): Promise<AgentDone> {
+  await ensureWired();
+  setRunning(true);
+  pushLog({ level: "info", message: `goal: ${goal}` });
+
+  const done = new Promise<AgentDone>((resolve) => {
+    onDone = resolve;
+  });
+
+  try {
+    await invoke(AgentCommands.Start, {
+      req: {
+        goal,
+        state: store.getState(),
+        tools: getToolSchemas(),
+      },
+    });
+    const result = await done;
+    pushLog({ level: "info", message: `done — ${result.summary} (${result.steps} steps)` });
+    return result;
+  } catch (err) {
+    pushLog({ level: "error", message: `agent run failed: ${String(err)}` });
+    throw err;
+  } finally {
+    setRunning(false);
+  }
+}

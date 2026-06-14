@@ -1,0 +1,82 @@
+//! Tauri backend for the agent-native note app. Hosts the agent loop and exposes two
+//! commands to the frontend: `agent_start` (begin a task) and `agent_action_result`
+//! (return the outcome of an executed action).
+
+mod agent;
+mod audit;
+mod permissions;
+mod protocol;
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+use tauri::Emitter;
+
+use agent::PendingMap;
+use audit::Signer;
+use permissions::Policy;
+use protocol::{AgentActionResult, AgentDone, AgentLog, AgentStartRequest, EVENT_DONE, EVENT_LOG};
+
+pub struct AppState {
+    pending: PendingMap,
+    policy: Arc<Policy>,
+    signer: Arc<Signer>,
+}
+
+/// Begin an autonomous task. Fire-and-forget: the loop runs on its own thread and
+/// reports progress and completion via `agent://*` events.
+#[tauri::command]
+fn agent_start(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    req: AgentStartRequest,
+) -> Result<(), String> {
+    let pending = state.pending.clone();
+    let policy = state.policy.clone();
+    let signer = state.signer.clone();
+
+    std::thread::spawn(move || {
+        if let Err(err) = agent::run_task(app.clone(), pending, policy, signer, req) {
+            let _ = app.emit(
+                EVENT_LOG,
+                AgentLog { step_id: None, level: "error".into(), message: err.clone(), detail: None },
+            );
+            // Always release the frontend's wait, even on failure.
+            let _ = app.emit(
+                EVENT_DONE,
+                AgentDone { summary: format!("Failed: {err}"), steps: 0 },
+            );
+        }
+    });
+
+    Ok(())
+}
+
+/// The frontend returns the result of an executed action plus the refreshed app state.
+#[tauri::command]
+fn agent_action_result(
+    state: tauri::State<'_, AppState>,
+    result: AgentActionResult,
+) -> Result<(), String> {
+    let tx = state.pending.lock().unwrap().remove(&result.step_id);
+    if let Some(tx) = tx {
+        let _ = tx.send(result);
+    }
+    Ok(())
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    let policy_path = std::path::PathBuf::from("agent-policy.yaml");
+    let app_state = AppState {
+        pending: Arc::new(Mutex::new(HashMap::new())),
+        policy: Arc::new(Policy::load_or_default(&policy_path)),
+        signer: Arc::new(Signer::new()),
+    };
+
+    tauri::Builder::default()
+        .manage(app_state)
+        .invoke_handler(tauri::generate_handler![agent_start, agent_action_result])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}

@@ -1,0 +1,17 @@
+# Per-app agent policy. Loaded by the Rust host at startup; if this file is missing the
+# host falls back to the same safe defaults shown here.
+#
+# Each rule matches an action id (exact, a `prefix_*` glob, or `*`). The first matching
+# rule wins. Deny-by-default: anything not matched is denied.
+rules:
+  - action: "create_*"
+    allow: true
+    require_approval: false
+  - action: "edit_*"
+    allow: true
+    require_approval: false
+  - action: "delete_*"
+    allow: true
+    require_approval: true   # held until a human approves (no queue yet in Phase 0)
+  - action: "*"
+    allow: false
