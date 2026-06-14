@@ -30,6 +30,11 @@ pub struct AgentStartRequest {
     pub goal: String,
     pub state: Value,
     pub tools: Vec<ToolSchema>,
+    /// If true and durable memory has a prior run with the same `goal`, the host
+    /// reseeds its in-memory history with the completed actions from that run and
+    /// continues from there. Defaults to false — set it explicitly to opt in.
+    #[serde(default)]
+    pub resume: bool,
 }
 
 /// host -> app: execute this action on the agent's behalf.
