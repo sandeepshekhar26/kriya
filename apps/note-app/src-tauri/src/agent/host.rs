@@ -9,6 +9,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
 use crate::audit::{now_ms, Receipt, Signer};
+use crate::budget::BudgetTracker;
 use crate::permissions::{Decision, Policy};
 use crate::protocol::{
     AgentActionRequest, AgentActionResult, AgentApprovalRequest, AgentDone, AgentLog,
@@ -92,6 +93,7 @@ pub fn run_task(
     let mut state = req.state.clone();
     let mut history: Vec<StepRecord> = Vec::new();
     let mut steps: u32 = 0;
+    let mut budget = BudgetTracker::new(policy.max_actions_per_minute());
 
     loop {
         if steps >= MAX_STEPS {
@@ -166,6 +168,22 @@ pub fn run_task(
                 history.push(StepRecord { action_id, params, success: false });
                 continue;
             }
+        }
+
+        // Rate-limit gate: stop a runaway/looping agent before it acts.
+        if let Err(reason) = budget.check_and_record(now_ms()) {
+            let done = AgentDone { summary: format!("Stopped: {reason}."), steps };
+            log(
+                &app,
+                AgentLog {
+                    step_id: Some(step_id.clone()),
+                    level: "error".into(),
+                    message: format!("{action_id} blocked — {reason}"),
+                    detail: None,
+                },
+            );
+            let _ = app.emit(EVENT_DONE, &done);
+            return Ok(done);
         }
 
         // Dispatch to the frontend and wait for it to run the handler.

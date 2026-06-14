@@ -4,6 +4,7 @@
 
 mod agent;
 mod audit;
+mod budget;
 mod permissions;
 mod protocol;
 

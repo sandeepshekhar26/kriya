@@ -15,3 +15,8 @@ rules:
     require_approval: true   # held until a human approves (no queue yet in Phase 0)
   - action: "*"
     allow: false
+
+# Optional rate budget. Caps how many actions the agent may take in any trailing
+# 60-second window; exceeding it stops the run. Omit `budget` for no cap.
+budget:
+  max_actions_per_minute: 60
