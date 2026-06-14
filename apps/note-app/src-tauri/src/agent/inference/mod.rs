@@ -27,6 +27,8 @@ pub struct StepContext<'a> {
     pub state: &'a Value,
     pub tools: &'a [ToolSchema],
     pub history: &'a [StepRecord],
+    /// Short summaries of actions from PRIOR runs, recalled from durable memory.
+    pub recent_memory: &'a [String],
 }
 
 /// The backend's decision for one turn of the loop.
@@ -89,6 +91,12 @@ pub(crate) fn build_prompt(ctx: &StepContext) -> String {
         .join("\n");
     let history = if history.is_empty() { "(none yet)".to_string() } else { history };
 
+    let memory = if ctx.recent_memory.is_empty() {
+        "(no prior runs)".to_string()
+    } else {
+        ctx.recent_memory.iter().map(|m| format!("- {m}")).collect::<Vec<_>>().join("\n")
+    };
+
     format!(
         r#"You are the agent driving a desktop note app. Decide the SINGLE next action.
 
@@ -101,7 +109,10 @@ AVAILABLE ACTIONS (call one by name with params matching its input_schema):
 CURRENT APP STATE:
 {state}
 
-ACTIONS ALREADY TAKEN:
+MEMORY (recent actions from earlier runs, for context):
+{memory}
+
+ACTIONS ALREADY TAKEN (this run):
 {history}
 
 Respond with ONLY a JSON object, no prose, no code fences. Either:
@@ -112,6 +123,7 @@ when the goal is fully met. Take exactly one action per response."#,
         goal = ctx.goal,
         tools = tools,
         state = state,
+        memory = memory,
         history = history,
     )
 }
