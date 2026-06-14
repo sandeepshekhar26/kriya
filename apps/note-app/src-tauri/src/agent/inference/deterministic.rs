@@ -123,7 +123,7 @@ mod tests {
     fn step(org: &mut DeterministicOrganizer, state: &Value, goal: &str) -> StepDecision {
         let tools: Vec<ToolSchema> = vec![];
         let history: Vec<StepRecord> = vec![];
-        let ctx = StepContext { goal, state, tools: &tools, history: &history };
+        let ctx = StepContext { goal, state, tools: &tools, history: &history, recent_memory: &[] };
         org.next_step(&ctx).unwrap()
     }
 
@@ -148,7 +148,13 @@ mod tests {
 
         loop {
             let decision = {
-                let ctx = StepContext { goal: "organize", state: &state, tools: &tools, history: &history };
+                let ctx = StepContext {
+                    goal: "organize",
+                    state: &state,
+                    tools: &tools,
+                    history: &history,
+                    recent_memory: &[],
+                };
                 org.next_step(&ctx).unwrap()
             };
             match decision {

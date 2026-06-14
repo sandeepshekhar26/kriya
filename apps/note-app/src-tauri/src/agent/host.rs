@@ -94,11 +94,28 @@ pub fn run_task(
     // Durable episodic memory across runs. Failure to open is non-fatal — the agent
     // still works, just without persistent recall.
     let memory = AgentMemory::open(&std::env::temp_dir().join("agent-native-memory.db")).ok();
-    if let Some(m) = &memory {
-        if let Ok(n) = m.count() {
-            log(&app, AgentLog::info(format!("memory: {n} past episodes on record")));
-        }
-    }
+    // Recall a window of prior-run actions to feed the backend as context.
+    let recent_memory: Vec<String> = memory
+        .as_ref()
+        .and_then(|m| {
+            if let Ok(n) = m.count() {
+                log(&app, AgentLog::info(format!("memory: {n} past episodes on record")));
+            }
+            m.recent(8).ok()
+        })
+        .map(|eps| {
+            eps.iter()
+                .map(|e| {
+                    format!(
+                        "{} {} -> {}",
+                        e.action_id,
+                        e.params,
+                        if e.success { "ok" } else { "failed" }
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
     let mut state = req.state.clone();
     let mut history: Vec<StepRecord> = Vec::new();
@@ -118,6 +135,7 @@ pub fn run_task(
                 state: &state,
                 tools: &req.tools,
                 history: &history,
+                recent_memory: &recent_memory,
             };
             backend.next_step(&ctx)?
         };
