@@ -256,3 +256,17 @@
 .an-memory-detail pre { margin: 0; overflow-x: auto; }
 .an-memory-reason { color: var(--an-text-dim, #8b94a3); font-style: italic; margin: 0 0 6px; }
 .an-memory-sig { color: var(--an-text-dim, #8b94a3); display: block; margin-top: 6px; }
+.an-memory-nav {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--an-border, #232932);
+}
+.an-memory-position {
+  font-size: 11px;
+  color: var(--an-text-dim, #8b94a3);
+  font-variant-numeric: tabular-nums;
+}

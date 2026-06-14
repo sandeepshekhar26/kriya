@@ -1,13 +1,15 @@
 /**
- * Past-runs viewer. Queries the durable episodic memory the Rust host writes to
- * (every action across runs) via the `agent_memory_recent` Tauri command and
- * renders a compact list — newest first. Click an item to inspect its detail.
+ * Past-runs viewer + step-through replay. Queries the durable episodic memory the
+ * Rust host writes to (every action across runs) via the `agent_memory_recent`
+ * Tauri command and renders a compact list — newest first. Click an item to open
+ * it; use Prev/Next (buttons or ←/→ keys) to step through neighbouring episodes
+ * one at a time. This is the "replay" surface that complements the live inspector.
  *
  * The host exposes this command in every agent-native app's Tauri backend; this
  * component is wired up the same way regardless of app.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 export interface MemoryEpisode {
@@ -56,6 +58,47 @@ export function MemoryPanel({
     void load();
   }, [load, refreshKey]);
 
+  const openIndex = useMemo(() => {
+    if (openId == null) return -1;
+    return episodes.findIndex((e) => e.id === openId);
+  }, [episodes, openId]);
+
+  const step = useCallback(
+    (delta: 1 | -1) => {
+      if (openIndex < 0 || episodes.length === 0) return;
+      const next = openIndex + delta;
+      if (next < 0 || next >= episodes.length) return;
+      setOpenId(episodes[next]!.id);
+    },
+    [episodes, openIndex]
+  );
+
+  // Keyboard nav while an episode is open. Ignore the keys when focus is in a
+  // text input so devs can still type into the inspector's filter box.
+  useEffect(() => {
+    if (openId == null) return;
+    function isTextInput(target: EventTarget | null): boolean {
+      if (!(target instanceof HTMLElement)) return false;
+      const tag = target.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+      return target.isContentEditable;
+    }
+    function onKey(e: KeyboardEvent) {
+      if (isTextInput(e.target)) return;
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        step(-1);
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        step(1);
+      } else if (e.key === "Escape") {
+        setOpenId(null);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [openId, step]);
+
   return (
     <section className="an-memory">
       <div className="an-memory-head">
@@ -72,7 +115,7 @@ export function MemoryPanel({
       )}
 
       <ol className="an-memory-list">
-        {episodes.map((ep) => (
+        {episodes.map((ep, i) => (
           <li key={ep.id} className={`an-memory-item ${ep.success ? "ok" : "fail"}`}>
             <button
               className="an-memory-summary"
@@ -88,6 +131,30 @@ export function MemoryPanel({
                 {ep.reasoning && <p className="an-memory-reason">“{ep.reasoning}”</p>}
                 <pre>{JSON.stringify(ep.params, null, 2)}</pre>
                 <code className="an-memory-sig">sig {ep.signature.slice(0, 24)}…</code>
+
+                <div className="an-memory-nav" role="group" aria-label="Replay navigation">
+                  <button
+                    className="an-link"
+                    onClick={() => step(-1)}
+                    disabled={i === 0}
+                    title="Previous episode (← key)"
+                    type="button"
+                  >
+                    ← prev
+                  </button>
+                  <span className="an-memory-position">
+                    {i + 1} / {episodes.length}
+                  </span>
+                  <button
+                    className="an-link"
+                    onClick={() => step(1)}
+                    disabled={i === episodes.length - 1}
+                    title="Next episode (→ key)"
+                    type="button"
+                  >
+                    next →
+                  </button>
+                </div>
               </div>
             )}
           </li>

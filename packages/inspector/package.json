@@ -1,6 +1,6 @@
 {
   "name": "@agent-native/inspector",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Drop-in React inspector for agent-native desktop apps — step log, filters, JSONL export, past-runs from durable memory, approval modal.",
   "license": "MIT",
   "type": "module",
@@ -18,7 +18,9 @@
     "src",
     "README.md"
   ],
-  "sideEffects": ["**/*.css"],
+  "sideEffects": [
+    "**/*.css"
+  ],
   "keywords": [
     "agent",
     "agent-native",
