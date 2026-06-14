@@ -31,6 +31,24 @@ export interface ActionContext {
   caller: "human" | "agent";
   /** Opaque id of the agent step this call belongs to, when caller is an agent. */
   stepId?: string;
+  /**
+   * Composition: invoke a *child* action from inside a parent action's handler.
+   * The child runs through the same validation + audit path; the agent host sees
+   * only the parent call. Cycles and excessive depth are rejected with a failed
+   * `ActionResult` rather than throwing.
+   *
+   * Present on every dispatched call. The optionality is for backwards
+   * compatibility with handlers that ignore the context.
+   */
+  call?: <C = unknown>(
+    actionId: string,
+    params: Record<string, unknown>
+  ) => Promise<ActionResult<C>>;
+  /**
+   * Stack of action ids the current call descends from, parent-first.
+   * Read-only — provided so handlers can inspect their depth or origin if needed.
+   */
+  readonly chain?: readonly string[];
 }
 
 /** What an action handler returns. */

@@ -11,7 +11,12 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
 - ✅ Runtime param validation (types/enum/array/required) + 13-test suite
 - ⬜ Standards-compliant **JSON Schema** export (delegated — see prompt) so any MCP client
   consumes schemas directly
-- ⬜ Action **composition** (a parent action calling child actions)
+- ✅ Action **composition** — handlers receive `ctx.call(childId, params)` and
+  can invoke any other registered action. The child runs through the same
+  validation + audit path; cycles and depth-cap violations surface as failed
+  `ActionResult`s (not throws). Capped at `MAX_COMPOSE_DEPTH = 8`. Demonstrated
+  in `apps/task-manager` via `bulk_create_tasks`. Tested with 6 new unit tests
+  (34/34 SDK tests green).
 - ⬜ Action **versioning + migrations** (v1→v2 with guides) — field exists, no machinery
 - ⬜ Framework-agnostic bindings (Vue/Svelte/Solid), not just React
 - ⬜ Hot-reload of the registry in dev (change an action, agent sees it instantly)

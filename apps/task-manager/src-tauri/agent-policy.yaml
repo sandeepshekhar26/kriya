@@ -4,6 +4,9 @@ rules:
   - action: "create_task"
     allow: true
     require_approval: false
+  - action: "bulk_create_tasks"
+    allow: true
+    require_approval: false
   - action: "complete_task"
     allow: true
     require_approval: false
