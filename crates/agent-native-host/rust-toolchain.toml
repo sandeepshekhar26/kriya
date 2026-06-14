@@ -1,0 +1,6 @@
+# Pinned to match apps/note-app and apps/task-manager so the workspace builds
+# uniformly. See also: build-rust-toolchain-brotli notes in the host README —
+# the alloc-no-stdlib version split is pinned via Cargo.lock, not the toolchain.
+[toolchain]
+channel = "1.90.0"
+components = ["rustfmt", "clippy"]

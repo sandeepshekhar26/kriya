@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security issue
+    url: mailto:skumar5190@gmail.com
+    about: Please email instead of opening a public issue — see CONTRIBUTING.md.
+  - name: Question
+    url: https://github.com/sandeepshekhar26/verb/discussions
+    about: Open a Discussion (when enabled). Issues are for bugs and concrete feature requests.
