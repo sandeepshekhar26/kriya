@@ -1,56 +1,93 @@
-# agent-native
+# verb
 
-> The framework where AI agents are **native citizens** of desktop apps.
-> Agents see your app's *actions*, not pixels. Ship once — works for humans and machines.
+> The framework where AI agents are **first-class users** of desktop apps.
+> Agents operate your app through **typed actions, not pixels** — no screenshots, no vision,
+> no brittle clicking. Ship once; it works for humans and machines.
 
-This repository is the **Phase 0 proof** built directly on the **final tech stack** (Tauri 2 +
-Rust core + TypeScript SDK + React). It is intentionally small in feature scope, but every layer
-is the real one — no throwaway prototype code. Phase 1 generalizes these same layers into the
-publishable `@agent-native/*` packages.
+Built on the final stack — **Tauri 2 + Rust + TypeScript + React** — with the safety layer
+(permissions, human approval, signed audit, memory) built in, not bolted on.
 
-## What this proves
-
-A local agent can drive a real desktop note app **without vision, screenshots, or DOM selectors** —
-only typed action calls and structured state.
+## The idea: one app, two doors
 
 ```
 Human  ──clicks buttons──┐
-                         ├──▶  same business logic (registered actions)
-Agent  ──calls tools─────┘
+                         ├──▶  the same registered actions  ──▶  app state ──▶ UI
+Agent  ──calls actions───┘
 ```
 
-The agent:
-1. Reads the app's **state** (the list of notes) as structured JSON.
-2. Picks a **typed action** (`create_note`, `edit_note`, `delete_note`) from a registry.
-3. The Rust **agent host** permission-checks and signs the call, then asks the app to run it.
-4. The app executes its own handler, mutates state, and the UI re-renders.
-5. The loop repeats until the agent reports the task done.
+A developer declares each app affordance once with `registerAction(...)`. Humans trigger it by
+clicking; agents trigger it by calling the typed action. Both run the exact same business logic.
+The agent never simulates a human — it calls the affordance directly.
+
+## How the loop works
+
+The reference app is a note-taking app. Click **Run agent: organize** and a local agent sorts
+the notes into categories by itself. Each step:
+
+1. The app hands the agent its **state** (the notes, as JSON) and a **menu of typed actions**
+   (`create_note`, `edit_note`, `delete_note`).
+2. The agent picks one action with parameters.
+3. The Rust **agent host** gates it: permission check → human approval (if required) → rate
+   limit → only then dispatch.
+4. The app runs the *same* handler a human button would, and the UI re-renders.
+5. The host writes a **cryptographically signed receipt** and records the action to durable
+   **memory**.
+6. Repeat until the agent reports done.
+
+No vision. No DOM selectors. Just structured state and typed action calls.
+
+## What's built
+
+**Core SDK — `@agent-native/core`** (TypeScript)
+- `registerAction()` with typed, permission-scoped actions and runtime parameter validation
+- `getToolSchemas()` / `getMcpToolSchemas()` — MCP-compatible + standards-JSON-Schema output
+- The agent-loop protocol types; a `agent-native dump` CLI
+
+**Agent host** (Rust, in the Tauri backend)
+- The step loop and a swappable `Inference` trait with four backends:
+  `deterministic` (scripted, free), `claude-cli`, `ollama`, `anthropic`
+- **Permissions** — deny-by-default YAML policy
+- **Human-approval queue** — guarded actions pause for an Approve/Deny decision
+- **Budget** — sliding-window actions-per-minute cap stops a runaway agent
+- **Signed audit trail** — Ed25519 receipt per action → JSONL log
+- **Persistent memory** — every action stored in SQLite across runs, recalled into the prompt
+
+**Tooling**
+- `tools/verify-receipts` — standalone CLI that verifies the signed audit log offline
 
 ## Layout
 
 ```
-experiment1/
-├── architecture.md          # how the pattern works, end to end
+verb/
+├── architecture.md            # how the pattern works, end to end
+├── docs/PRODUCT_GAPS.md        # honest roadmap: demo → full product
 ├── packages/
-│   └── core/                # @agent-native/core — TypeScript SDK (action registry + protocol)
+│   └── core/                   # @agent-native/core — the TypeScript SDK
 └── apps/
-    └── note-app/            # reference app: Tauri 2 + React frontend, Rust agent host
-        ├── src/             # React UI + action registration (TS)
-        └── src-tauri/       # Rust: agent host, inference backends, permissions, audit
+│   └── note-app/               # reference app: Tauri 2 + React + Rust agent host
+│       ├── src/                # React UI + action registration (TS)
+│       └── src-tauri/          # Rust: host loop, inference, permissions, audit, budget, memory
+└── tools/
+    └── verify-receipts/        # offline Ed25519 audit-log verifier (Rust)
 ```
 
-## Inference backends (Phase 0)
+## Quick start
 
-Pluggable via the `Inference` trait in Rust. Two ship now:
+```bash
+npm install
+npm run build --workspace @agent-native/core
+npm run tauri dev --workspace note-app   # first run compiles the Rust backend (a few min)
+```
 
-- **`deterministic`** — a scripted planner that exercises the *full* protocol with no LLM. Proves
-  the architecture is sound today, costs nothing.
-- **`claude-cli`** — shells out to the locally-installed `claude` CLI in print mode. A real LLM
-  driving the app, no API key/billing required.
+In the app: **Seed 5 notes** → **Run agent: organize** (watch the inspector), then **Run agent:
+remove ideas** to see the approval modal pause a guarded delete. Pick the AI backend with the
+`AGENT_BACKEND` env var (`deterministic` default, or `claude-cli` / `ollama` / `anthropic`).
 
-`anthropic`/`ollama` API backends slot in behind the same trait later.
+See [apps/note-app/README.md](apps/note-app/README.md) for details (and the toolchain note —
+Rust is pinned to 1.90 there).
 
 ## Status
 
-Phase 0 — in progress. See [architecture.md](architecture.md) for the design and
-[apps/note-app/README.md](apps/note-app/README.md) for run instructions.
+Early / alpha. The pattern and the safety layer work end-to-end; the framework is still being
+generalized and hardened. MIT licensed. Roadmap and what's still missing:
+[docs/PRODUCT_GAPS.md](docs/PRODUCT_GAPS.md). Design: [architecture.md](architecture.md).
