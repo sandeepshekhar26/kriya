@@ -108,6 +108,51 @@ export const deleteTask = registerAction<{ id: string }, { id: string }>({
   },
 });
 
+/**
+ * Composed action — demonstrates `ctx.call` from inside a handler. Takes an
+ * array of partial tasks and creates each by calling `create_task`. Useful
+ * when an agent wants to plan a batch of tasks in one decision rather than
+ * one decision per task.
+ */
+export const bulkCreateTasks = registerAction<
+  { tasks: Array<{ title: string; priority?: Priority }> },
+  { created: number }
+>({
+  id: "bulk_create_tasks",
+  description:
+    "Create several tasks at once. Use this when you want to set up a batch of " +
+    "related tasks in a single step instead of one create_task call per task.",
+  parameters: {
+    tasks: {
+      type: "array",
+      description: "Array of tasks to create.",
+      required: true,
+      items: {
+        type: "object",
+        properties: {
+          title: { type: "string", required: true },
+          priority: { type: "string", enum: PRIORITIES },
+        },
+      },
+    },
+  },
+  permissions: ["write:tasks"],
+  handler: async (params, ctx) => {
+    if (!ctx.call) {
+      return { success: false, error: "composition unavailable in this context" };
+    }
+    let created = 0;
+    for (const t of params.tasks) {
+      const r = await ctx.call("create_task", {
+        title: t.title,
+        priority: t.priority ?? "medium",
+      });
+      if (r.success) created += 1;
+    }
+    return { success: true, data: { created } };
+  },
+});
+
 export const clearCompleted = registerAction<Record<string, never>, { removed: number }>({
   id: "clear_completed",
   description:
