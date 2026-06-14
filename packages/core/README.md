@@ -51,5 +51,5 @@ npx agent-native dump ./dist/register-actions.js
 
 ## Status
 
-`v0.0.1` — early. Part of the [agent-native](https://github.com/CHANGE_ME/agent-native) framework.
+`v0.0.1` — early. Part of the [agent-native](https://github.com/sandeepshekhar26/verb) framework.
 MIT licensed.

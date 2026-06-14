@@ -34,11 +34,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/CHANGE_ME/agent-native.git",
+    "url": "git+https://github.com/sandeepshekhar26/verb.git",
     "directory": "packages/core"
   },
-  "homepage": "https://github.com/CHANGE_ME/agent-native#readme",
-  "bugs": "https://github.com/CHANGE_ME/agent-native/issues",
+  "homepage": "https://github.com/sandeepshekhar26/verb#readme",
+  "bugs": "https://github.com/sandeepshekhar26/verb/issues",
   "publishConfig": {
     "access": "public"
   },
