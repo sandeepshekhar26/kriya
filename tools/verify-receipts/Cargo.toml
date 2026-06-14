@@ -1,0 +1,15 @@
+[package]
+name = "verify-receipts"
+version = "0.1.0"
+edition = "2021"
+description = "Offline verifier for the agent-native Ed25519-signed audit log."
+
+[[bin]]
+name = "verify-receipts"
+path = "src/main.rs"
+
+[dependencies]
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+ed25519-dalek = "2"
+hex        = "0.4"
