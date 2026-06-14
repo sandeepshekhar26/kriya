@@ -49,8 +49,13 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
 - ✅ `create-agent-app` scaffolder — `npm create agent-app@latest my-app` produces a
   working counter-app starter (Tauri 2 + Rust host + React + SDK + all safety infra,
   locked deps). Verified end-to-end: TS compiles, `cargo check --locked` passes.
-- 🟡 Rich dev dashboard/inspector — today an in-app log panel; step-through, replay
-  sessions, export traces still ⬜
+- ✅ Rich dev dashboard/inspector — extracted into `@agent-native/inspector`
+  (workspace package). Filterable log (toggle levels + full-text search),
+  per-step expand, one-click JSONL export of the current run, and a `MemoryPanel`
+  that reads durable past runs from the host's SQLite memory via the
+  `agent_memory_recent` Tauri command. Both reference apps now consume it; the
+  styles ship via `@agent-native/inspector/styles.css` and are themable through
+  CSS variables. Step-through / live replay of stored runs still ⬜.
 - 🟡 CLI to dump registered actions as JSON — added in 1.1
 - ⬜ Templates, examples gallery, "build an agent app in <2 hours" tutorial
 - ⬜ OpenTelemetry traces; CI eval gate ("does my app still work with agents?")
@@ -89,4 +94,6 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
   Until both are public, the scaffolder template still embeds the host code.
   Publishing unblocks the template swap and is the precondition for going
   public on GitHub.
-- After that: the dev inspector (step-through + replay) is the next moat piece.
+- After publishing unblocks: real step-through (pause-between-steps in the host)
+  and live replay of a stored run inside the inspector — building on the new
+  `@agent-native/inspector` shipped today.
