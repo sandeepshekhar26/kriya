@@ -13,7 +13,7 @@ whole thesis in one app.
 
 <p align="center">
   <img src="demo.gif" alt="kriya governing an agent driving Actual Budget" width="760">
-  <br><em>The governed flow (mock fund). Reproduce it with <code>./demo.sh</code> — see <a href="DEMO.md">DEMO.md</a>.</em>
+  <br><em>The governed flow (mock fund). Reproduce it with <code>./demo.sh</code>.</em>
 </p>
 
 ## The entire integration
@@ -70,7 +70,7 @@ installing Actual or setting up data.
 
 > **Want the cinematic, screen-recordable version?** Run `./demo.sh` (builds everything on first
 > run, then plays a paced four-beat walkthrough — reconcile → blocked → approved → signed proof).
-> Recording guide, shot list, and voiceover: [DEMO.md](DEMO.md).
+> Set `DEMO_SPEED` to tune pacing.
 
 ```bash
 # from the repo root
@@ -91,13 +91,11 @@ ACTUAL_FAKE=1 printf '%s\n' \
 You'll see `categorize_transaction` run and get a signed receipt, while `delete_transaction`
 is blocked pending approval — governance, with zero changes to Actual.
 
-## Wire it into Claude Desktop (the real demo)
+## Wire it into Claude Desktop (a real budget)
 
-> For the **full real-app visual demo** — a real budget in Actual's UI, updating live as the agent
-> works, with the approval prompt on camera — follow [REAL-DEMO.md](REAL-DEMO.md) (sets up
-> `actual-server`, the real `@actual-app/api`, sync, and the shot list). Quick version below.
-
-Install Actual's API and point the MCP server at a real budget:
+To drive a **real** Actual budget (so its UI updates live as the agent works), run a local
+`actual-server`, create a budget, and point the handler at it. Install Actual's API and set the
+MCP server up against your budget:
 
 ```bash
 npm install @actual-app/api      # the real, in-process Actual API
@@ -120,7 +118,8 @@ npm install @actual-app/api      # the real, in-process Actual API
       "env": {
         "ACTUAL_DATA_DIR": "/abs/path/to/actual-data",
         "ACTUAL_SERVER_URL": "http://localhost:5006",
-        "ACTUAL_PASSWORD": "your-sync-password"
+        "ACTUAL_PASSWORD": "your-server-password",
+        "ACTUAL_SYNC_ID": "<budget Sync ID — Actual → Settings → Advanced>"
       }
     }
   }

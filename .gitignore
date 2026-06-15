@@ -26,3 +26,8 @@ crates/kriya/Cargo.lock
 # Internal planning docs — kept local, not published (per planner, 2026-06-15).
 docs/DECISIONS.md
 docs/strategy/
+
+# Demo recording plans (local-only)
+examples/actual-budget-bolt-on/DEMO.md
+examples/actual-budget-bolt-on/REAL-DEMO.md
+examples/actual-budget-bolt-on/demo.cast
