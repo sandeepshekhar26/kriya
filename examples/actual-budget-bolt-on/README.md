@@ -63,6 +63,10 @@ Ed25519-signed receipt appended for every action that actually runs.
 `ACTUAL_FAKE=1` swaps in an in-memory budget so you can see the full governed flow without
 installing Actual or setting up data.
 
+> **Want the cinematic, screen-recordable version?** Run `./demo.sh` (builds everything on first
+> run, then plays a paced four-beat walkthrough — reconcile → blocked → approved → signed proof).
+> Recording guide, shot list, and voiceover: [DEMO.md](DEMO.md).
+
 ```bash
 # from the repo root
 npm run build --workspace kriya-core      # the SDK this imports
