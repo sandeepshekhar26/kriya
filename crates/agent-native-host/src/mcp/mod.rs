@@ -9,7 +9,12 @@
 //!
 //! Layering:
 //! - [`jsonrpc`] — wire framing and the MCP message shapes (no policy).
-//! - the governor (next commit) — wraps the gates around a pluggable executor.
+//! - [`executor`] — the trait that actually runs a cleared action (Tauri / sidecar / CLI).
+//! - [`approval`] — human-in-the-loop gates for guarded actions in MCP mode.
+//! - [`governor`] — wraps policy → approval → budget → audit around the executor.
 //! - the stdio serve loop (next commit) — reads JSON-RPC lines and dispatches.
 
+pub mod approval;
+pub mod executor;
+pub mod governor;
 pub mod jsonrpc;
