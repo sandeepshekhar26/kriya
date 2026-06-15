@@ -20,6 +20,8 @@ export function fakeActual(): ActualApi {
 
   return {
     async init() {},
+    async downloadBudget() {},
+    async sync() {},
     async shutdown() {},
     async getAccounts() {
       return accounts;

@@ -32,6 +32,12 @@ async function connect(): Promise<ActualApi> {
     serverURL: process.env.ACTUAL_SERVER_URL,
     password: process.env.ACTUAL_PASSWORD,
   });
+  // Server-backed budget: download it so queries/mutations work. ACTUAL_SYNC_ID is the budget's
+  // Sync ID (Actual → Settings → Advanced → "Sync ID"). Omit it for a purely local dataDir.
+  const syncId = process.env.ACTUAL_SYNC_ID;
+  if (syncId) {
+    await actual.downloadBudget(syncId, { password: process.env.ACTUAL_FILE_PASSWORD });
+  }
   return actual;
 }
 
@@ -39,13 +45,18 @@ async function main(): Promise<void> {
   const dump = process.argv.includes("--dump");
 
   // --dump: no connection needed. ACTUAL_FAKE: in-memory demo. Otherwise: a real budget.
-  const actual = dump ? noopActual() : process.env.ACTUAL_FAKE ? fakeActual() : await connect();
+  const fake = !!process.env.ACTUAL_FAKE;
+  const actual = dump ? noopActual() : fake ? fakeActual() : await connect();
   registerActualActions(actual);
 
   if (dump) {
     process.stdout.write(JSON.stringify(getToolSchemas(), null, 2) + "\n");
     return;
   }
+
+  // Against a real sync server, push changes after each successful write so the open Actual app
+  // reflects them live (reads don't need a sync). The mock fund needs none of this.
+  const syncAfterWrites = !fake && !!process.env.ACTUAL_SERVER_URL;
 
   // One request line → one response line, matching kriya-mcp's handler contract.
   const rl = createInterface({ input: process.stdin });
@@ -59,7 +70,15 @@ async function main(): Promise<void> {
       process.stdout.write(JSON.stringify({ success: false, error: "bad request JSON" }) + "\n");
       continue;
     }
-    const result = await dispatchAction(req.action ?? "", req.params ?? {}, { caller: "agent" });
+    const action = req.action ?? "";
+    const result = await dispatchAction(action, req.params ?? {}, { caller: "agent" });
+    if (syncAfterWrites && result.success && !action.startsWith("list_")) {
+      try {
+        await actual.sync();
+      } catch (err) {
+        process.stderr.write(`[actual-bolt-on] sync failed: ${String(err)}\n`);
+      }
+    }
     process.stdout.write(
       JSON.stringify({ success: result.success, data: result.data ?? null, error: result.error ?? null }) +
         "\n",

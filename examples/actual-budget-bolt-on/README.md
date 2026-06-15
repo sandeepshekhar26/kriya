@@ -93,6 +93,10 @@ is blocked pending approval — governance, with zero changes to Actual.
 
 ## Wire it into Claude Desktop (the real demo)
 
+> For the **full real-app visual demo** — a real budget in Actual's UI, updating live as the agent
+> works, with the approval prompt on camera — follow [REAL-DEMO.md](REAL-DEMO.md) (sets up
+> `actual-server`, the real `@actual-app/api`, sync, and the shot list). Quick version below.
+
 Install Actual's API and point the MCP server at a real budget:
 
 ```bash
