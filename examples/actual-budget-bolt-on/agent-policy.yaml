@@ -1,0 +1,34 @@
+# Governance policy for the Actual Budget bolt-on. verb-mcp enforces this on every tools/call
+# from the external agent — the agent can only *propose*; the host decides.
+#
+# Posture: reads and routine reconciliation flow freely; anything that destroys a record or
+# moves money pauses for on-device human approval; everything else is denied by default; and a
+# per-minute cap stops a runaway agent. This is the whole governance story in one file.
+rules:
+  # Read-only — safe to let the agent do unattended.
+  - action: "list_accounts"
+    allow: true
+  - action: "list_transactions"
+    allow: true
+
+  # Routine writes — categorizing/budgeting is the everyday agent task.
+  - action: "categorize_transaction"
+    allow: true
+  - action: "set_budget"
+    allow: true
+
+  # Destructive / money-moving — require a human's go-ahead, every time.
+  - action: "delete_transaction"
+    allow: true
+    require_approval: true
+  - action: "close_account"
+    allow: true
+    require_approval: true
+
+  # Everything else: denied (deny-by-default). An agent cannot invoke anything not listed above.
+  - action: "*"
+    allow: false
+
+budget:
+  # A looping agent can't hammer your finances: at most 30 actions per rolling minute.
+  max_actions_per_minute: 30

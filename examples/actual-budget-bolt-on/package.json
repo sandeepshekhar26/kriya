@@ -1,0 +1,21 @@
+{
+  "name": "@agent-native/example-actual-budget",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Flagship demo (R5): bolt governed, agent-callable actions onto Actual Budget in <50 LOC — no rewrite, no new API.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dump": "node dist/handler.js --dump"
+  },
+  "dependencies": {
+    "@actual-app/api": "^25.0.0",
+    "@agent-native/core": "0.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.6.0"
+  }
+}

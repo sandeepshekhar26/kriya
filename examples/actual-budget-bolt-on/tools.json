@@ -1,0 +1,142 @@
+[
+  {
+    "name": "list_accounts",
+    "version": 1,
+    "description": "List all budget accounts.",
+    "permissions": [],
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    }
+  },
+  {
+    "name": "list_transactions",
+    "version": 1,
+    "description": "List transactions for an account within a date range (YYYY-MM-DD).",
+    "permissions": [],
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "accountId": {
+          "type": "string",
+          "required": true
+        },
+        "startDate": {
+          "type": "string",
+          "required": true
+        },
+        "endDate": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "required": [
+        "accountId",
+        "startDate",
+        "endDate"
+      ]
+    }
+  },
+  {
+    "name": "categorize_transaction",
+    "version": 1,
+    "description": "Assign a category to a transaction (the everyday reconciliation task).",
+    "permissions": [
+      "write:transactions"
+    ],
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "required": true
+        },
+        "category": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "required": [
+        "id",
+        "category"
+      ]
+    }
+  },
+  {
+    "name": "set_budget",
+    "version": 1,
+    "description": "Set the budgeted amount (minor units) for a category in a month (YYYY-MM).",
+    "permissions": [
+      "write:budget"
+    ],
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "month": {
+          "type": "string",
+          "required": true
+        },
+        "categoryId": {
+          "type": "string",
+          "required": true
+        },
+        "amount": {
+          "type": "number",
+          "required": true
+        }
+      },
+      "required": [
+        "month",
+        "categoryId",
+        "amount"
+      ]
+    }
+  },
+  {
+    "name": "delete_transaction",
+    "version": 1,
+    "description": "Permanently delete a transaction.",
+    "permissions": [
+      "delete:transactions"
+    ],
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "required": [
+        "id"
+      ]
+    }
+  },
+  {
+    "name": "close_account",
+    "version": 1,
+    "description": "Close an account, transferring its balance to another account.",
+    "permissions": [
+      "move:money"
+    ],
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "required": true
+        },
+        "transferAccountId": {
+          "type": "string"
+        },
+        "transferCategoryId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ]
+    }
+  }
+]
