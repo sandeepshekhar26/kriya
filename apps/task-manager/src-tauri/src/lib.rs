@@ -16,7 +16,8 @@ use agent_native_host::{
         AgentActionResult, AgentApprovalResponse, AgentDone, AgentLog, AgentStartRequest,
         AgentStepAdvance, EVENT_DONE, EVENT_LOG,
     },
-    run_task, select_backend_with_default, ApprovalMap, PendingMap, StepAdvanceMap,
+    run_task, select_backend_with_default, ApprovalMap, HostSink, PendingMap, StepAdvanceMap,
+    TauriSink,
 };
 
 use deterministic::TaskPlanner;
@@ -43,9 +44,12 @@ fn agent_start(
 
     let backend = select_backend_with_default(Box::new(TaskPlanner::new()));
 
+    // The agent loop now talks to any shell through a HostSink; Tauri is just one impl.
+    let sink: Arc<dyn HostSink> = Arc::new(TauriSink::new(app.clone()));
+
     std::thread::spawn(move || {
         if let Err(err) = run_task(
-            app.clone(),
+            sink,
             pending,
             approvals,
             advances,
