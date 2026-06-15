@@ -12,9 +12,18 @@
 //! - [`executor`] — the trait that actually runs a cleared action (Tauri / sidecar / CLI).
 //! - [`approval`] — human-in-the-loop gates for guarded actions in MCP mode.
 //! - [`governor`] — wraps policy → approval → budget → audit around the executor.
-//! - the stdio serve loop (next commit) — reads JSON-RPC lines and dispatches.
+//! - [`server`] — the stdio JSON-RPC loop that exposes tools and routes calls.
+//!
+//! The thin `verb-mcp` binary (`src/bin/verb-mcp.rs`) wires these together from a policy
+//! file + a tool-schema file + an executor command.
 
 pub mod approval;
 pub mod executor;
 pub mod governor;
 pub mod jsonrpc;
+pub mod server;
+
+pub use approval::{ApprovalGate, AutoApprove, DenyApproval, TtyApproval};
+pub use executor::{ActionExecutor, ActionOutcome, FnExecutor, ProcessExecutor};
+pub use governor::{DispatchOutcome, Governor};
+pub use server::Server;
