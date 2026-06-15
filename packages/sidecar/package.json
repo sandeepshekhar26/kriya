@@ -1,0 +1,56 @@
+{
+  "name": "@agent-native/sidecar",
+  "version": "0.0.1",
+  "description": "Host the verb agent runtime from Electron or plain Node — spawn the verb-host sidecar and drive governed agent runs over stdio.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "keywords": [
+    "agent",
+    "ai-agent",
+    "agent-native",
+    "electron",
+    "node",
+    "sidecar",
+    "mcp",
+    "llm"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sandeepshekhar26/verb.git",
+    "directory": "packages/sidecar"
+  },
+  "homepage": "https://github.com/sandeepshekhar26/verb#readme",
+  "bugs": "https://github.com/sandeepshekhar26/verb/issues",
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build && npm run test"
+  },
+  "dependencies": {
+    "@agent-native/core": "0.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.8"
+  }
+}
