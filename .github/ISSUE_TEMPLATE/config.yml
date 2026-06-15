@@ -4,5 +4,5 @@ contact_links:
     url: mailto:kriyanative@gmail.com
     about: Please email instead of opening a public issue — see CONTRIBUTING.md.
   - name: Question
-    url: https://github.com/governex/verb/discussions
+    url: https://github.com/governex/kriya/discussions
     about: Open a Discussion (when enabled). Issues are for bugs and concrete feature requests.

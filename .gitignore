@@ -21,7 +21,7 @@ coverage/
 Thumbs.db
 
 # Host crate is a library — apps own dep resolution.
-crates/agent-native-host/Cargo.lock
+crates/kriya/Cargo.lock
 
 # Internal planning docs — kept local, not published (per planner, 2026-06-15).
 docs/DECISIONS.md

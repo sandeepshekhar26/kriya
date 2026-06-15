@@ -1,5 +1,5 @@
 /**
- * Core type definitions for agent-native actions.
+ * Core type definitions for kriya actions.
  *
  * An "action" is the unit an agent can call and a human can trigger. It is a typed,
  * permission-scoped, self-describing affordance — the desktop analogue of an MCP tool.

@@ -1,4 +1,4 @@
-# note-app — agent-native reference app
+# note-app — kriya reference app
 
 A Tauri 2 note app where a **local agent** organizes notes by calling typed actions —
 no vision, no screenshots, no DOM automation. The Phase 0 proof for the framework.
@@ -20,7 +20,7 @@ From the repo root (installs the workspace, builds the core SDK, launches the ap
 
 ```bash
 npm install
-npm run build --workspace @agent-native/core
+npm run build --workspace @kriya/core
 npm run tauri dev --workspace note-app
 ```
 
@@ -53,7 +53,7 @@ AGENT_BACKEND=claude-cli npm run tauri dev --workspace note-app
 ## Audit trail
 
 Every executed action is signed with an Ed25519 key the agent never holds, and appended to
-`agent-native-audit.jsonl` in your temp dir. The inspector shows a short signature per step;
+`kriya-audit.jsonl` in your temp dir. The inspector shows a short signature per step;
 the file holds the full signed receipts (verifiable offline with the public key).
 
 ## Where things live

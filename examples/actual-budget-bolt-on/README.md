@@ -26,12 +26,12 @@ wrapAction(actual.updateTransaction, {
 });
 ```
 
-(`agent-native wrap src/actual-api.ts` would scaffold most of this for you — see the codemod.)
+(`kriya wrap src/actual-api.ts` would scaffold most of this for you — see the codemod.)
 
 ## How it runs
 
 ```
- Claude Desktop / Cursor          verb-mcp  (Rust governor)        this bolt-on (Node)
+ Claude Desktop / Cursor          kriya-mcp  (Rust governor)        this bolt-on (Node)
  ───────────────────────          ─────────────────────────       ───────────────────
    tools/call categorize ──MCP──▶ policy → approval → budget ──▶  actual.updateTransaction(...)
                                   → SIGN audit receipt        ◀──  result
@@ -39,7 +39,7 @@ wrapAction(actual.updateTransaction, {
                                   ⏸  approval gate (denied/asked)  (never reaches Actual)
 ```
 
-`verb-mcp` speaks MCP to the agent and owns governance; the handler holds the (expensive)
+`kriya-mcp` speaks MCP to the agent and owns governance; the handler holds the (expensive)
 Actual connection open and runs only cleared actions. `--persistent` keeps that one connection
 alive across calls.
 
@@ -65,16 +65,16 @@ installing Actual or setting up data.
 
 ```bash
 # from the repo root
-npm run build --workspace @agent-native/core      # the SDK this imports
+npm run build --workspace @kriya/core      # the SDK this imports
 cd examples/actual-budget-bolt-on && npm install && npm run build
-cargo build -p agent-native-host --bin verb-mcp --release   # the governor
+cargo build -p kriya --bin kriya-mcp --release   # the governor
 
 # drive it like an MCP client would:
 ACTUAL_FAKE=1 printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"categorize_transaction","arguments":{"id":"txn-1","category":"cat-groceries"}}}' \
   '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"delete_transaction","arguments":{"id":"txn-2"}}}' \
-| ACTUAL_FAKE=1 path/to/verb-mcp \
+| ACTUAL_FAKE=1 path/to/kriya-mcp \
     --persistent --exec "node $(pwd)/dist/handler.js" \
     --policy agent-policy.yaml --tools tools.json --approval deny
 ```
@@ -96,7 +96,7 @@ npm install @actual-app/api      # the real, in-process Actual API
 {
   "mcpServers": {
     "actual-budget": {
-      "command": "/abs/path/to/verb-mcp",
+      "command": "/abs/path/to/kriya-mcp",
       "args": [
         "--persistent",
         "--exec", "node /abs/path/to/examples/actual-budget-bolt-on/dist/handler.js",

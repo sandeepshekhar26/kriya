@@ -1,7 +1,7 @@
 [package]
 name = "note-app"
 version = "0.0.1"
-description = "agent-native reference note app"
+description = "kriya reference note app"
 edition = "2021"
 rust-version = "1.77"
 
@@ -15,4 +15,4 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 serde_json = "1"
-agent-native-host = { path = "../../../crates/agent-native-host" }
+kriya = { path = "../../../crates/kriya" }

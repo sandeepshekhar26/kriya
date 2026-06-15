@@ -1,8 +1,8 @@
 /**
- * @agent-native/sidecar — host the verb agent runtime from Electron or plain Node.
+ * @kriya/sidecar — host the kriya agent runtime from Electron or plain Node.
  *
- * Spawns the `verb-host` binary (the Rust agent host, built from
- * `crates/agent-native-host`) and speaks its newline-delimited JSON protocol over stdio. The
+ * Spawns the `kriya-host` binary (the Rust agent host, built from
+ * `crates/kriya`) and speaks its newline-delimited JSON protocol over stdio. The
  * agent loop, the inference backend, and the whole safety layer (policy, approval, budget,
  * signed audit) run **inside that separate process** — which the renderer can't tamper with —
  * while your Node/Electron main process just executes the typed actions the host asks for.
@@ -25,7 +25,7 @@ import type {
   AgentLog,
   AgentStartRequest,
   AgentStepAdvance,
-} from "@agent-native/core";
+} from "@kriya/core";
 
 /** The events the host pushes back to the app, and their payload tuples. */
 export interface SidecarEvents {
@@ -57,7 +57,7 @@ export interface SidecarStreams {
 }
 
 export interface SpawnOptions {
-  /** Path to the `verb-host` binary. */
+  /** Path to the `kriya-host` binary. */
   binaryPath: string;
   /** Extra CLI args, e.g. `["--policy", "policy.yaml", "--script", "demo.json"]`. */
   args?: string[];
@@ -66,7 +66,7 @@ export interface SpawnOptions {
 }
 
 /**
- * A live connection to a `verb-host` sidecar. Construct it from raw streams (handy for tests)
+ * A live connection to a `kriya-host` sidecar. Construct it from raw streams (handy for tests)
  * or, more usually, with {@link SidecarHost.spawn}. Subscribe with {@link on} and push
  * decisions back with the `send*` methods.
  */
@@ -93,7 +93,7 @@ export class SidecarHost {
     this.#child?.on("exit", (code) => this.#emit("exit", code));
   }
 
-  /** Spawn the `verb-host` binary and connect to it. stderr is inherited so the host's
+  /** Spawn the `kriya-host` binary and connect to it. stderr is inherited so the host's
    * banner and governance log show up in your console. */
   static spawn(options: SpawnOptions): SidecarHost {
     const child = spawn(options.binaryPath, options.args ?? [], {
@@ -101,7 +101,7 @@ export class SidecarHost {
       env: options.env ?? process.env,
     });
     if (!child.stdin || !child.stdout) {
-      throw new Error("verb-host did not expose stdio pipes");
+      throw new Error("kriya-host did not expose stdio pipes");
     }
     return new SidecarHost({ stdin: child.stdin, stdout: child.stdout, child });
   }

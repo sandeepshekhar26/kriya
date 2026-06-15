@@ -1,19 +1,19 @@
 /**
- * The persistent handler `verb-mcp --persistent --exec` drives. It holds the (expensive)
+ * The persistent handler `kriya-mcp --persistent --exec` drives. It holds the (expensive)
  * Actual connection open for the whole session and answers one governed action per stdin line:
  *
  *   in   { "action": "categorize_transaction", "params": { "id": "...", "category": "..." } }
  *   out  { "success": true, "data": null }
  *
- * verb-mcp owns the governance (policy → approval → budget → signed audit); this process only
+ * kriya-mcp owns the governance (policy → approval → budget → signed audit); this process only
  * holds the connection and runs the cleared action against Actual's in-process API.
  *
- * Run `node dist/handler.js --dump` to print the MCP tool schemas (for verb-mcp's --tools)
+ * Run `node dist/handler.js --dump` to print the MCP tool schemas (for kriya-mcp's --tools)
  * without connecting to a budget.
  */
 
 import { createInterface } from "node:readline";
-import { dispatchAction, getToolSchemas } from "@agent-native/core";
+import { dispatchAction, getToolSchemas } from "@kriya/core";
 import { loadActual, type ActualApi } from "./actual-api.js";
 import { fakeActual } from "./fake-actual.js";
 import { registerActualActions } from "./actions.js";
@@ -47,7 +47,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  // One request line → one response line, matching verb-mcp's handler contract.
+  // One request line → one response line, matching kriya-mcp's handler contract.
   const rl = createInterface({ input: process.stdin });
   for await (const line of rl) {
     const trimmed = line.trim();

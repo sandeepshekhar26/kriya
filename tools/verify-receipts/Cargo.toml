@@ -2,7 +2,7 @@
 name = "verify-receipts"
 version = "0.1.0"
 edition = "2021"
-description = "Offline verifier for the agent-native Ed25519-signed audit log."
+description = "Offline verifier for the kriya Ed25519-signed audit log."
 
 [[bin]]
 name = "verify-receipts"

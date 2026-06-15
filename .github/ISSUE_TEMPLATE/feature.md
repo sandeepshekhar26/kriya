@@ -1,6 +1,6 @@
 ---
 name: Feature request
-about: An idea for something verb should do.
+about: An idea for something kriya should do.
 title: ""
 labels: enhancement
 ---
@@ -15,7 +15,7 @@ case is better than abstract wish.
 ## Proposed solution
 
 <!--
-What you'd like verb to look like. Sketch the API, the protocol change,
+What you'd like kriya to look like. Sketch the API, the protocol change,
 the inspector tweak — whichever applies. Code samples welcome.
 -->
 
@@ -30,10 +30,10 @@ userland with X" is a valid alternative.
 
 <!-- Tick whichever apply. -->
 
-- [ ] `@agent-native/core` (SDK / protocol types)
-- [ ] `@agent-native/inspector` (React inspector components)
-- [ ] `agent-native-host` (Rust host crate)
-- [ ] `create-agent-app` (scaffolder / template)
+- [ ] `@kriya/core` (SDK / protocol types)
+- [ ] `@kriya/inspector` (React inspector components)
+- [ ] `kriya` (Rust host crate)
+- [ ] `create-kriya-app` (scaffolder / template)
 - [ ] One of the reference apps (`apps/note-app`, `apps/task-manager`)
 - [ ] Docs (`README.md`, `architecture.md`, `docs/PRODUCT_GAPS.md`)
 

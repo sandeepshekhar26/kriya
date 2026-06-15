@@ -1,5 +1,5 @@
 {
-  "name": "@agent-native/example-actual-budget",
+  "name": "@kriya/example-actual-budget",
   "version": "0.0.1",
   "private": true,
   "description": "Flagship demo (R5): bolt governed, agent-callable actions onto Actual Budget in <50 LOC — no rewrite, no new API.",
@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@actual-app/api": "^25.0.0",
-    "@agent-native/core": "0.0.1"
+    "@kriya/core": "0.0.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

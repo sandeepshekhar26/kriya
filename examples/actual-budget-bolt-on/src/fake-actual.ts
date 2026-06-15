@@ -1,6 +1,6 @@
 /**
  * An in-memory stand-in for Actual's API, used when `ACTUAL_FAKE=1`. It lets anyone run the
- * full governed demo — policy, approval, budget, signed audit, all flowing through verb-mcp —
+ * full governed demo — policy, approval, budget, signed audit, all flowing through kriya-mcp —
  * without installing `@actual-app/api` or setting up a real budget. The governance behaviour is
  * identical; only the data store is fake. For the real thing, unset ACTUAL_FAKE and `init()`
  * against a live budget.

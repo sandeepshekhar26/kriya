@@ -1,16 +1,16 @@
-# verb
+# kriya
 
 > **The governed runtime that lets an AI agent safely drive a desktop app — over MCP, on-device.**
 > Agents operate your app through **typed actions, not pixels**, and every call passes through
 > permission, human approval, budget, and a signed audit trail before it touches your data.
 
 As every app gets an agent, someone has to stop the agent doing the wrong thing — and prove it
-to an auditor. **verb is that layer, for the apps the cloud can't reach**: local-first, private,
-regulated desktop software with no web API to wrap. MCP moves the calls; verb is the safety the
+to an auditor. **kriya is that layer, for the apps the cloud can't reach**: local-first, private,
+regulated desktop software with no web API to wrap. MCP moves the calls; kriya is the safety the
 wire leaves out.
 
 It's not a competitor to MCP — it's the **governed runtime you put behind it**. Expose your app's
-real actions to any agent (Claude Desktop, Cursor, …), and verb enforces policy → approval →
+real actions to any agent (Claude Desktop, Cursor, …), and kriya enforces policy → approval →
 budget → signed audit on-device, where the data and the human are.
 
 ## The 50-line proof
@@ -20,7 +20,7 @@ onto [**Actual Budget**](https://actualbudget.org) — a real, shipped, local-fi
 **no HTTP API** — *without changing Actual's code*. The whole integration is ~37 lines:
 
 ```ts
-import { wrapAction } from "@agent-native/core";
+import { wrapAction } from "@kriya/core";
 
 // Wrap a function the app already has. The agent can now call it — but the host decides
 // whether it's allowed, whether a human must approve it, and signs a receipt when it runs.
@@ -73,29 +73,29 @@ in-app, on-device, which cloud MCP gateways structurally can't reach.
 
 ## Two ways to adopt
 
-- **Bolt onto an app you already have** — `wrapAction(existingFn, …)` (+ an `agent-native wrap`
+- **Bolt onto an app you already have** — `wrapAction(existingFn, …)` (+ an `kriya wrap`
   codemod that scaffolds wrappers from your exported functions), then expose them over MCP with
-  the `verb-mcp` server. Augment, not rewrite. This is the [Actual Budget demo](examples/actual-budget-bolt-on/).
-- **Build a new local-first agent app** — `npm create agent-app@latest` scaffolds a Tauri 2 +
+  the `kriya-mcp` server. Augment, not rewrite. This is the [Actual Budget demo](examples/actual-budget-bolt-on/).
+- **Build a new local-first agent app** — `npm create kriya-app@latest` scaffolds a Tauri 2 +
   React + Rust app with the whole safety layer pre-wired.
 
 The runtime is **cross-shell**: it runs in a Tauri backend, or as a standalone sidecar process
-(`verb-host`) that **Electron and plain Node** apps drive over stdio via
-[`@agent-native/sidecar`](packages/sidecar/) — so governance lives in a process the renderer can't
+(`kriya-host`) that **Electron and plain Node** apps drive over stdio via
+[`@kriya/sidecar`](packages/sidecar/) — so governance lives in a process the renderer can't
 tamper with.
 
 ## What's in the box
 
 | Package / crate | What |
 |---|---|
-| [`@agent-native/core`](packages/core/) | TypeScript SDK — `registerAction`, `wrapAction`, validation, MCP/JSON-Schema export, the `agent-native` CLI (`dump`, `wrap`) |
-| [`@agent-native/sidecar`](packages/sidecar/) | Node/TS binding — host the runtime from Electron or plain Node over stdio |
-| [`@agent-native/inspector`](packages/inspector/) | Drop-in React dev inspector — step log, approval modal, memory replay |
-| [`create-agent-app`](packages/create-agent-app/) | Scaffolder for a new local-first agent app |
-| [`agent-native-host`](crates/agent-native-host/) | Rust agent host — step loop, swappable inference, permissions, budget, signed audit, memory, **governed MCP-server mode** |
+| [`@kriya/core`](packages/core/) | TypeScript SDK — `registerAction`, `wrapAction`, validation, MCP/JSON-Schema export, the `kriya` CLI (`dump`, `wrap`) |
+| [`@kriya/sidecar`](packages/sidecar/) | Node/TS binding — host the runtime from Electron or plain Node over stdio |
+| [`@kriya/inspector`](packages/inspector/) | Drop-in React dev inspector — step log, approval modal, memory replay |
+| [`create-kriya-app`](packages/create-kriya-app/) | Scaffolder for a new local-first agent app |
+| [`kriya`](crates/kriya/) | Rust agent host — step loop, swappable inference, permissions, budget, signed audit, memory, **governed MCP-server mode** |
 
-**Binaries:** `verb-mcp` (governed MCP server — external agents drive your app through the gates) ·
-`verb-host` (the stdio sidecar) · [`tools/verify-receipts`](tools/verify-receipts/) (offline audit-log verifier).
+**Binaries:** `kriya-mcp` (governed MCP server — external agents drive your app through the gates) ·
+`kriya-host` (the stdio sidecar) · [`tools/verify-receipts`](tools/verify-receipts/) (offline audit-log verifier).
 
 **Reference apps:** [`apps/note-app`](apps/note-app/) and [`apps/task-manager`](apps/task-manager/)
 — two domains on the one shared host crate.
@@ -106,8 +106,8 @@ Try the governed bolt-on with zero setup (in-memory budget, no real data):
 
 ```bash
 npm install
-npm run build --workspace @agent-native/core
-cargo build -p agent-native-host --bin verb-mcp --release
+npm run build --workspace @kriya/core
+cargo build -p kriya --bin kriya-mcp --release
 cd examples/actual-budget-bolt-on && npm install && npm run build
 # then drive it like an MCP client — see the example README for the full command + Claude Desktop config
 ```
@@ -115,7 +115,7 @@ cd examples/actual-budget-bolt-on && npm install && npm run build
 Or run the reference desktop app:
 
 ```bash
-npm run build --workspace @agent-native/core
+npm run build --workspace @kriya/core
 npm run tauri dev --workspace note-app   # first run compiles the Rust backend (a few min)
 ```
 
