@@ -1,7 +1,8 @@
 # @agent-native/inspector
 
-Drop-in React inspector for agent-native desktop apps. Same look-and-feel across every
-app on the framework — every developer who picks up `@agent-native/core` gets the same
+Drop-in React inspector for [**verb**](https://github.com/sandeepshekhar26/verb) apps — watch an
+agent drive your app, approve guarded actions, and replay past runs. Same look-and-feel across
+every app on the framework: every developer who picks up `@agent-native/core` gets the same
 debugging surface.
 
 What's in the box:

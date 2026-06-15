@@ -1,93 +1,135 @@
 # verb
 
-> The framework where AI agents are **first-class users** of desktop apps.
-> Agents operate your app through **typed actions, not pixels** — no screenshots, no vision,
-> no brittle clicking. Ship once; it works for humans and machines.
+> **The governed runtime that lets an AI agent safely drive a desktop app — over MCP, on-device.**
+> Agents operate your app through **typed actions, not pixels**, and every call passes through
+> permission, human approval, budget, and a signed audit trail before it touches your data.
 
-Built on the final stack — **Tauri 2 + Rust + TypeScript + React** — with the safety layer
-(permissions, human approval, signed audit, memory) built in, not bolted on.
+As every app gets an agent, someone has to stop the agent doing the wrong thing — and prove it
+to an auditor. **verb is that layer, for the apps the cloud can't reach**: local-first, private,
+regulated desktop software with no web API to wrap. MCP moves the calls; verb is the safety the
+wire leaves out.
 
-## The idea: one app, two doors
+It's not a competitor to MCP — it's the **governed runtime you put behind it**. Expose your app's
+real actions to any agent (Claude Desktop, Cursor, …), and verb enforces policy → approval →
+budget → signed audit on-device, where the data and the human are.
+
+## The 50-line proof
+
+[`examples/actual-budget-bolt-on/`](examples/actual-budget-bolt-on/) bolts governed agent access
+onto [**Actual Budget**](https://actualbudget.org) — a real, shipped, local-first finance app with
+**no HTTP API** — *without changing Actual's code*. The whole integration is ~37 lines:
+
+```ts
+import { wrapAction } from "@agent-native/core";
+
+// Wrap a function the app already has. The agent can now call it — but the host decides
+// whether it's allowed, whether a human must approve it, and signs a receipt when it runs.
+wrapAction(actual.updateTransaction, {
+  id: "categorize_transaction",
+  description: "Assign a category to a transaction.",
+  parameters: { id: str, category: str },
+  mapParams: (p) => [p.id, { category: p.category }],
+});
+
+wrapAction(actual.deleteTransaction, {
+  id: "delete_transaction",
+  description: "Permanently delete a transaction.",
+  parameters: { id: str },
+  mapParams: (p) => [p.id],          // policy: require_approval — pauses for a human
+});
+```
+
+The agent categorizes and reconciles freely; **deleting a transaction or moving money pauses for
+your approval**, and every action is signed into an audit log. Run the full governed flow with no
+setup via `ACTUAL_FAKE=1` — see the [example README](examples/actual-budget-bolt-on/).
+
+## One app, two doors
 
 ```
 Human  ──clicks buttons──┐
                          ├──▶  the same registered actions  ──▶  app state ──▶ UI
-Agent  ──calls actions───┘
+Agent  ──calls actions───┘        (governed: policy · approval · budget · audit)
 ```
 
-A developer declares each app affordance once with `registerAction(...)`. Humans trigger it by
-clicking; agents trigger it by calling the typed action. Both run the exact same business logic.
-The agent never simulates a human — it calls the affordance directly.
+A developer declares each affordance once — with `registerAction(...)` for a new app, or
+`wrapAction(...)` to adopt one you already have. Humans trigger it by clicking; agents trigger it
+by calling the typed action. Both run the *exact same* business logic. The agent never simulates a
+human — and it can never bypass the gates, because the host (not the agent) owns the policy and the
+signing key.
 
-## How the loop works
+## The governance (the moat)
 
-The reference app is a note-taking app. Click **Run agent: organize** and a local agent sorts
-the notes into categories by itself. Each step:
+Every action an agent proposes runs this gauntlet, on-device, before it executes:
 
-1. The app hands the agent its **state** (the notes, as JSON) and a **menu of typed actions**
-   (`create_note`, `edit_note`, `delete_note`).
-2. The agent picks one action with parameters.
-3. The Rust **agent host** gates it: permission check → human approval (if required) → rate
-   limit → only then dispatch.
-4. The app runs the *same* handler a human button would, and the UI re-renders.
-5. The host writes a **cryptographically signed receipt** and records the action to durable
-   **memory**.
-6. Repeat until the agent reports done.
+1. **Permission** — a deny-by-default YAML policy decides allow / require-approval / deny.
+2. **Human approval** — guarded actions pause for an Approve/Deny decision in *your* app's UI (or a
+   terminal prompt), then resume the in-flight call.
+3. **Budget** — a sliding-window actions-per-minute cap stops a runaway or looping agent.
+4. **Signed audit** — an Ed25519 receipt per action → append-only JSONL, verifiable offline.
 
-No vision. No DOM selectors. Just structured state and typed action calls.
+Plus persistent **memory** (every action across runs, in SQLite), policy **linting**, and
+**step-through** debugging. For local/regulated apps this is mandatory — and it can only happen
+in-app, on-device, which cloud MCP gateways structurally can't reach.
 
-## What's built
+## Two ways to adopt
 
-**Core SDK — `@agent-native/core`** (TypeScript)
-- `registerAction()` with typed, permission-scoped actions and runtime parameter validation
-- `getToolSchemas()` / `getMcpToolSchemas()` — MCP-compatible + standards-JSON-Schema output
-- The agent-loop protocol types; a `agent-native dump` CLI
+- **Bolt onto an app you already have** — `wrapAction(existingFn, …)` (+ an `agent-native wrap`
+  codemod that scaffolds wrappers from your exported functions), then expose them over MCP with
+  the `verb-mcp` server. Augment, not rewrite. This is the [Actual Budget demo](examples/actual-budget-bolt-on/).
+- **Build a new local-first agent app** — `npm create agent-app@latest` scaffolds a Tauri 2 +
+  React + Rust app with the whole safety layer pre-wired.
 
-**Agent host** (Rust, in the Tauri backend)
-- The step loop and a swappable `Inference` trait with four backends:
-  `deterministic` (scripted, free), `claude-cli`, `ollama`, `anthropic`
-- **Permissions** — deny-by-default YAML policy
-- **Human-approval queue** — guarded actions pause for an Approve/Deny decision
-- **Budget** — sliding-window actions-per-minute cap stops a runaway agent
-- **Signed audit trail** — Ed25519 receipt per action → JSONL log
-- **Persistent memory** — every action stored in SQLite across runs, recalled into the prompt
+The runtime is **cross-shell**: it runs in a Tauri backend, or as a standalone sidecar process
+(`verb-host`) that **Electron and plain Node** apps drive over stdio via
+[`@agent-native/sidecar`](packages/sidecar/) — so governance lives in a process the renderer can't
+tamper with.
 
-**Tooling**
-- `tools/verify-receipts` — standalone CLI that verifies the signed audit log offline
+## What's in the box
 
-## Layout
+| Package / crate | What |
+|---|---|
+| [`@agent-native/core`](packages/core/) | TypeScript SDK — `registerAction`, `wrapAction`, validation, MCP/JSON-Schema export, the `agent-native` CLI (`dump`, `wrap`) |
+| [`@agent-native/sidecar`](packages/sidecar/) | Node/TS binding — host the runtime from Electron or plain Node over stdio |
+| [`@agent-native/inspector`](packages/inspector/) | Drop-in React dev inspector — step log, approval modal, memory replay |
+| [`create-agent-app`](packages/create-agent-app/) | Scaffolder for a new local-first agent app |
+| [`agent-native-host`](crates/agent-native-host/) | Rust agent host — step loop, swappable inference, permissions, budget, signed audit, memory, **governed MCP-server mode** |
 
-```
-verb/
-├── architecture.md            # how the pattern works, end to end
-├── docs/PRODUCT_GAPS.md        # honest roadmap: demo → full product
-├── packages/
-│   └── core/                   # @agent-native/core — the TypeScript SDK
-└── apps/
-│   └── note-app/               # reference app: Tauri 2 + React + Rust agent host
-│       ├── src/                # React UI + action registration (TS)
-│       └── src-tauri/          # Rust: host loop, inference, permissions, audit, budget, memory
-└── tools/
-    └── verify-receipts/        # offline Ed25519 audit-log verifier (Rust)
-```
+**Binaries:** `verb-mcp` (governed MCP server — external agents drive your app through the gates) ·
+`verb-host` (the stdio sidecar) · [`tools/verify-receipts`](tools/verify-receipts/) (offline audit-log verifier).
+
+**Reference apps:** [`apps/note-app`](apps/note-app/) and [`apps/task-manager`](apps/task-manager/)
+— two domains on the one shared host crate.
 
 ## Quick start
+
+Try the governed bolt-on with zero setup (in-memory budget, no real data):
 
 ```bash
 npm install
 npm run build --workspace @agent-native/core
+cargo build -p agent-native-host --bin verb-mcp --release
+cd examples/actual-budget-bolt-on && npm install && npm run build
+# then drive it like an MCP client — see the example README for the full command + Claude Desktop config
+```
+
+Or run the reference desktop app:
+
+```bash
+npm run build --workspace @agent-native/core
 npm run tauri dev --workspace note-app   # first run compiles the Rust backend (a few min)
 ```
 
-In the app: **Seed 5 notes** → **Run agent: organize** (watch the inspector), then **Run agent:
-remove ideas** to see the approval modal pause a guarded delete. Pick the AI backend with the
-`AGENT_BACKEND` env var (`deterministic` default, or `claude-cli` / `ollama` / `anthropic`).
+Pick the inference backend with `AGENT_BACKEND` (`deterministic` default, or `claude-cli` /
+`ollama` / `anthropic`).
 
-See [apps/note-app/README.md](apps/note-app/README.md) for details (and the toolchain note —
-Rust is pinned to 1.90 there).
+## Docs
+
+- [architecture.md](architecture.md) — how the pattern works, end to end
+- [docs/ROADMAP.md](docs/ROADMAP.md) — what's built and what's next
+- [docs/PRODUCT_GAPS.md](docs/PRODUCT_GAPS.md) — honest feature-completion tracker
 
 ## Status
 
-Early / alpha. The pattern and the safety layer work end-to-end; the framework is still being
-generalized and hardened. MIT licensed. Roadmap and what's still missing:
-[docs/PRODUCT_GAPS.md](docs/PRODUCT_GAPS.md). Design: [architecture.md](architecture.md).
+Alpha. The pattern, the cross-shell runtime, and the full safety layer work end-to-end (the wedge
+— governed MCP server, sidecar host, `wrapAction` bolt-on, and the Actual Budget flagship — are
+all shipped). APIs may still change before the first published release. MIT licensed.

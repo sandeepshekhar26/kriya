@@ -1,12 +1,17 @@
 # create-agent-app
 
-Scaffold a new agent-native desktop app in one command.
+Scaffold a new local-first agent app — built on [**verb**](https://github.com/sandeepshekhar26/verb),
+the governed runtime that lets an AI agent safely drive a desktop app — in one command.
 
 ```bash
 npm create agent-app@latest my-app
 # or
 npx create-agent-app my-app
 ```
+
+> Already have an app? You don't need to start from scratch — bolt verb onto your existing
+> handlers with `wrapAction` (see [`@agent-native/core`](https://www.npmjs.com/package/@agent-native/core)).
+> This scaffolder is for greenfield apps.
 
 You get a working Tauri 2 + React + TypeScript desktop app with the agent host
 (`@agent-native/core` SDK + Rust agent loop) already wired in: typed actions,

@@ -1,8 +1,12 @@
 # @agent-native/core
 
-Action registry + agent-loop protocol for **agent-native desktop apps** — apps where a local
-AI agent is a first-class user. Declare your app's affordances once as typed actions; a bundled
-agent calls them directly. No vision, no screenshots, no DOM selectors.
+The TypeScript SDK for [**verb**](https://github.com/sandeepshekhar26/verb) — the governed runtime
+that lets an AI agent safely drive a desktop app. Declare your app's affordances once as typed,
+permission-scoped **actions**; an agent calls them directly (over MCP), and the host gates every
+call. No vision, no screenshots, no DOM selectors.
+
+Adopt it greenfield with `registerAction`, or bolt it onto a function you already have with
+`wrapAction` — augment, not rewrite.
 
 ```ts
 import { registerAction, getToolSchemas, dispatchAction } from "@agent-native/core";
@@ -57,5 +61,6 @@ npx agent-native wrap ./src/actions.ts --import ./actions.js > src/register-acti
 
 ## Status
 
-`v0.0.1` — early. Part of the [agent-native](https://github.com/sandeepshekhar26/verb) framework.
-MIT licensed.
+`v0.0.1` — alpha. Part of the [verb](https://github.com/sandeepshekhar26/verb) framework
+(governed MCP-server mode, the `@agent-native/sidecar` Electron/Node host, and the `wrapAction`
+bolt-on all ship alongside this). MIT licensed.
