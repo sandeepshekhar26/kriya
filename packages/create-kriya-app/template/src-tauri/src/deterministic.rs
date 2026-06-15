@@ -1,12 +1,13 @@
 //! A scripted, zero-cost backend that proves the full protocol without any LLM.
 //!
 //! Reads `count` and the goal text. If the goal mentions a number, the planner steps
-//! the counter toward it; otherwise it reports done immediately. Replace this with a
-//! real backend (`AGENT_BACKEND=claude-cli|ollama|anthropic`) for live LLM reasoning.
+//! the counter toward it; otherwise it reports done immediately. This is the planner
+//! the scaffolded app runs by default — swap it for a real backend with
+//! `AGENT_BACKEND=claude-cli|ollama|anthropic` for live LLM reasoning.
 
 use serde_json::{json, Value};
 
-use super::{Inference, StepContext, StepDecision};
+use kriya::{Inference, StepContext, StepDecision};
 
 pub struct DeterministicPlanner {
     steps: u32,
