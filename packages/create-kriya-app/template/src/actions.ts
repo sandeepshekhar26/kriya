@@ -7,7 +7,7 @@
  * `getToolSchemas()`.
  */
 
-import { registerAction } from "@kriya/core";
+import { registerAction } from "kriya-core";
 import { store } from "./store";
 
 export const increment = registerAction<{ by?: number }, { count: number }>({

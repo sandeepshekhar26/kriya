@@ -8,7 +8,7 @@
  */
 
 import { useEffect } from "react";
-import type { AgentAwaitStep } from "@kriya/core";
+import type { AgentAwaitStep } from "kriya-core";
 
 export interface StepGateProps {
   await_: AgentAwaitStep | null;

@@ -4,7 +4,7 @@
  * channel waiting for `onApprove` / `onDeny` to be dispatched.
  */
 
-import type { AgentApprovalRequest } from "@kriya/core";
+import type { AgentApprovalRequest } from "kriya-core";
 
 export interface ApprovalModalProps {
   request: AgentApprovalRequest | null;

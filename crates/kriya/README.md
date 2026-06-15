@@ -5,7 +5,7 @@ runtime** that lets an AI agent safely drive a desktop app. It turns a goal + a 
 actions into a permission-checked, budget-bounded, human-approvable, **cryptographically audited**
 sequence of action calls — and exposes that same governance to external agents over MCP.
 
-Pairs with the [`@kriya/core`](https://www.npmjs.com/package/@kriya/core)
+Pairs with the [`kriya-core`](https://www.npmjs.com/package/kriya-core)
 TypeScript SDK, but the governance, signing key, and policy live here in Rust, in a process the
 app's UI can't tamper with.
 
@@ -61,7 +61,7 @@ changes when you switch.
 ## Binaries
 
 - `kriya-mcp` — the governed MCP server (external agents).
-- `kriya-host` — the stdio sidecar (Electron/Node host the runtime via `@kriya/sidecar`).
+- `kriya-host` — the stdio sidecar (Electron/Node host the runtime via `kriya-sidecar`).
 
 ## Status
 

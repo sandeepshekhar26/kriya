@@ -26,7 +26,7 @@ pub trait HostSink: Send + Sync {
 }
 
 /// A [`HostSink`] backed by a Tauri `AppHandle`. Emits each event on the same channel names
-/// the `@kriya/core` SDK already listens for, so existing Tauri apps are unchanged
+/// the `kriya-core` SDK already listens for, so existing Tauri apps are unchanged
 /// apart from wrapping their handle in this.
 pub struct TauriSink {
     app: tauri::AppHandle,

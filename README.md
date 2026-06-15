@@ -20,7 +20,7 @@ onto [**Actual Budget**](https://actualbudget.org) — a real, shipped, local-fi
 **no HTTP API** — *without changing Actual's code*. The whole integration is ~37 lines:
 
 ```ts
-import { wrapAction } from "@kriya/core";
+import { wrapAction } from "kriya-core";
 
 // Wrap a function the app already has. The agent can now call it — but the host decides
 // whether it's allowed, whether a human must approve it, and signs a receipt when it runs.
@@ -81,16 +81,16 @@ in-app, on-device, which cloud MCP gateways structurally can't reach.
 
 The runtime is **cross-shell**: it runs in a Tauri backend, or as a standalone sidecar process
 (`kriya-host`) that **Electron and plain Node** apps drive over stdio via
-[`@kriya/sidecar`](packages/sidecar/) — so governance lives in a process the renderer can't
+[`kriya-sidecar`](packages/sidecar/) — so governance lives in a process the renderer can't
 tamper with.
 
 ## What's in the box
 
 | Package / crate | What |
 |---|---|
-| [`@kriya/core`](packages/core/) | TypeScript SDK — `registerAction`, `wrapAction`, validation, MCP/JSON-Schema export, the `kriya` CLI (`dump`, `wrap`) |
-| [`@kriya/sidecar`](packages/sidecar/) | Node/TS binding — host the runtime from Electron or plain Node over stdio |
-| [`@kriya/inspector`](packages/inspector/) | Drop-in React dev inspector — step log, approval modal, memory replay |
+| [`kriya-core`](packages/core/) | TypeScript SDK — `registerAction`, `wrapAction`, validation, MCP/JSON-Schema export, the `kriya` CLI (`dump`, `wrap`) |
+| [`kriya-sidecar`](packages/sidecar/) | Node/TS binding — host the runtime from Electron or plain Node over stdio |
+| [`kriya-inspector`](packages/inspector/) | Drop-in React dev inspector — step log, approval modal, memory replay |
 | [`create-kriya-app`](packages/create-kriya-app/) | Scaffolder for a new local-first agent app |
 | [`kriya`](crates/kriya/) | Rust agent host — step loop, swappable inference, permissions, budget, signed audit, memory, **governed MCP-server mode** |
 
@@ -106,7 +106,7 @@ Try the governed bolt-on with zero setup (in-memory budget, no real data):
 
 ```bash
 npm install
-npm run build --workspace @kriya/core
+npm run build --workspace kriya-core
 cargo build -p kriya --bin kriya-mcp --release
 cd examples/actual-budget-bolt-on && npm install && npm run build
 # then drive it like an MCP client — see the example README for the full command + Claude Desktop config
@@ -115,7 +115,7 @@ cd examples/actual-budget-bolt-on && npm install && npm run build
 Or run the reference desktop app:
 
 ```bash
-npm run build --workspace @kriya/core
+npm run build --workspace kriya-core
 npm run tauri dev --workspace note-app   # first run compiles the Rust backend (a few min)
 ```
 

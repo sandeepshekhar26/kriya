@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { describe, it, expect } from "vitest";
-import type { AgentActionRequest } from "@kriya/core";
+import type { AgentActionRequest } from "kriya-core";
 
 import { SidecarHost, runTask } from "./index.js";
 

@@ -11,8 +11,8 @@ import {
   respondToApproval,
   useRunCount,
 } from "./agent";
-import { AgentInspector, ApprovalModal, MemoryPanel } from "@kriya/inspector";
-import "@kriya/inspector/styles.css";
+import { AgentInspector, ApprovalModal, MemoryPanel } from "kriya-inspector";
+import "kriya-inspector/styles.css";
 
 const FINISH_HIGH_GOAL =
   "Complete every high-priority task. Mark each high-priority task as done; " +

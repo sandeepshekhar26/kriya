@@ -1,6 +1,6 @@
 //! `kriya` — the Rust half of the kriya framework.
 //!
-//! Pairs with the `@kriya/core` TypeScript SDK to turn a goal + a registry of
+//! Pairs with the `kriya-core` TypeScript SDK to turn a goal + a registry of
 //! typed actions into a permission-checked, budget-bounded, cryptographically-audited
 //! sequence of action calls against a desktop app.
 //!

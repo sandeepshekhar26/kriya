@@ -4,7 +4,7 @@
 //! the renderer can't tamper with, instead of only inside a Tauri backend.
 //!
 //! The wire protocol (newline-delimited JSON in both directions) is documented in
-//! `kriya::sidecar`; the `@kriya/sidecar` npm package is the Node client.
+//! `kriya::sidecar`; the `kriya-sidecar` npm package is the Node client.
 //!
 //! Usage:
 //!   kriya-host [--policy <policy.yaml>] [--script <script.json>]

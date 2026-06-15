@@ -1,5 +1,5 @@
 {
-  "name": "@kriya/sidecar",
+  "name": "kriya-sidecar",
   "version": "0.0.1",
   "description": "Host the kriya agent runtime from Electron or plain Node — spawn the kriya-host sidecar and drive governed agent runs over stdio.",
   "license": "MIT",
@@ -46,7 +46,7 @@
     "prepublishOnly": "npm run build && npm run test"
   },
   "dependencies": {
-    "@kriya/core": "0.0.1"
+    "kriya-core": "0.0.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

@@ -20,7 +20,7 @@
 
 Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
 
-## 1. Core SDK (`@kriya/core`)
+## 1. Core SDK (`kriya-core`)
 - ✅ `registerAction`, typed schemas, MCP-style `getToolSchemas()`
 - ✅ Runtime param validation (types/enum/array/required) + 13-test suite
 - ✅ Standards-compliant **JSON Schema** export (`packages/core/src/jsonschema.ts` + test suite)
@@ -96,7 +96,7 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
   per-app file map ("where to add features"), and a documented macOS gotcha —
   `target/release/bundle/macos/<app>.app` shadows `tauri dev` via LaunchServices
   after a prior release build, with a one-liner to kill it.
-- ✅ Rich dev dashboard/inspector — extracted into `@kriya/inspector`
+- ✅ Rich dev dashboard/inspector — extracted into `kriya-inspector`
   (workspace package, v0.2.0). Filterable log (toggle levels + full-text search),
   per-step expand, one-click JSONL export of the current run, and a `MemoryPanel`
   that reads durable past runs from the host's SQLite memory via the
@@ -105,7 +105,7 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
   Esc to close) walk through neighbouring episodes one at a time — keyboard nav
   is suppressed while typing in inputs so the inspector's filter box still works.
   Both reference apps consume the package; styles ship via
-  `@kriya/inspector/styles.css` and are themable through CSS variables.
+  `kriya-inspector/styles.css` and are themable through CSS variables.
   ✅ Live in-host pause-between-steps shipped: `AgentStartRequest.stepMode:
   true` makes the host pause before *each* decision and emit an
   `agent://await_step` event with the upcoming step number + last action +
@@ -140,13 +140,13 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
 - ✅ **Sidecar host + Electron/Node binding** (`R3`, **P0 — critical path**, `8b3a8c2`) — the
   agent loop is decoupled from Tauri behind a `HostSink` trait (`TauriSink` is one impl). The
   `kriya-host` binary runs `kriya` as a standalone process over stdio (NDJSON
-  protocol mirroring the Tauri event/command names), and `@kriya/sidecar` (`SidecarHost`
+  protocol mirroring the Tauri event/command names), and `kriya-sidecar` (`SidecarHost`
   + `runTask`) binds it from Electron and plain Node. A generic `ScriptedPlanner` backend
   (`--script`) enables zero-config deterministic runs. Governance lives in a process the
   renderer can't tamper with. The cross-shell decoupling that lets kriya bolt onto an existing
   app whatever its shell. Verified end to end (Node → Rust → Node round-trip).
 - ✅ **`wrapAction` + codemod** (`R4`, **P0 — critical path**, `0afc8ca`) — `wrapAction(fn,
-  { id, description, parameters, mapParams, mapResult })` in `@kriya/core` adapts a
+  { id, description, parameters, mapParams, mapResult })` in `kriya-core` adapts a
   function an app already has (positional args, plain return, throws) into a registered action,
   normalizing the return/throw into an `ActionResult` and running the full registry path
   (validation, audit, composition). The `kriya wrap <file>` codemod scans exported

@@ -5,7 +5,7 @@
  * Each handler owns the business logic and mutates the store.
  */
 
-import { registerAction } from "@kriya/core";
+import { registerAction } from "kriya-core";
 import { nextId, store, type Priority, type Task } from "./store";
 
 const PRIORITIES: Priority[] = ["low", "medium", "high"];

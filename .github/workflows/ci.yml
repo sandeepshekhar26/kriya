@@ -26,14 +26,14 @@ jobs:
       - name: install workspace
         run: npm install --no-audit --no-fund
 
-      - name: build @kriya/core
-        run: npm run build --workspace @kriya/core
+      - name: build kriya-core
+        run: npm run build --workspace kriya-core
 
-      - name: test @kriya/core
-        run: npm run test --workspace @kriya/core
+      - name: test kriya-core
+        run: npm run test --workspace kriya-core
 
-      - name: build @kriya/inspector
-        run: npm run build --workspace @kriya/inspector
+      - name: build kriya-inspector
+        run: npm run build --workspace kriya-inspector
 
       - name: typecheck note-app
         run: npx tsc --noEmit
@@ -107,10 +107,10 @@ jobs:
         run: npm install --no-audit --no-fund
 
       - name: build core (needed by scaffolded app's tsc)
-        run: npm run build --workspace @kriya/core
+        run: npm run build --workspace kriya-core
 
       - name: build inspector
-        run: npm run build --workspace @kriya/inspector
+        run: npm run build --workspace kriya-inspector
 
       - name: scaffold a sample app
         run: |
@@ -134,7 +134,7 @@ jobs:
 
       - name: typecheck the scaffolded app against the in-repo workspace
         run: |
-          # Move scaffolded app under apps/ so workspace resolves @kriya/*
+          # Move scaffolded app under apps/ so workspace resolves the kriya-* packages
           mv "$RUNNER_TEMP/ci-smoke" "$GITHUB_WORKSPACE/apps/ci-smoke"
           npm install --no-audit --no-fund
           cd "$GITHUB_WORKSPACE/apps/ci-smoke"

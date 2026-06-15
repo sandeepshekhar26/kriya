@@ -1,4 +1,4 @@
-# @kriya/sidecar
+# kriya-sidecar
 
 Host the **kriya** agent runtime from **Electron or plain Node** — not just Tauri.
 
@@ -22,7 +22,7 @@ for, the same handlers a button click would call.
 ## Install
 
 ```bash
-npm install @kriya/sidecar
+npm install kriya-sidecar
 ```
 
 You also need the `kriya-host` binary (build it from the Rust crate, or ship it with your app):
@@ -37,7 +37,7 @@ The high-level `runTask` drives one run to completion: it sends the goal, execut
 the host requests against your own state, answers approvals, and resolves with the summary.
 
 ```ts
-import { SidecarHost, runTask } from "@kriya/sidecar";
+import { SidecarHost, runTask } from "kriya-sidecar";
 
 const host = SidecarHost.spawn({
   binaryPath: "/path/to/kriya-host",
@@ -45,7 +45,7 @@ const host = SidecarHost.spawn({
   env: { ...process.env, AGENT_BACKEND: "claude-cli" }, // or ollama / anthropic
 });
 
-// Your app's state + the same typed actions you'd register in @kriya/core.
+// Your app's state + the same typed actions you'd register in kriya-core.
 let state = { notes: [] as { id: number; title: string }[] };
 
 const done = await runTask(
@@ -131,7 +131,7 @@ host.start({ goal, state, tools });
 | `parseError` | raw line `string` | — |
 | `exit` | exit code `number \| null` | — |
 
-The protocol types are re-exported from [`@kriya/core`](../core).
+The protocol types are re-exported from [`kriya-core`](../core).
 
 ## License
 

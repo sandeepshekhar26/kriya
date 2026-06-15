@@ -6,7 +6,7 @@
  * never sees this code — it only sees the schemas emitted by `getToolSchemas()`.
  */
 
-import { registerAction } from "@kriya/core";
+import { registerAction } from "kriya-core";
 import { nextId, store, type Note } from "./store";
 
 export const createNote = registerAction<

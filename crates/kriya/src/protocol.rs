@@ -1,4 +1,4 @@
-//! Rust mirrors of the `@kriya/core` agent-loop protocol. Field names that cross
+//! Rust mirrors of the `kriya-core` agent-loop protocol. Field names that cross
 //! the IPC boundary use camelCase to match the TypeScript side.
 
 use serde::{Deserialize, Serialize};

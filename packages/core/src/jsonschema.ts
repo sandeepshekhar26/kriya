@@ -1,5 +1,5 @@
 /**
- * Standards-compliant JSON Schema exporter for @kriya/core.
+ * Standards-compliant JSON Schema exporter for kriya-core.
  *
  * Our internal `ParameterSchema` uses a compact custom shape where:
  *   - `required` is a per-property boolean, and

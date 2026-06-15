@@ -28,7 +28,7 @@ matters until this path is walked.
 - ⬜ **R6 · Governance dashboard (the paid surface).** Cross-app/agent audit viewer, in-app policy
   editor, approval routing for multiple pending approvals, budget controls. Open-core
   monetization; leans on the audit/budget/approval/policy work already shipped.
-- ⬜ **R2 · Publish packages.** `@kriya/core` + `@kriya/inspector` → npm;
+- ⬜ **R2 · Publish packages.** `kriya-core` + `kriya-inspector` → npm;
   `kriya` → crates.io; `create-kriya-app` last. **Runbook:
   [PUBLISHING.md](PUBLISHING.md).** Planner runs the commands (irreversible, needs credentials —
   [D-004](DECISIONS.md)). After publish, swap the scaffolder template to the published crate
@@ -89,10 +89,10 @@ matters until this path is walked.
   (8 runtime + 8 codemod). **Augment, not migrate — the bolt-on that makes R5 real.**
 - ✅ **R3 · Sidecar host + Electron/Node binding** — `8b3a8c2` (3 commits: `0832cd1` decouple
   the loop from Tauri via a `HostSink` trait, `5df3c4b` stdio sidecar + `kriya-host` binary,
-  `8b3a8c2` the `@kriya/sidecar` Node/TS binding). The agent loop is now transport-
+  `8b3a8c2` the `kriya-sidecar` Node/TS binding). The agent loop is now transport-
   agnostic: `run_task` emits through `HostSink` (Tauri is just `TauriSink`); the new `kriya-host`
   binary runs the loop as a standalone process speaking newline-delimited JSON over stdio, with
-  governance in a process the renderer can't tamper with. `@kriya/sidecar` (`SidecarHost`
+  governance in a process the renderer can't tamper with. `kriya-sidecar` (`SidecarHost`
   + `runTask`) spawns it from Electron/Node. A generic `ScriptedPlanner` backend (`--script`)
   gives zero-config, no-API-key deterministic runs for demos/CI. Verified end to end: a Node
   client drove the real binary through a full run (action dispatch + approval gate + done).

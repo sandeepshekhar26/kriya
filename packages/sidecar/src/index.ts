@@ -1,5 +1,5 @@
 /**
- * @kriya/sidecar — host the kriya agent runtime from Electron or plain Node.
+ * kriya-sidecar — host the kriya agent runtime from Electron or plain Node.
  *
  * Spawns the `kriya-host` binary (the Rust agent host, built from
  * `crates/kriya`) and speaks its newline-delimited JSON protocol over stdio. The
@@ -25,7 +25,7 @@ import type {
   AgentLog,
   AgentStartRequest,
   AgentStepAdvance,
-} from "@kriya/core";
+} from "kriya-core";
 
 /** The events the host pushes back to the app, and their payload tuples. */
 export interface SidecarEvents {

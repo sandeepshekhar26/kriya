@@ -1,5 +1,5 @@
 {
-  "name": "@kriya/core",
+  "name": "kriya-core",
   "version": "0.0.1",
   "description": "Action registry + agent loop protocol for kriya desktop apps. Agents see your app's typed actions, not pixels.",
   "license": "MIT",
