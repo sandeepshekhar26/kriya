@@ -14,7 +14,8 @@
 //!     audit::Signer,
 //!     permissions::Policy,
 //!     protocol::{AgentActionResult, AgentApprovalResponse, AgentStartRequest},
-//!     run_task, select_backend_with_default, ApprovalMap, PendingMap, StepAdvanceMap,
+//!     run_task, select_backend_with_default, ApprovalMap, HostSink, PendingMap, StepAdvanceMap,
+//!     TauriSink,
 //! };
 //!
 //! # struct AppState {
@@ -33,9 +34,11 @@
 //! # }
 //! # fn wire(app: tauri::AppHandle, state: AppState, req: AgentStartRequest) {
 //! let backend = select_backend_with_default(Box::new(MyDeterministic::default()));
+//! // Wrap the Tauri handle in a HostSink; a sidecar/Electron host passes a stdio sink instead.
+//! let sink: Arc<dyn HostSink> = Arc::new(TauriSink::new(app));
 //! std::thread::spawn(move || {
 //!     let _ = run_task(
-//!         app,
+//!         sink,
 //!         state.pending,
 //!         state.approvals,
 //!         state.advances,
@@ -59,4 +62,4 @@ pub mod protocol;
 pub use agent::inference::{
     select_backend_with_default, Inference, StepContext, StepDecision, StepRecord,
 };
-pub use agent::{run_task, ApprovalMap, PendingMap, StepAdvanceMap};
+pub use agent::{run_task, ApprovalMap, HostSink, PendingMap, StepAdvanceMap, TauriSink};
