@@ -19,12 +19,14 @@ matters until this path is walked.
 - ✅ **R1 · Governed MCP-server mode** — shipped (`d1e28e6`). See **Done** below.
 - ✅ **R3 · Sidecar host + Electron/Node binding** — shipped (`8b3a8c2`). See **Done** below.
 - ✅ **R4 · `wrapAction` + codemod** — shipped (`0afc8ca`). See **Done** below.
-- ⬜ ⭐ **R5 · THE FLAGSHIP DEMO (the YC application video).** Bolt verb onto a **real existing app
+- 🟡 ⭐ **R5 · THE FLAGSHIP DEMO (the YC application video).** Bolt verb onto a **real existing app
   WITHOUT rewriting it** — governed MCP access in **<50 lines**. Before/after video: stock local
-  app → an on-device agent driving it through typed, permissioned, audited actions. **Strongest
-  candidate: the planner's own no-API POS app** — purest proof this only works in-process and that
-  governance is intrinsic (a local notes/finance clone is the fallback). **This single demo is the
-  entire pitch.** Depends on R1 + R3 + R4.
+  app → an on-device agent driving it through typed, permissioned, audited actions. **Target:
+  [Actual Budget](https://actualbudget.org)** — open-source, local-first finance, **no HTTP API
+  (in-process `@actual-app/api` only)**, money makes governance visceral (decision
+  [D-010](DECISIONS.md), supersedes the earlier POS candidate). The agent categorizes/reconciles
+  but can't move money or delete a transaction without on-device approval; every action signed.
+  **This single demo is the entire pitch.** Depends on R1 + R3 + R4 (all ✅).
 
 ## P1 — Monetize + distribute (after the wedge is proven)
 
