@@ -17,11 +17,7 @@ These four, in sequence, produce the flagship POS video that *is* the pitch. Not
 matters until this path is walked.
 
 - ✅ **R1 · Governed MCP-server mode** — shipped (`d1e28e6`). See **Done** below.
-- ⬜ **R3 · Sidecar host + Electron/Node binding.** Run `agent-native-host` as a standalone
-  process the app's main process talks to over stdio; add a JS/TS binding so **Electron** and
-  plain Node apps host the runtime, not just Tauri. On the critical path because the existing app
-  we bolt onto (incl. the POS) may not be Tauri. Governance in a process the renderer can't tamper
-  with is a feature. (Also closes the §2 "separate-process host" gap.)
+- ✅ **R3 · Sidecar host + Electron/Node binding** — shipped. See **Done** below.
 - ⬜ **R4 · `wrapAction` + codemod.** `wrapAction(existingFn, { permissions })` to wrap handlers
   an app already has + an optional codemod that scans exported functions and scaffolds wrappers.
   This is what makes the <50-LOC bolt-on in R5 real. Framing: **augment, not migrate.**
@@ -77,6 +73,16 @@ matters until this path is walked.
 
 ## Done (newest first)
 
+- ✅ **R3 · Sidecar host + Electron/Node binding** — `8b3a8c2` (3 commits: `0832cd1` decouple
+  the loop from Tauri via a `HostSink` trait, `5df3c4b` stdio sidecar + `verb-host` binary,
+  `8b3a8c2` the `@agent-native/sidecar` Node/TS binding). The agent loop is now transport-
+  agnostic: `run_task` emits through `HostSink` (Tauri is just `TauriSink`); the new `verb-host`
+  binary runs the loop as a standalone process speaking newline-delimited JSON over stdio, with
+  governance in a process the renderer can't tamper with. `@agent-native/sidecar` (`SidecarHost`
+  + `runTask`) spawns it from Electron/Node. A generic `ScriptedPlanner` backend (`--script`)
+  gives zero-config, no-API-key deterministic runs for demos/CI. Verified end to end: a Node
+  client drove the real binary through a full run (action dispatch + approval gate + done).
+  Closes the §2 "separate-process host" gap. **Cross-shell decoupling — bolt onto any shell.**
 - ✅ **R1 · Governed MCP-server mode** — `d1e28e6` (3 commits: `20305d1` protocol types,
   `f56f1b4` governed dispatch, `d1e28e6` stdio server + `verb-mcp` binary). New `mcp` module
   in `agent-native-host`: an stdio JSON-RPC server (`initialize` / `tools/list` / `tools/call`)

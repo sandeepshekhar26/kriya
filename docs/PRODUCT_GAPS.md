@@ -57,9 +57,11 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
   mid-approval isn't re-issued — it's just skipped from history reseeding).
 - ⬜ Retry/backoff, graceful "this is too hard → escalate to frontier model" fallback
 - ⬜ Multi-agent orchestration (concurrent agents per app)
-- ⬜ Separate-process agent host (don't share the app's main thread) + latency profiling
-  (<500ms p50) — **this is now the R3 sidecar host**, on the critical path (cross-shell
-  decoupling so verb can bolt onto Electron/Node apps, not just Tauri).
+- ✅ Separate-process agent host (don't share the app's main thread) — **shipped as the R3
+  sidecar host** (`8b3a8c2`). `run_task` is now transport-agnostic behind a `HostSink` trait;
+  the `verb-host` binary runs the loop as a standalone process over stdio (NDJSON), with
+  governance in a process the renderer can't tamper with. Latency profiling (<500ms p50) still
+  ⬜ — the current `ProcessExecutor`/sidecar is correctness-first, not yet tuned.
 
 ## 3. Permissions, approval & audit
 - ✅ YAML policy + deny-by-default + `RequiresApproval` decision
@@ -132,10 +134,14 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
   governance serves Tauri, the R3 sidecar, or a CLI; `ProcessExecutor` shells out per call as
   the dependency-free bolt-on. Thin `verb-mcp` binary (`--tools` / `--policy` / `--exec` /
   `--approval`). 21 unit tests + verified end to end. Turns verb from a rewrite into a bolt-on.
-- ⬜ **Sidecar host + Electron/Node binding** (`R3`, **P0 — critical path**) — run
-  `agent-native-host` as a standalone process; bind from Electron (Slack/VS Code/Obsidian install
-  base) and plain Node, not just Tauri. The cross-shell decoupling that lets verb bolt onto an
-  existing app whatever its shell.
+- ✅ **Sidecar host + Electron/Node binding** (`R3`, **P0 — critical path**, `8b3a8c2`) — the
+  agent loop is decoupled from Tauri behind a `HostSink` trait (`TauriSink` is one impl). The
+  `verb-host` binary runs `agent-native-host` as a standalone process over stdio (NDJSON
+  protocol mirroring the Tauri event/command names), and `@agent-native/sidecar` (`SidecarHost`
+  + `runTask`) binds it from Electron and plain Node. A generic `ScriptedPlanner` backend
+  (`--script`) enables zero-config deterministic runs. Governance lives in a process the
+  renderer can't tamper with. The cross-shell decoupling that lets verb bolt onto an existing
+  app whatever its shell. Verified end to end (Node → Rust → Node round-trip).
 - ⬜ **`wrapAction` + codemod** (`R4`, **P0 — critical path**) — wrap an existing app's handlers
   without a rewrite (augment, not migrate). The bolt-on path that makes the <50-LOC R5 demo real.
 - ❌ Mobile (Flutter, SwiftUI, Jetpack Compose) — **deprioritized** (premature).
