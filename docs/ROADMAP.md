@@ -17,10 +17,8 @@ These four, in sequence, produce the flagship POS video that *is* the pitch. Not
 matters until this path is walked.
 
 - ✅ **R1 · Governed MCP-server mode** — shipped (`d1e28e6`). See **Done** below.
-- ✅ **R3 · Sidecar host + Electron/Node binding** — shipped. See **Done** below.
-- ⬜ **R4 · `wrapAction` + codemod.** `wrapAction(existingFn, { permissions })` to wrap handlers
-  an app already has + an optional codemod that scans exported functions and scaffolds wrappers.
-  This is what makes the <50-LOC bolt-on in R5 real. Framing: **augment, not migrate.**
+- ✅ **R3 · Sidecar host + Electron/Node binding** — shipped (`8b3a8c2`). See **Done** below.
+- ✅ **R4 · `wrapAction` + codemod** — shipped (`0afc8ca`). See **Done** below.
 - ⬜ ⭐ **R5 · THE FLAGSHIP DEMO (the YC application video).** Bolt verb onto a **real existing app
   WITHOUT rewriting it** — governed MCP access in **<50 lines**. Before/after video: stock local
   app → an on-device agent driving it through typed, permissioned, audited actions. **Strongest
@@ -73,6 +71,15 @@ matters until this path is walked.
 
 ## Done (newest first)
 
+- ✅ **R4 · `wrapAction` + codemod** — `0afc8ca` (2 commits: `a830ab0` the `wrapAction` runtime,
+  `0afc8ca` the codemod). `wrapAction(fn, { id, description, parameters, mapParams, mapResult })`
+  adapts a function an app already has — positional args, plain return, throws — into a
+  registered action, normalizing the return/throw into an `ActionResult`. The `agent-native
+  wrap <file>` codemod scans a source file's exported functions (TypeScript compiler API),
+  infers each parameter's schema + required-ness, pulls the description from JSDoc, and prints
+  a `wrapAction(...)` module to review and import. Verified end to end: wrap a typed file → the
+  generated module registers and emits correct MCP tool schemas via `dump`. 16 new tests
+  (8 runtime + 8 codemod). **Augment, not migrate — the bolt-on that makes R5 real.**
 - ✅ **R3 · Sidecar host + Electron/Node binding** — `8b3a8c2` (3 commits: `0832cd1` decouple
   the loop from Tauri via a `HostSink` trait, `5df3c4b` stdio sidecar + `verb-host` binary,
   `8b3a8c2` the `@agent-native/sidecar` Node/TS binding). The agent loop is now transport-
