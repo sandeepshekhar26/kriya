@@ -11,18 +11,20 @@
 > (no API to wrap, local/private data) — desktop/in-process is the *mechanism*, governance the
 > *moat*, **one bet, not two**. See
 > [strategy/governed-local-first-wedge.md](strategy/governed-local-first-wedge.md).
-> **Critical path (all P0):** `R1` governed MCP-server mode → `R3` sidecar/Electron host → `R4`
-> `wrapAction` bolt-on → `R5` the POS flagship demo — *not* more breadth on the "build a new Tauri
-> app" path. §4 (web/transport) and §6 (mobile/web bindings) are deliberately deprioritized. Live
-> priority order: [ROADMAP.md](ROADMAP.md).
+> **Critical path (all P0) — now COMPLETE (2026-06-15):** `R1` governed MCP-server mode → `R3`
+> sidecar/Electron host → `R4` `wrapAction` bolt-on → `R5` the flagship demo (**Actual Budget**,
+> decision [D-010](DECISIONS.md), not the earlier POS candidate) — all shipped (see §6). What
+> remains is recording the R5 video + P1 (monetize/distribute) and P2 (compliance/polish). §4
+> (web/transport) and §6 (mobile/web bindings) stay deliberately deprioritized. Live priority
+> order: [ROADMAP.md](ROADMAP.md).
 
 Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
 
 ## 1. Core SDK (`@agent-native/core`)
 - ✅ `registerAction`, typed schemas, MCP-style `getToolSchemas()`
 - ✅ Runtime param validation (types/enum/array/required) + 13-test suite
-- ⬜ Standards-compliant **JSON Schema** export (delegated — see prompt) so any MCP client
-  consumes schemas directly
+- ✅ Standards-compliant **JSON Schema** export (`packages/core/src/jsonschema.ts` + test suite)
+  so any MCP client consumes schemas directly
 - ✅ Action **composition** — handlers receive `ctx.call(childId, params)` and
   can invoke any other registered action. The child runs through the same
   validation + audit path; cycles and depth-cap violations surface as failed
@@ -70,7 +72,8 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
 - ⬜ Approval **queue UI** for multiple pending approvals + per-action policy editor in-app
 - 🟡 Budgets/rate-limits — actions/minute sliding-window cap enforced (host stops the run);
   api-calls/hr still ⬜
-- 🟡 Ed25519 signed receipts → JSONL — works; **verifier** CLI delegated (see prompt) + tamper tests ⬜
+- 🟡 Ed25519 signed receipts → JSONL — works; offline **verifier** CLI ✅ (`tools/verify-receipts/`);
+  tamper tests still ⬜ (tracked as R11)
 - ✅ Policy linting — `Policy::warnings()` reports on `*` rules that allow
   everything, destructive-named patterns (delete/remove/destroy/drop/purge/wipe)
   without `require_approval`, missing explicit catch-all, and missing
@@ -171,8 +174,9 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
 
 ## Near-term focus
 
-Superseded by the live, prioritized [ROADMAP.md](ROADMAP.md). The **critical path to the YC
-demo is R1 → R3 → R4 → R5** (all P0, in order); **R5** (the POS flagship demo) is the
-YC-defining artifact. Publishing (R2) and the governance dashboard (R6) come *after* the wedge
-is proven. §4 (web/transport) and §6 (mobile/web bindings) stay deprioritized under decision
-[D-009](DECISIONS.md).
+Superseded by the live, prioritized [ROADMAP.md](ROADMAP.md). The **P0 critical path
+(R1 → R3 → R4 → R5) is complete** — the wedge is proven in code (R5 = the Actual Budget bolt-on,
+`examples/actual-budget-bolt-on/`). Immediate next: **record the R5 before/after video** (the
+YC-defining artifact), then P1 — governance dashboard (R6, the paid surface) and publishing (R2).
+P2 (compliance export R7, identity R8, on-device guarantee R13) follows. §4 (web/transport) and
+§6 (mobile/web bindings) stay deprioritized under decision [D-009](DECISIONS.md).
