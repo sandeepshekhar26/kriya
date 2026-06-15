@@ -13,6 +13,11 @@ It's not a competitor to MCP — it's the **governed runtime you put behind it**
 real actions to any agent (Claude Desktop, Cursor, …), and kriya enforces policy → approval →
 budget → signed audit on-device, where the data and the human are.
 
+<p align="center">
+  <img src="examples/actual-budget-bolt-on/demo.gif" alt="kriya governing an agent driving Actual Budget — allowed actions signed, money-moving actions blocked pending approval, every action verifiable" width="760">
+  <br><em>An agent drives <a href="https://actualbudget.org">Actual Budget</a> through kriya: routine actions run and are signed, money-moving ones are blocked pending approval, and every receipt verifies offline. <a href="examples/actual-budget-bolt-on/DEMO.md">How this was recorded →</a></em>
+</p>
+
 ## The 50-line proof
 
 [`examples/actual-budget-bolt-on/`](examples/actual-budget-bolt-on/) bolts governed agent access
