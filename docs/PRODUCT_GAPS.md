@@ -155,7 +155,10 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
 - 🟡 Reference apps beyond notes: **task manager ✅** (apps/task-manager — six
   typed actions including two approval-gated; its own `TaskPlanner` plugged into
   the shared `agent-native-host` crate via `select_backend_with_default`).
-  Next reference target is the **flagship bolt-on demo** (`R5`), not another from-scratch app.
+- ✅ **Flagship bolt-on demo** (`R5`, `24ed278`) — [`examples/actual-budget-bolt-on/`](../examples/actual-budget-bolt-on/):
+  governed agent access to Actual Budget (real local-first no-HTTP-API finance app) in a ~37-line
+  `wrapAction` file, driven by an external agent over `verb-mcp` (persistent-handler executor),
+  policy gating delete/close behind human approval. The whole wedge proved in one runnable demo.
 
 ## 7. Product / business
 - ⬜ **Governance dashboard** (`R6`, **P1**, the paid surface) — cross-app/agent audit viewer,
