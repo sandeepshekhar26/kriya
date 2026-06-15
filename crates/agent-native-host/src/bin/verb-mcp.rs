@@ -26,7 +26,7 @@ use std::sync::Arc;
 use agent_native_host::audit::Signer;
 use agent_native_host::mcp::{
     ActionExecutor, ActionOutcome, ApprovalGate, AutoApprove, DenyApproval, FnExecutor, Governor,
-    ProcessExecutor, Server, TtyApproval,
+    PersistentProcessExecutor, ProcessExecutor, Server, TtyApproval,
 };
 use agent_native_host::permissions::Policy;
 use agent_native_host::protocol::ToolSchema;
@@ -39,13 +39,14 @@ struct Args {
     exec: Option<String>,
     approval: String,
     name: String,
+    persistent: bool,
 }
 
 fn usage_and_exit(msg: &str) -> ! {
     eprintln!("verb-mcp: {msg}");
     eprintln!(
         "usage: verb-mcp --tools <schemas.json> [--policy <policy.yaml>] [--exec \"<cmd>\"] \
-         [--approval deny|tty|auto] [--name <name>]"
+         [--persistent] [--approval deny|tty|auto] [--name <name>]"
     );
     exit(2);
 }
@@ -56,6 +57,7 @@ fn parse_args() -> Args {
     let mut exec: Option<String> = None;
     let mut approval = "deny".to_string();
     let mut name = "verb-mcp".to_string();
+    let mut persistent = false;
 
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -69,6 +71,7 @@ fn parse_args() -> Args {
             "--exec" => exec = Some(take("--exec")),
             "--approval" => approval = take("--approval"),
             "--name" => name = take("--name"),
+            "--persistent" => persistent = true,
             "-h" | "--help" => usage_and_exit("help"),
             other => usage_and_exit(&format!("unknown argument: {other}")),
         }
@@ -77,7 +80,7 @@ fn parse_args() -> Args {
     let Some(tools) = tools else {
         usage_and_exit("--tools <schemas.json> is required");
     };
-    Args { tools, policy, exec, approval, name }
+    Args { tools, policy, exec, approval, name, persistent }
 }
 
 fn load_tools(path: &PathBuf) -> Vec<ToolSchema> {
@@ -96,8 +99,11 @@ fn build_approval(kind: &str) -> Box<dyn ApprovalGate> {
     }
 }
 
-fn build_executor(exec: Option<String>) -> Box<dyn ActionExecutor> {
+fn build_executor(exec: Option<String>, persistent: bool) -> Box<dyn ActionExecutor> {
     match exec {
+        // Persistent: spawn the handler once and reuse it (for handlers holding an expensive
+        // connection, e.g. Actual Budget). Per-call: spawn fresh each time (cheap/stateless).
+        Some(cmd) if persistent => Box::new(PersistentProcessExecutor::new(&cmd)),
         Some(cmd) => Box::new(ProcessExecutor::new(&cmd)),
         // Discovery-only: tools/list works, but any call fails with a clear message.
         None => Box::new(FnExecutor(|_id: &str, _p: &serde_json::Value| {
@@ -116,17 +122,22 @@ fn main() -> std::io::Result<()> {
     };
     let signer = Arc::new(Signer::new());
     let approval = build_approval(&args.approval);
-    let executor = build_executor(args.exec.clone());
+    let executor = build_executor(args.exec.clone(), args.persistent);
 
     let governor = Governor::new(Arc::new(policy), signer.clone(), approval, executor);
     let mut server = Server::new(&args.name, SERVER_VERSION, schemas, governor);
 
     // Banner to stderr — stdout is reserved for the JSON-RPC stream.
+    let exec_desc = match (&args.exec, args.persistent) {
+        (Some(cmd), true) => format!("{cmd} (persistent)"),
+        (Some(cmd), false) => format!("{cmd} (per-call)"),
+        (None, _) => "<none: discovery only>".to_string(),
+    };
     eprintln!(
         "[verb-mcp] serving {} governed tool(s) · approval={} · exec={} · audit log={}",
         server.tool_count(),
         args.approval,
-        args.exec.as_deref().unwrap_or("<none: discovery only>"),
+        exec_desc,
         signer.log_path().display()
     );
 

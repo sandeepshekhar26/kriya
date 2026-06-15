@@ -24,6 +24,8 @@ pub mod jsonrpc;
 pub mod server;
 
 pub use approval::{ApprovalGate, AutoApprove, DenyApproval, TtyApproval};
-pub use executor::{ActionExecutor, ActionOutcome, FnExecutor, ProcessExecutor};
+pub use executor::{
+    ActionExecutor, ActionOutcome, FnExecutor, PersistentProcessExecutor, ProcessExecutor,
+};
 pub use governor::{DispatchOutcome, Governor};
 pub use server::Server;
