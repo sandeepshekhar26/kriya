@@ -20,7 +20,7 @@
 //! - `{"type":"log","data":<AgentLog>}` — telemetry
 //!
 //! These mirror the Tauri command/event names exactly, so the same [`HostSink`] loop drives
-//! both shells. The `@kriya/sidecar` package is the Node/TS client for this protocol.
+//! both shells. The `kriya-sidecar` package is the Node/TS client for this protocol.
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};

@@ -28,8 +28,8 @@ the scaffolder template.
 - Node version (`node -v`):
 - Rust version (`rustc --version`):
 - npm package versions:
-  - `@kriya/core`:
-  - `@kriya/inspector`:
+  - `kriya-core`:
+  - `kriya-inspector`:
   - `create-kriya-app`:
 - `kriya` (crate) version:
 - `AGENT_BACKEND` (deterministic / claude-cli / ollama / anthropic):

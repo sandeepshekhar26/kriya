@@ -1,8 +1,8 @@
-# @kriya/inspector
+# kriya-inspector
 
 Drop-in React inspector for [**kriya**](https://github.com/sandeepshekhar26/kriya) apps — watch an
 agent drive your app, approve guarded actions, and replay past runs. Same look-and-feel across
-every app on the framework: every developer who picks up `@kriya/core` gets the same
+every app on the framework: every developer who picks up `kriya-core` gets the same
 debugging surface.
 
 What's in the box:
@@ -23,8 +23,8 @@ import {
   AgentInspector,
   ApprovalModal,
   MemoryPanel,
-} from "@kriya/inspector";
-import "@kriya/inspector/styles.css";
+} from "kriya-inspector";
+import "kriya-inspector/styles.css";
 
 <AgentInspector log={log} onClear={clearLog}>
   <MemoryPanel refreshKey={runCount} />
@@ -40,4 +40,4 @@ import "@kriya/inspector/styles.css";
 Theming: override the CSS variables on a parent (e.g. `--an-inspector-accent`,
 `--an-inspector-bg`, `--an-inspector-danger`) to match your app's palette.
 
-Peer-deps: `@kriya/core`, `@tauri-apps/api`, `react`.
+Peer-deps: `kriya-core`, `@tauri-apps/api`, `react`.

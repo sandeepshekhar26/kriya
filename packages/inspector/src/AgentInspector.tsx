@@ -4,7 +4,7 @@
  */
 
 import { useMemo, useState } from "react";
-import type { AgentLog } from "@kriya/core";
+import type { AgentLog } from "kriya-core";
 
 export interface InspectorEntry extends AgentLog {
   ts: number;

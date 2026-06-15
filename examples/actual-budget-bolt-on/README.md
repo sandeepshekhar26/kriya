@@ -65,7 +65,7 @@ installing Actual or setting up data.
 
 ```bash
 # from the repo root
-npm run build --workspace @kriya/core      # the SDK this imports
+npm run build --workspace kriya-core      # the SDK this imports
 cd examples/actual-budget-bolt-on && npm install && npm run build
 cargo build -p kriya --bin kriya-mcp --release   # the governor
 

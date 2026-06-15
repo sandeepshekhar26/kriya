@@ -10,11 +10,11 @@ npx create-kriya-app my-app
 ```
 
 > Already have an app? You don't need to start from scratch — bolt kriya onto your existing
-> handlers with `wrapAction` (see [`@kriya/core`](https://www.npmjs.com/package/@kriya/core)).
+> handlers with `wrapAction` (see [`kriya-core`](https://www.npmjs.com/package/kriya-core)).
 > This scaffolder is for greenfield apps.
 
 You get a working Tauri 2 + React + TypeScript desktop app with the agent host
-(`@kriya/core` SDK + Rust agent loop) already wired in: typed actions,
+(`kriya-core` SDK + Rust agent loop) already wired in: typed actions,
 permission policy, human-approval queue, action budget, signed audit, persistent
 memory, and four swappable inference backends (deterministic, claude-cli, ollama,
 anthropic).

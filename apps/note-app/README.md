@@ -20,7 +20,7 @@ From the repo root (installs the workspace, builds the core SDK, launches the ap
 
 ```bash
 npm install
-npm run build --workspace @kriya/core
+npm run build --workspace kriya-core
 npm run tauri dev --workspace note-app
 ```
 

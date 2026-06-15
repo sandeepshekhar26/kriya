@@ -13,7 +13,7 @@
  */
 
 import { createInterface } from "node:readline";
-import { dispatchAction, getToolSchemas } from "@kriya/core";
+import { dispatchAction, getToolSchemas } from "kriya-core";
 import { loadActual, type ActualApi } from "./actual-api.js";
 import { fakeActual } from "./fake-actual.js";
 import { registerActualActions } from "./actions.js";

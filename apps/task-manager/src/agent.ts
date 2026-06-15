@@ -15,7 +15,7 @@ import {
   type AgentApprovalRequest,
   type AgentDone,
   type AgentLog,
-} from "@kriya/core";
+} from "kriya-core";
 import { store } from "./store";
 import { useSyncExternalStore } from "react";
 

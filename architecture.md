@@ -32,7 +32,7 @@ never simulates a human — it calls the affordance directly.
 ┌──────────────────────────────────────────────────────────────────────┐
 │  FRONTEND  (React + TypeScript, in the Tauri webview)                 │
 │                                                                      │
-│   @kriya/core                                                 │
+│   kriya-core                                                 │
 │     registerAction({ id, description, parameters, permissions,       │
 │                       handler })          ← declare an affordance     │
 │     getToolSchemas()  → MCP-style tool schemas (no handlers)         │

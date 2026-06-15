@@ -30,8 +30,8 @@ userland with X" is a valid alternative.
 
 <!-- Tick whichever apply. -->
 
-- [ ] `@kriya/core` (SDK / protocol types)
-- [ ] `@kriya/inspector` (React inspector components)
+- [ ] `kriya-core` (SDK / protocol types)
+- [ ] `kriya-inspector` (React inspector components)
 - [ ] `kriya` (Rust host crate)
 - [ ] `create-kriya-app` (scaffolder / template)
 - [ ] One of the reference apps (`apps/note-app`, `apps/task-manager`)

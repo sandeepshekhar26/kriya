@@ -13,8 +13,8 @@ import {
   advanceStep,
   useRunCount,
 } from "./agent";
-import { AgentInspector, ApprovalModal, MemoryPanel, StepGate } from "@kriya/inspector";
-import "@kriya/inspector/styles.css";
+import { AgentInspector, ApprovalModal, MemoryPanel, StepGate } from "kriya-inspector";
+import "kriya-inspector/styles.css";
 
 const ORGANIZE_GOAL =
   "Organize every note by assigning each one a single sensible category. " +

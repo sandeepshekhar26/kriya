@@ -1,5 +1,5 @@
 /**
- * @kriya/core — action registry + agent loop protocol for kriya desktop apps.
+ * kriya-core — action registry + agent loop protocol for kriya desktop apps.
  */
 
 export * from "./types.js";

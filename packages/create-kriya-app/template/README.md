@@ -85,6 +85,6 @@ No vision. No DOM selectors. Just structured state and typed action calls.
 
 ## Read more
 
-- [`@kriya/core`](https://github.com/sandeepshekhar26/kriya/tree/main/packages/core) — the SDK
-- [`@kriya/inspector`](https://github.com/sandeepshekhar26/kriya/tree/main/packages/inspector) — the dev inspector you see on the right side of the app
+- [`kriya-core`](https://github.com/sandeepshekhar26/kriya/tree/main/packages/core) — the SDK
+- [`kriya-inspector`](https://github.com/sandeepshekhar26/kriya/tree/main/packages/inspector) — the dev inspector you see on the right side of the app
 - [`kriya`](https://github.com/sandeepshekhar26/kriya/tree/main/crates/kriya) — the Rust agent host (audit, budget, memory, permissions, inference backends)

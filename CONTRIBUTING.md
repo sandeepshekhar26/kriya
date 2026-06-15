@@ -10,8 +10,8 @@ desktop apps, on the Tauri 2 + Rust + TypeScript + React stack.
 git clone https://github.com/sandeepshekhar26/kriya.git
 cd kriya
 npm install
-npm run build --workspace @kriya/core
-npm run build --workspace @kriya/inspector
+npm run build --workspace kriya-core
+npm run build --workspace kriya-inspector
 ```
 
 Then either reference app boots in one command:
@@ -27,7 +27,7 @@ First Rust build takes a few minutes. Subsequent rebuilds are incremental.
 
 ```bash
 # JavaScript side
-npm run test --workspace @kriya/core
+npm run test --workspace kriya-core
 ( cd apps/note-app && npx tsc --noEmit )
 ( cd apps/task-manager && npx tsc --noEmit )
 
@@ -45,8 +45,8 @@ soft prerequisite for merging — if yours is red, say why in the PR.
 ```
 kriya/
 ├── packages/
-│   ├── core/                 # @kriya/core — TS SDK + protocol types
-│   ├── inspector/            # @kriya/inspector — React inspector + StepGate + MemoryPanel
+│   ├── core/                 # kriya-core — TS SDK + protocol types
+│   ├── inspector/            # kriya-inspector — React inspector + StepGate + MemoryPanel
 │   └── create-kriya-app/     # the scaffolder (npm create kriya-app)
 ├── crates/
 │   └── kriya/    # Rust agent host — protocol, audit, budget, memory, permissions, inference backends

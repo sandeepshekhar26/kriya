@@ -1,4 +1,4 @@
-# @kriya/core
+# kriya-core
 
 The TypeScript SDK for [**kriya**](https://github.com/sandeepshekhar26/kriya) — the governed runtime
 that lets an AI agent safely drive a desktop app. Declare your app's affordances once as typed,
@@ -9,7 +9,7 @@ Adopt it greenfield with `registerAction`, or bolt it onto a function you alread
 `wrapAction` — augment, not rewrite.
 
 ```ts
-import { registerAction, getToolSchemas, dispatchAction } from "@kriya/core";
+import { registerAction, getToolSchemas, dispatchAction } from "kriya-core";
 
 registerAction({
   id: "create_note",
@@ -62,5 +62,5 @@ npx kriya wrap ./src/actions.ts --import ./actions.js > src/register-actions.ts
 ## Status
 
 `v0.0.1` — alpha. Part of the [kriya](https://github.com/sandeepshekhar26/kriya) framework
-(governed MCP-server mode, the `@kriya/sidecar` Electron/Node host, and the `wrapAction`
+(governed MCP-server mode, the `kriya-sidecar` Electron/Node host, and the `wrapAction`
 bolt-on all ship alongside this). MIT licensed.
