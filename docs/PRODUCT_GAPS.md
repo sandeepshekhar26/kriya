@@ -1,8 +1,20 @@
-# Product Gaps — from Phase 0 demo to YC-ready framework
+# Product Gaps — feature-completion tracker
 
-> Living document. The Phase 0 note app proves the *pattern*. It is **not** the product.
-> This file tracks the distance to a full, defensible, hard-to-copy framework. Update it as
-> things land. The moat is depth + DX taste + breadth + being first — not the demo.
+> Living document tracking **feature state** (done / partial / missing). For *what to build
+> next* see [ROADMAP.md](ROADMAP.md); for *why / strategy* see [strategy/](strategy/); for
+> *decisions* see [DECISIONS.md](DECISIONS.md).
+
+> **⚠️ Strategic direction (planner-affirmed 2026-06-15, decision [D-009](DECISIONS.md)).** The
+> generic "agent-native framework" insight is commoditized (WebMCP, MCP Apps, Builder.io — see
+> [strategy/market-landscape-2026.md](strategy/market-landscape-2026.md)). The bet is now the
+> governed **in-process** action layer for capabilities that live only inside a running local app
+> (no API to wrap, local/private data) — desktop/in-process is the *mechanism*, governance the
+> *moat*, **one bet, not two**. See
+> [strategy/governed-local-first-wedge.md](strategy/governed-local-first-wedge.md).
+> **Critical path (all P0):** `R1` governed MCP-server mode → `R3` sidecar/Electron host → `R4`
+> `wrapAction` bolt-on → `R5` the POS flagship demo — *not* more breadth on the "build a new Tauri
+> app" path. §4 (web/transport) and §6 (mobile/web bindings) are deliberately deprioritized. Live
+> priority order: [ROADMAP.md](ROADMAP.md).
 
 Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
 
@@ -25,6 +37,8 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
 - ✅ Step loop, swappable `Inference` trait, deterministic + claude-cli backends
 - 🟡 Real inference backends: Ollama (HTTP) + Anthropic API added behind the trait
   (compile-verified; live runs pending a local model / API key). OpenAI still ⬜.
+  **The local/on-device path (ollama, claude-cli) is now thesis-critical** — regulated apps
+  can't use cloud agents; the "nothing leaves the device" guarantee is tracked as **R13**.
 - 🟡 **Persistent memory**: episodic log persisted to SQLite (every action across runs,
   newest-first query via `agent_memory_recent`, count surfaced at run start) AND recalled
   into the LLM prompt as a MEMORY section, so prior runs inform decisions. State snapshots
@@ -43,7 +57,9 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
   mid-approval isn't re-issued — it's just skipped from history reseeding).
 - ⬜ Retry/backoff, graceful "this is too hard → escalate to frontier model" fallback
 - ⬜ Multi-agent orchestration (concurrent agents per app)
-- ⬜ Separate-process agent host (don't share Tauri's main thread) + latency profiling (<500ms p50)
+- ⬜ Separate-process agent host (don't share the app's main thread) + latency profiling
+  (<500ms p50) — **this is now the R3 sidecar host**, on the critical path (cross-shell
+  decoupling so verb can bolt onto Electron/Node apps, not just Tauri).
 
 ## 3. Permissions, approval & audit
 - ✅ YAML policy + deny-by-default + `RequiresApproval` decision
@@ -105,33 +121,43 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
   workspace so the template can use a git dep. See follow-up below.
 
 ## 6. Breadth / ecosystem (the copy-resistance)
-- ⬜ Electron binding (`@agent-native/electron`) — largest JS audience
-- ⬜ Mobile (Flutter, SwiftUI, Jetpack Compose)
-- ⬜ Agent-native component library ("shadcn for agent-operable UI")
-- ⬜ Agent/skills registry; MCP-server generation (reverse-MCP)
+- ✅ **Governed MCP-server mode** (`R1`, **P0 — critical path**, `d1e28e6`) — new `mcp` module
+  in `agent-native-host` exposes registered actions as an stdio MCP server (`initialize` /
+  `tools/list` / `tools/call`) so an external agent (Claude Desktop, Cursor) drives the app,
+  with every call routed **through** the policy → approval → budget → signed-audit gates
+  (governed routing, not raw tool exposure). `Governor` reuses the exact gate sequence from
+  `agent::host`; blocked calls never reach the executor and aren't signed (receipts attest only
+  to what ran). Execution + approval are traits (`ActionExecutor` / `ApprovalGate`:
+  `DenyApproval` default, `AutoApprove`, `TtyApproval` prompting on `/dev/tty`), so the same
+  governance serves Tauri, the R3 sidecar, or a CLI; `ProcessExecutor` shells out per call as
+  the dependency-free bolt-on. Thin `verb-mcp` binary (`--tools` / `--policy` / `--exec` /
+  `--approval`). 21 unit tests + verified end to end. Turns verb from a rewrite into a bolt-on.
+- ⬜ **Sidecar host + Electron/Node binding** (`R3`, **P0 — critical path**) — run
+  `agent-native-host` as a standalone process; bind from Electron (Slack/VS Code/Obsidian install
+  base) and plain Node, not just Tauri. The cross-shell decoupling that lets verb bolt onto an
+  existing app whatever its shell.
+- ⬜ **`wrapAction` + codemod** (`R4`, **P0 — critical path**) — wrap an existing app's handlers
+  without a rewrite (augment, not migrate). The bolt-on path that makes the <50-LOC R5 demo real.
+- ❌ Mobile (Flutter, SwiftUI, Jetpack Compose) — **deprioritized** (premature).
+- ❌ Web framework bindings (Vue/Svelte for web) — **not doing** (don't fight WebMCP).
 - 🟡 Reference apps beyond notes: **task manager ✅** (apps/task-manager — six
   typed actions including two approval-gated; its own `TaskPlanner` plugged into
   the shared `agent-native-host` crate via `select_backend_with_default`).
-  Spreadsheet and personal CRM still ⬜.
+  Next reference target is the **flagship bolt-on demo** (`R5`), not another from-scratch app.
 
-## 7. Product / business (Phase 4)
-- ⬜ Open-core: Pro (multi-agent, cloud sync, audit dashboard), Enterprise (SAML, compliance)
-- ⬜ Hosted agent cloud (remote inference, persistent memory, scaling)
-- ⬜ Integrations marketplace (Stripe/Slack/GitHub/Salesforce via credential vaults)
+## 7. Product / business
+- ⬜ **Governance dashboard** (`R6`, **P1**, the paid surface) — cross-app/agent audit viewer,
+  in-app policy editor, approval routing, budget controls. Open-core monetization; builds on
+  the audit/budget/approval/policy work already shipped.
+- ⬜ **Compliance-evidence export** (`R7`, **P2**) — audit log → SOC 2 / ISO 42001 / EU AI Act
+  artifacts. Willingness-to-pay hook (EU AI Act enforcement opens Aug 2026).
+- ⬜ **Agent + user identity per action** (`R8`, **P2**).
+- ⬜ Hosted agent cloud / integrations marketplace — later phases.
 
-## Near-term focus (what actually builds the moat next)
-1. ✅ Real inference backends (Ollama + Anthropic) — usable for real tasks.
-2. ✅ Human-approval queue + budget enforcement — safety story enterprises pay for.
-3. 🟡 `create-agent-app` ✅ + a real inspector ⬜ — DX that drives GitHub virality.
-4. ⬜ Second reference app (task manager) — proves generality, not a one-off.
+## Near-term focus
 
-**Next up (in order):**
-- ✅ **Second reference app (task manager).** Shipped — two apps now share the
-  same crate, each plugging in their own scripted planner. Generality proven.
-- **Publish `agent-native-host` to crates.io + `@agent-native/core` to npm.**
-  Until both are public, the scaffolder template still embeds the host code.
-  Publishing unblocks the template swap and is the precondition for going
-  public on GitHub.
-- After publishing unblocks: real step-through (pause-between-steps in the host)
-  and live replay of a stored run inside the inspector — building on the new
-  `@agent-native/inspector` shipped today.
+Superseded by the live, prioritized [ROADMAP.md](ROADMAP.md). The **critical path to the YC
+demo is R1 → R3 → R4 → R5** (all P0, in order); **R5** (the POS flagship demo) is the
+YC-defining artifact. Publishing (R2) and the governance dashboard (R6) come *after* the wedge
+is proven. §4 (web/transport) and §6 (mobile/web bindings) stay deprioritized under decision
+[D-009](DECISIONS.md).
