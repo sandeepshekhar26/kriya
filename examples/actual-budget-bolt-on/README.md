@@ -11,6 +11,11 @@ hit — the only way to drive it is an **in-process action layer**, and because 
 **money**, that access has to be **governed where the data and the human are**. That's the
 whole thesis in one app.
 
+<p align="center">
+  <img src="demo.gif" alt="kriya governing an agent driving Actual Budget" width="760">
+  <br><em>The governed flow (mock fund). Reproduce it with <code>./demo.sh</code> — see <a href="DEMO.md">DEMO.md</a>.</em>
+</p>
+
 ## The entire integration
 
 [`src/actions.ts`](src/actions.ts) — **~37 lines** — wraps six of Actual's existing functions as
