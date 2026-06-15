@@ -58,8 +58,10 @@ pub mod mcp;
 pub mod memory;
 pub mod permissions;
 pub mod protocol;
+pub mod sidecar;
 
 pub use agent::inference::{
     select_backend_with_default, Inference, StepContext, StepDecision, StepRecord,
 };
 pub use agent::{run_task, ApprovalMap, HostSink, PendingMap, StepAdvanceMap, TauriSink};
+pub use sidecar::{run_sidecar, SharedWriter, StdioSink};
