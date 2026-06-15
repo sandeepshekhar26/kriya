@@ -19,14 +19,9 @@ matters until this path is walked.
 - ✅ **R1 · Governed MCP-server mode** — shipped (`d1e28e6`). See **Done** below.
 - ✅ **R3 · Sidecar host + Electron/Node binding** — shipped (`8b3a8c2`). See **Done** below.
 - ✅ **R4 · `wrapAction` + codemod** — shipped (`0afc8ca`). See **Done** below.
-- 🟡 ⭐ **R5 · THE FLAGSHIP DEMO (the YC application video).** Bolt verb onto a **real existing app
-  WITHOUT rewriting it** — governed MCP access in **<50 lines**. Before/after video: stock local
-  app → an on-device agent driving it through typed, permissioned, audited actions. **Target:
-  [Actual Budget](https://actualbudget.org)** — open-source, local-first finance, **no HTTP API
-  (in-process `@actual-app/api` only)**, money makes governance visceral (decision
-  [D-010](DECISIONS.md), supersedes the earlier POS candidate). The agent categorizes/reconciles
-  but can't move money or delete a transaction without on-device approval; every action signed.
-  **This single demo is the entire pitch.** Depends on R1 + R3 + R4 (all ✅).
+- ✅ ⭐ **R5 · THE FLAGSHIP DEMO** — shipped (`24ed278`). See **Done** below. The wedge's
+  critical path (R1 → R3 → R4 → R5) is complete; what remains is the **video itself** + P1
+  (monetize/distribute) and P2 (compliance/polish).
 
 ## P1 — Monetize + distribute (after the wedge is proven)
 
@@ -73,6 +68,16 @@ matters until this path is walked.
 
 ## Done (newest first)
 
+- ✅ ⭐ **R5 · THE FLAGSHIP DEMO** — `24ed278` (2 commits: `853aa8b` persistent-handler executor
+  for verb-mcp, `24ed278` the bolt-on). [`examples/actual-budget-bolt-on/`](../examples/actual-budget-bolt-on/):
+  governed agent access to **Actual Budget** (real, local-first, no-HTTP-API finance app) in a
+  **~37-line** `wrapAction` file — no rewrite. An external agent (Claude Desktop) calls actions
+  over MCP; `verb-mcp` routes each through policy → approval → budget → signed audit, then a
+  persistent Node handler holds Actual's in-process connection and runs only cleared actions.
+  Policy: reads + categorize/budget allow; `delete_transaction` + `close_account` require human
+  approval; deny-by-default; 30/min budget. Verified end to end (incl. an `ACTUAL_FAKE=1` no-setup
+  demo mode): categorize runs + is signed, delete/close are held for approval, unlisted actions
+  refused. **What's left is recording the before/after video** (the artifact for the YC app).
 - ✅ **R4 · `wrapAction` + codemod** — `0afc8ca` (2 commits: `a830ab0` the `wrapAction` runtime,
   `0afc8ca` the codemod). `wrapAction(fn, { id, description, parameters, mapParams, mapResult })`
   adapts a function an app already has — positional args, plain return, throws — into a
