@@ -14,7 +14,7 @@ use std::collections::HashSet;
 
 use serde_json::{json, Value};
 
-use agent_native_host::{Inference, StepContext, StepDecision};
+use kriya::{Inference, StepContext, StepDecision};
 
 pub struct TaskPlanner {
     /// Task ids we've already issued a step for, so we never loop on one.

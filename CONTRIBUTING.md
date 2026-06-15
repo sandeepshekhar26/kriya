@@ -1,17 +1,17 @@
-# Contributing to verb
+# Contributing to kriya
 
-Thanks for poking at this. verb is alpha — feedback, bug reports, and PRs are all
+Thanks for poking at this. kriya is alpha — feedback, bug reports, and PRs are all
 welcome. The goal is the framework where AI agents are first-class users of
 desktop apps, on the Tauri 2 + Rust + TypeScript + React stack.
 
 ## Quick start
 
 ```bash
-git clone https://github.com/sandeepshekhar26/verb.git
-cd verb
+git clone https://github.com/sandeepshekhar26/kriya.git
+cd kriya
 npm install
-npm run build --workspace @agent-native/core
-npm run build --workspace @agent-native/inspector
+npm run build --workspace @kriya/core
+npm run build --workspace @kriya/inspector
 ```
 
 Then either reference app boots in one command:
@@ -27,12 +27,12 @@ First Rust build takes a few minutes. Subsequent rebuilds are incremental.
 
 ```bash
 # JavaScript side
-npm run test --workspace @agent-native/core
+npm run test --workspace @kriya/core
 ( cd apps/note-app && npx tsc --noEmit )
 ( cd apps/task-manager && npx tsc --noEmit )
 
 # Rust side
-( cd crates/agent-native-host && cargo test --locked )
+( cd crates/kriya && cargo test --locked )
 ( cd apps/note-app/src-tauri && cargo check --locked )
 ( cd apps/task-manager/src-tauri && cargo check --locked )
 ```
@@ -43,13 +43,13 @@ soft prerequisite for merging — if yours is red, say why in the PR.
 ## Repository layout
 
 ```
-verb/
+kriya/
 ├── packages/
-│   ├── core/                 # @agent-native/core — TS SDK + protocol types
-│   ├── inspector/            # @agent-native/inspector — React inspector + StepGate + MemoryPanel
-│   └── create-agent-app/     # the scaffolder (npm create agent-app)
+│   ├── core/                 # @kriya/core — TS SDK + protocol types
+│   ├── inspector/            # @kriya/inspector — React inspector + StepGate + MemoryPanel
+│   └── create-kriya-app/     # the scaffolder (npm create kriya-app)
 ├── crates/
-│   └── agent-native-host/    # Rust agent host — protocol, audit, budget, memory, permissions, inference backends
+│   └── kriya/    # Rust agent host — protocol, audit, budget, memory, permissions, inference backends
 ├── apps/
 │   ├── note-app/             # reference app #1
 │   └── task-manager/         # reference app #2 (same crate, different domain)
@@ -71,7 +71,7 @@ way to stress-test the framework's generality.
   that exercises a different action shape than notes or tasks (e.g. a
   spreadsheet cell, a CRM contact, a timer) helps prove the framework
   generalizes.
-- **New inference backend** under `crates/agent-native-host/src/agent/inference/`
+- **New inference backend** under `crates/kriya/src/agent/inference/`
   implementing the `Inference` trait. Mistral, OpenAI, OpenRouter are all
   open.
 - **Inspector polish** — clearer empty states, better keyboard nav, theming

@@ -1,0 +1,27 @@
+[package]
+name = "kriya"
+version = "0.1.0"
+description = "Rust agent host for kriya desktop apps — protocol, signed audit, budget, persistent memory, permission policy, swappable inference backends. Pairs with @kriya/core."
+license = "MIT"
+edition = "2021"
+rust-version = "1.77"
+repository = "https://github.com/sandeepshekhar26/kriya"
+homepage = "https://github.com/sandeepshekhar26/kriya"
+keywords = ["agent", "tauri", "llm", "ai-agent", "desktop"]
+categories = ["api-bindings", "gui"]
+
+[lib]
+name = "kriya"
+crate-type = ["rlib"]
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+ed25519-dalek = "2"
+rand = "0.8"
+hex = "0.4"
+uuid = { version = "1", features = ["v4"] }
+ureq = { version = "2", features = ["json", "tls"] }
+rusqlite = { version = "0.31", features = ["bundled"] }

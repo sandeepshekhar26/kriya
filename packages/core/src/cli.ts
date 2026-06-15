@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /**
- * agent-native CLI.
+ * kriya CLI.
  *
- *   agent-native dump <entry-file>
+ *   kriya dump <entry-file>
  *     Imports <entry-file> (which is expected to call `registerAction` as a side effect) and
  *     prints every registered action as an MCP-compatible tool schema. The Rust agent host —
  *     or any external agent — can ingest this to learn an app's affordances without running it.
  *
- *   agent-native wrap <source-file> [--import <specifier>]
+ *   kriya wrap <source-file> [--import <specifier>]
  *     Scans <source-file> for exported functions and prints a `wrapAction(...)` registration
  *     module for them (the codemod). Redirect it to a file, fill in the descriptions, and
  *     import it at boot — bolt the action layer onto an existing app without a rewrite.
@@ -20,9 +20,9 @@ import { getToolSchemas } from "./registry.js";
 import { scaffoldWrappers } from "./codemod.js";
 
 const USAGE = `usage:
-  agent-native dump <entry-file>
+  kriya dump <entry-file>
     Import <entry-file> (which registers actions) and print the MCP tool schemas as JSON.
-  agent-native wrap <source-file> [--import <specifier>]
+  kriya wrap <source-file> [--import <specifier>]
     Scaffold wrapAction(...) registrations for the file's exported functions.`;
 
 async function dump(entry: string): Promise<void> {

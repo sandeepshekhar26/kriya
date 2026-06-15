@@ -1,5 +1,5 @@
 /**
- * `wrapAction` — bolt the agent-native action layer onto a function an app *already has*,
+ * `wrapAction` — bolt the kriya action layer onto a function an app *already has*,
  * without rewriting it. **Augment, not migrate.**
  *
  * `registerAction` expects a handler in the framework's shape: `(params, ctx) => ActionResult`.
@@ -23,7 +23,7 @@ export interface WrapActionOptions<P extends Record<string, unknown>> {
   description: string;
   /**
    * Parameter schemas the agent sees. Optional, but without them the agent has no contract
-   * for the arguments — the codemod (`agent-native wrap`) infers these from the function
+   * for the arguments — the codemod (`kriya wrap`) infers these from the function
    * signature so you don't hand-write them.
    */
   parameters?: Record<string, ParameterSchema>;

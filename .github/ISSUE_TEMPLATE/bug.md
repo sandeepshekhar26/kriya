@@ -14,7 +14,7 @@ labels: bug
 <!--
 Smallest steps that reproduce. Ideally a fresh scaffold:
 
-  npm create agent-app@latest repro && cd repro
+  npm create kriya-app@latest repro && cd repro
   npm install && npm run tauri dev
   # then …
 
@@ -28,10 +28,10 @@ the scaffolder template.
 - Node version (`node -v`):
 - Rust version (`rustc --version`):
 - npm package versions:
-  - `@agent-native/core`:
-  - `@agent-native/inspector`:
-  - `create-agent-app`:
-- `agent-native-host` (crate) version:
+  - `@kriya/core`:
+  - `@kriya/inspector`:
+  - `create-kriya-app`:
+- `kriya` (crate) version:
 - `AGENT_BACKEND` (deterministic / claude-cli / ollama / anthropic):
 
 ## Logs

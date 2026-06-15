@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { describe, it, expect } from "vitest";
-import type { AgentActionRequest } from "@agent-native/core";
+import type { AgentActionRequest } from "@kriya/core";
 
 import { SidecarHost, runTask } from "./index.js";
 
@@ -119,12 +119,12 @@ describe("runTask", () => {
 });
 
 // Integration test against the real Rust binary. Opt-in: set VERB_HOST_BIN to the built
-// `verb-host` path. Skipped in CI (which doesn't build the Rust binary) so the JS suite
+// `kriya-host` path. Skipped in CI (which doesn't build the Rust binary) so the JS suite
 // stays self-contained.
 const bin = process.env.VERB_HOST_BIN;
-describe.skipIf(!bin)("verb-host integration", () => {
+describe.skipIf(!bin)("kriya-host integration", () => {
   it("drives a scripted run end to end", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "verb-sidecar-"));
+    const dir = mkdtempSync(join(tmpdir(), "kriya-sidecar-"));
     const script = join(dir, "script.json");
     writeFileSync(
       script,

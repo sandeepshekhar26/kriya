@@ -1,18 +1,18 @@
-# @agent-native/sidecar
+# @kriya/sidecar
 
-Host the **verb** agent runtime from **Electron or plain Node** — not just Tauri.
+Host the **kriya** agent runtime from **Electron or plain Node** — not just Tauri.
 
-This package spawns the `verb-host` sidecar (the Rust agent host from
-[`crates/agent-native-host`](../../crates/agent-native-host)) and speaks its newline-delimited
+This package spawns the `kriya-host` sidecar (the Rust agent host from
+[`crates/kriya`](../../crates/kriya)) and speaks its newline-delimited
 JSON protocol over stdio. The agent loop, the inference backend, and the **entire safety layer
 — policy, human approval, budget, signed audit — run inside that separate process**, which the
 renderer can't tamper with. Your main process just executes the typed actions the host asks
 for, the same handlers a button click would call.
 
 ```
- Electron / Node main process                 verb-host (separate process)
+ Electron / Node main process                 kriya-host (separate process)
  ───────────────────────────                  ────────────────────────────
-   SidecarHost.spawn() ──spawn──▶  verb-host
+   SidecarHost.spawn() ──spawn──▶  kriya-host
    host.start(goal,state,tools) ──stdin────▶  agent loop + governance
    run action, return state    ◀──stdout───  "run create_note(...)"   ← policy/approval/budget
    sendActionResult(...)        ──stdin────▶  signs an audit receipt
@@ -22,13 +22,13 @@ for, the same handlers a button click would call.
 ## Install
 
 ```bash
-npm install @agent-native/sidecar
+npm install @kriya/sidecar
 ```
 
-You also need the `verb-host` binary (build it from the Rust crate, or ship it with your app):
+You also need the `kriya-host` binary (build it from the Rust crate, or ship it with your app):
 
 ```bash
-cargo build -p agent-native-host --bin verb-host --release
+cargo build -p kriya --bin kriya-host --release
 ```
 
 ## Quick start
@@ -37,15 +37,15 @@ The high-level `runTask` drives one run to completion: it sends the goal, execut
 the host requests against your own state, answers approvals, and resolves with the summary.
 
 ```ts
-import { SidecarHost, runTask } from "@agent-native/sidecar";
+import { SidecarHost, runTask } from "@kriya/sidecar";
 
 const host = SidecarHost.spawn({
-  binaryPath: "/path/to/verb-host",
+  binaryPath: "/path/to/kriya-host",
   args: ["--policy", "agent-policy.yaml"],
   env: { ...process.env, AGENT_BACKEND: "claude-cli" }, // or ollama / anthropic
 });
 
-// Your app's state + the same typed actions you'd register in @agent-native/core.
+// Your app's state + the same typed actions you'd register in @kriya/core.
 let state = { notes: [] as { id: number; title: string }[] };
 
 const done = await runTask(
@@ -86,7 +86,7 @@ Pass `--script` to replay a recorded sequence of decisions — ideal for demos a
 
 ```ts
 const host = SidecarHost.spawn({
-  binaryPath: "/path/to/verb-host",
+  binaryPath: "/path/to/kriya-host",
   args: ["--script", "demo-run.json"],
 });
 ```
@@ -131,7 +131,7 @@ host.start({ goal, state, tools });
 | `parseError` | raw line `string` | — |
 | `exit` | exit code `number \| null` | — |
 
-The protocol types are re-exported from [`@agent-native/core`](../core).
+The protocol types are re-exported from [`@kriya/core`](../core).
 
 ## License
 

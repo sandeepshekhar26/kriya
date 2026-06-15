@@ -8,7 +8,7 @@ use std::collections::HashSet;
 
 use serde_json::{json, Value};
 
-use agent_native_host::{Inference, StepContext, StepDecision};
+use kriya::{Inference, StepContext, StepDecision};
 
 pub struct DeterministicOrganizer {
     /// Note ids we've already issued an edit for, so we never loop on one.

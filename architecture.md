@@ -1,13 +1,20 @@
-# Architecture (Phase 0)
+# Architecture
 
-This document explains the pattern the reference note app proves: **a local agent driving a
+This document explains the pattern the reference apps prove: **a local agent driving a
 real desktop app through typed actions and structured state — no vision, no screenshots, no
 DOM selectors.** It is built on the final stack (Tauri 2 + Rust + TypeScript + React), kept
 deliberately small so the pattern is legible.
 
+> **Note (updated 2026-06-15):** the *pattern* below is current and accurate, but two things have
+> moved on since this was first written. (1) The Rust agent host is now a **shared crate**
+> (`crates/kriya`) consumed by both reference apps, not code inside one app — decision
+> [D-002](docs/DECISIONS.md). (2) Most items in the old *"deliberately leaves out"* list have since
+> shipped. For current feature state see [docs/PRODUCT_GAPS.md](docs/PRODUCT_GAPS.md); for what's
+> next and the strategic direction see [docs/ROADMAP.md](docs/ROADMAP.md) and [CLAUDE.md](CLAUDE.md).
+
 ## The core idea
 
-A traditional app has one entry point: a human clicking UI. An agent-native app has **two
+A traditional app has one entry point: a human clicking UI. An kriya app has **two
 entry points into the same business logic**.
 
 ```
@@ -25,7 +32,7 @@ never simulates a human — it calls the affordance directly.
 ┌──────────────────────────────────────────────────────────────────────┐
 │  FRONTEND  (React + TypeScript, in the Tauri webview)                 │
 │                                                                      │
-│   @agent-native/core                                                 │
+│   @kriya/core                                                 │
 │     registerAction({ id, description, parameters, permissions,       │
 │                       handler })          ← declare an affordance     │
 │     getToolSchemas()  → MCP-style tool schemas (no handlers)         │
@@ -81,7 +88,7 @@ The agent's task: *"organize every note by assigning each a sensible category."*
    carrying the refreshed state. The host's channel unblocks.
 
 7. **Sign.** `audit.rs` signs a receipt `{ stepId, actionId, params, success, ts }` with an
-   Ed25519 key the agent never holds, appends it to `agent-native-audit.jsonl`, and emits a log
+   Ed25519 key the agent never holds, appends it to `kriya-audit.jsonl`, and emits a log
    line for the inspector.
 
 8. **Loop.** The host feeds the new state back to the backend and repeats from step 2 until the
@@ -104,13 +111,17 @@ JSON, and its entire vocabulary is the typed tool schema.
 - **The protocol mirrors JSON-RPC request/response**, keyed by `stepId`, so it ports cleanly off
   Tauri IPC to WebSocket/HTTP later (dev inspector, hosted cloud) without reshaping messages.
 
-## What Phase 0 deliberately leaves out
+## Beyond Phase 0 (mostly shipped)
 
-Real-but-minimal seams that Phase 1 fills in: a human-approval queue (today `RequiresApproval`
-is logged and skipped), persistent agent memory (today history is in-process), receipt
-verification tooling, hot-reload of the action registry, and the `create-agent-app` scaffolder.
-The shapes these will plug into — the `Inference` trait, the policy `Decision`, the signed
-`Receipt`, the `agent://*` protocol — already exist here.
+The seams Phase 0 stubbed have since landed: the **human-approval queue** (host blocks on a
+per-step channel, frontend modal), **persistent agent memory** (SQLite, across runs), the
+**offline receipt verifier** (`tools/verify-receipts`), the **`create-kriya-app` scaffolder**,
+plus **action composition**, **resume-ability**, **step-through**, and **policy linting**. Two
+reference apps (notes + tasks) now share the extracted `kriya` crate, each plugging
+in its own scripted planner. Still open: hot-reload of the registry, and the strategic next
+builds — governed MCP-server mode, sidecar/Electron host, `wrapAction` bolt-on (the critical
+path to the YC demo). See [docs/ROADMAP.md](docs/ROADMAP.md) and
+[docs/PRODUCT_GAPS.md](docs/PRODUCT_GAPS.md).
 
 ## File map
 
@@ -121,8 +132,10 @@ The shapes these will plug into — the `Inference` trait, the policy `Decision`
 | Agent loop protocol (TS) | `packages/core/src/protocol.ts` |
 | Note affordances | `apps/note-app/src/actions.ts` |
 | Frontend ↔ host bridge | `apps/note-app/src/agent.ts` |
-| Step loop | `apps/note-app/src-tauri/src/agent/host.rs` |
-| Inference backends | `apps/note-app/src-tauri/src/agent/inference/` |
-| Permission policy | `apps/note-app/src-tauri/src/permissions.rs` |
-| Signed audit trail | `apps/note-app/src-tauri/src/audit.rs` |
-| Protocol (Rust) | `apps/note-app/src-tauri/src/protocol.rs` |
+| Step loop | `crates/kriya/src/agent/host.rs` |
+| `Inference` trait + LLM backends (claude-cli / ollama / anthropic) | `crates/kriya/src/agent/inference/` |
+| Permission policy + linting | `crates/kriya/src/permissions.rs` |
+| Signed audit trail | `crates/kriya/src/audit.rs` |
+| Budget + persistent memory | `crates/kriya/src/{budget,memory}.rs` |
+| Protocol (Rust) | `crates/kriya/src/protocol.rs` |
+| App-specific deterministic planner + Tauri glue | `apps/note-app/src-tauri/src/{deterministic,lib}.rs` (task-manager mirrors this) |

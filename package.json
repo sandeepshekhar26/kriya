@@ -1,5 +1,5 @@
 {
-  "name": "agent-native-monorepo",
+  "name": "kriya-monorepo",
   "private": true,
   "version": "0.0.0",
   "description": "The framework where AI agents are native citizens of desktop apps.",

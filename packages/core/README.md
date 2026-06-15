@@ -1,6 +1,6 @@
-# @agent-native/core
+# @kriya/core
 
-The TypeScript SDK for [**verb**](https://github.com/sandeepshekhar26/verb) — the governed runtime
+The TypeScript SDK for [**kriya**](https://github.com/sandeepshekhar26/kriya) — the governed runtime
 that lets an AI agent safely drive a desktop app. Declare your app's affordances once as typed,
 permission-scoped **actions**; an agent calls them directly (over MCP), and the host gates every
 call. No vision, no screenshots, no DOM selectors.
@@ -9,7 +9,7 @@ Adopt it greenfield with `registerAction`, or bolt it onto a function you alread
 `wrapAction` — augment, not rewrite.
 
 ```ts
-import { registerAction, getToolSchemas, dispatchAction } from "@agent-native/core";
+import { registerAction, getToolSchemas, dispatchAction } from "@kriya/core";
 
 registerAction({
   id: "create_note",
@@ -53,14 +53,14 @@ const result = await dispatchAction("create_note", { title: "Hi" }, { caller: "a
 
 ```bash
 # Print an app's registered actions as MCP tool schemas
-npx agent-native dump ./dist/register-actions.js
+npx kriya dump ./dist/register-actions.js
 
 # Scaffold wrapAction(...) registrations for a file's exported functions (the codemod)
-npx agent-native wrap ./src/actions.ts --import ./actions.js > src/register-actions.ts
+npx kriya wrap ./src/actions.ts --import ./actions.js > src/register-actions.ts
 ```
 
 ## Status
 
-`v0.0.1` — alpha. Part of the [verb](https://github.com/sandeepshekhar26/verb) framework
-(governed MCP-server mode, the `@agent-native/sidecar` Electron/Node host, and the `wrapAction`
+`v0.0.1` — alpha. Part of the [kriya](https://github.com/sandeepshekhar26/kriya) framework
+(governed MCP-server mode, the `@kriya/sidecar` Electron/Node host, and the `wrapAction`
 bolt-on all ship alongside this). MIT licensed.

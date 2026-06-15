@@ -8,7 +8,7 @@
  * lines of wiring. That is the pitch.
  */
 
-import { wrapAction } from "@agent-native/core";
+import { wrapAction } from "@kriya/core";
 import type { ActualApi } from "./actual-api.js";
 
 const str = { type: "string", required: true } as const;

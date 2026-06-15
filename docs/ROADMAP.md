@@ -28,8 +28,8 @@ matters until this path is walked.
 - ⬜ **R6 · Governance dashboard (the paid surface).** Cross-app/agent audit viewer, in-app policy
   editor, approval routing for multiple pending approvals, budget controls. Open-core
   monetization; leans on the audit/budget/approval/policy work already shipped.
-- ⬜ **R2 · Publish packages.** `@agent-native/core` + `@agent-native/inspector` → npm;
-  `agent-native-host` → crates.io; `create-agent-app` last. **Runbook:
+- ⬜ **R2 · Publish packages.** `@kriya/core` + `@kriya/inspector` → npm;
+  `kriya` → crates.io; `create-kriya-app` last. **Runbook:
   [PUBLISHING.md](PUBLISHING.md).** Planner runs the commands (irreversible, needs credentials —
   [D-004](DECISIONS.md)). After publish, swap the scaffolder template to the published crate
   (PUBLISHING.md step 5). Needed for external adoption + before launch — but *after* the demo
@@ -61,18 +61,18 @@ matters until this path is walked.
 - ❌ Web framework bindings (Vue/Svelte for web) — don't fight WebMCP.
 - ❌ Mobile (Flutter/SwiftUI/Compose) — premature.
 - ❌ Scaffolder polish beyond demo quality — it's the demo, not the product.
-- ⏸️ **Rename off "agent-native"** — Builder.io owns the term; decide a new public name before
-  launch ("verb" as the product name is fine).
+- ✅ **Renamed off "agent-native" → `kriya`** — Builder.io owns the term "agent-native"; the
+  public name is now **kriya** and the packages/crate/binaries were renamed accordingly.
 
 ---
 
 ## Done (newest first)
 
 - ✅ ⭐ **R5 · THE FLAGSHIP DEMO** — `24ed278` (2 commits: `853aa8b` persistent-handler executor
-  for verb-mcp, `24ed278` the bolt-on). [`examples/actual-budget-bolt-on/`](../examples/actual-budget-bolt-on/):
+  for kriya-mcp, `24ed278` the bolt-on). [`examples/actual-budget-bolt-on/`](../examples/actual-budget-bolt-on/):
   governed agent access to **Actual Budget** (real, local-first, no-HTTP-API finance app) in a
   **~37-line** `wrapAction` file — no rewrite. An external agent (Claude Desktop) calls actions
-  over MCP; `verb-mcp` routes each through policy → approval → budget → signed audit, then a
+  over MCP; `kriya-mcp` routes each through policy → approval → budget → signed audit, then a
   persistent Node handler holds Actual's in-process connection and runs only cleared actions.
   Policy: reads + categorize/budget allow; `delete_transaction` + `close_account` require human
   approval; deny-by-default; 30/min budget. Verified end to end (incl. an `ACTUAL_FAKE=1` no-setup
@@ -81,32 +81,32 @@ matters until this path is walked.
 - ✅ **R4 · `wrapAction` + codemod** — `0afc8ca` (2 commits: `a830ab0` the `wrapAction` runtime,
   `0afc8ca` the codemod). `wrapAction(fn, { id, description, parameters, mapParams, mapResult })`
   adapts a function an app already has — positional args, plain return, throws — into a
-  registered action, normalizing the return/throw into an `ActionResult`. The `agent-native
+  registered action, normalizing the return/throw into an `ActionResult`. The `kriya
   wrap <file>` codemod scans a source file's exported functions (TypeScript compiler API),
   infers each parameter's schema + required-ness, pulls the description from JSDoc, and prints
   a `wrapAction(...)` module to review and import. Verified end to end: wrap a typed file → the
   generated module registers and emits correct MCP tool schemas via `dump`. 16 new tests
   (8 runtime + 8 codemod). **Augment, not migrate — the bolt-on that makes R5 real.**
 - ✅ **R3 · Sidecar host + Electron/Node binding** — `8b3a8c2` (3 commits: `0832cd1` decouple
-  the loop from Tauri via a `HostSink` trait, `5df3c4b` stdio sidecar + `verb-host` binary,
-  `8b3a8c2` the `@agent-native/sidecar` Node/TS binding). The agent loop is now transport-
-  agnostic: `run_task` emits through `HostSink` (Tauri is just `TauriSink`); the new `verb-host`
+  the loop from Tauri via a `HostSink` trait, `5df3c4b` stdio sidecar + `kriya-host` binary,
+  `8b3a8c2` the `@kriya/sidecar` Node/TS binding). The agent loop is now transport-
+  agnostic: `run_task` emits through `HostSink` (Tauri is just `TauriSink`); the new `kriya-host`
   binary runs the loop as a standalone process speaking newline-delimited JSON over stdio, with
-  governance in a process the renderer can't tamper with. `@agent-native/sidecar` (`SidecarHost`
+  governance in a process the renderer can't tamper with. `@kriya/sidecar` (`SidecarHost`
   + `runTask`) spawns it from Electron/Node. A generic `ScriptedPlanner` backend (`--script`)
   gives zero-config, no-API-key deterministic runs for demos/CI. Verified end to end: a Node
   client drove the real binary through a full run (action dispatch + approval gate + done).
   Closes the §2 "separate-process host" gap. **Cross-shell decoupling — bolt onto any shell.**
 - ✅ **R1 · Governed MCP-server mode** — `d1e28e6` (3 commits: `20305d1` protocol types,
-  `f56f1b4` governed dispatch, `d1e28e6` stdio server + `verb-mcp` binary). New `mcp` module
-  in `agent-native-host`: an stdio JSON-RPC server (`initialize` / `tools/list` / `tools/call`)
+  `f56f1b4` governed dispatch, `d1e28e6` stdio server + `kriya-mcp` binary). New `mcp` module
+  in `kriya`: an stdio JSON-RPC server (`initialize` / `tools/list` / `tools/call`)
   that routes every external-agent call through the same policy → approval → budget →
   signed-audit gates the in-process host enforces. Execution + approval are traits
   (`ActionExecutor`, `ApprovalGate`) so the same governance serves Tauri, a sidecar (R3), or a
-  CLI; `ProcessExecutor` is the dependency-free bolt-on. The thin `verb-mcp` binary takes
+  CLI; `ProcessExecutor` is the dependency-free bolt-on. The thin `kriya-mcp` binary takes
   `--tools` + `--policy` + `--exec` + `--approval deny|tty|auto`. 21 unit tests + verified end
   to end against the real binary (allowed action signed, guarded action held, unregistered tool
-  refused). **Turns verb from a rewrite into a bolt-on.**
+  refused). **Turns kriya from a rewrite into a bolt-on.**
 - ✅ CI workflow + CONTRIBUTING + issue templates — `f191618`
 - ✅ Step-through (host pause + inspector StepGate) — `6070302`
 - ✅ Policy linting at startup — `255e6ce`
@@ -114,5 +114,5 @@ matters until this path is walked.
 - ✅ Inspector v0.3.0 (replay + StepGate) & scaffolder README — `0fb85fc`
 - ✅ Action composition + ESM `.js` fix — `edfb898`
 - ✅ Second reference app (task-manager) — `cfb797c`
-- ✅ Extract Rust host into `agent-native-host` crate — `db30153`
-- ✅ `create-agent-app` scaffolder — `4b751b0`
+- ✅ Extract Rust host into `kriya` crate — `db30153`
+- ✅ `create-kriya-app` scaffolder — `4b751b0`

@@ -1,6 +1,6 @@
-//! Offline verifier for the `agent-native` Ed25519-signed audit log.
+//! Offline verifier for the `kriya` Ed25519-signed audit log.
 //!
-//! The agent host appends one JSON object per line to `agent-native-audit.jsonl`.
+//! The agent host appends one JSON object per line to `kriya-audit.jsonl`.
 //! Each line is a [`SignedReceipt`]: the unsigned [`Receipt`] fields flattened,
 //! followed by `public_key` and `signature` (both lowercase hex). This binary
 //! re-derives the canonical message bytes and verifies every signature.
@@ -11,7 +11,7 @@
 //! verify-receipts [path]
 //! ```
 //!
-//! `path` defaults to `$TMPDIR/agent-native-audit.jsonl` (same as the host).
+//! `path` defaults to `$TMPDIR/kriya-audit.jsonl` (same as the host).
 //! Exit code 0 when all signatures verify; 1 when any FAIL or parse error occurs.
 
 use std::env;
@@ -155,7 +155,7 @@ fn main() {
     let path: PathBuf = env::args()
         .nth(1)
         .map(PathBuf::from)
-        .unwrap_or_else(|| env::temp_dir().join("agent-native-audit.jsonl"));
+        .unwrap_or_else(|| env::temp_dir().join("kriya-audit.jsonl"));
 
     let content = match fs::read_to_string(&path) {
         Ok(c) => c,

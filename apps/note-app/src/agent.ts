@@ -18,7 +18,7 @@ import {
   type AgentAwaitStep,
   type AgentDone,
   type AgentLog,
-} from "@agent-native/core";
+} from "@kriya/core";
 import { store } from "./store";
 import { useSyncExternalStore } from "react";
 

@@ -2,7 +2,7 @@
  * The slice of Actual Budget's in-process API (`@actual-app/api`) this bolt-on uses.
  *
  * Actual has **no HTTP API** — it ships an npm package you call in-process, backed by a local
- * SQLite budget loaded on `init()`. That's exactly why verb fits: there's no endpoint for a
+ * SQLite budget loaded on `init()`. That's exactly why kriya fits: there's no endpoint for a
  * cloud agent to hit; the only way to drive it is an in-process action layer, governed
  * on-device. We type just the functions we wrap (signatures from actualbudget.org/docs/api)
  * and load the real module at runtime, so this example builds without pulling Actual's native

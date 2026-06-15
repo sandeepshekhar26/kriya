@@ -5,7 +5,7 @@
  * it; use Prev/Next (buttons or ←/→ keys) to step through neighbouring episodes
  * one at a time. This is the "replay" surface that complements the live inspector.
  *
- * The host exposes this command in every agent-native app's Tauri backend; this
+ * The host exposes this command in every kriya app's Tauri backend; this
  * component is wired up the same way regardless of app.
  */
 

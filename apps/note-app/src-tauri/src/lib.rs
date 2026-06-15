@@ -1,5 +1,5 @@
-//! Tauri backend for the agent-native note app. Hosts the agent loop (delegated to the
-//! `agent_native_host` crate) and exposes the IPC commands the frontend calls.
+//! Tauri backend for the kriya note app. Hosts the agent loop (delegated to the
+//! `kriya` crate) and exposes the IPC commands the frontend calls.
 
 mod deterministic;
 
@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use tauri::Emitter;
 
-use agent_native_host::{
+use kriya::{
     audit::Signer,
     permissions::Policy,
     protocol::{
@@ -111,9 +111,9 @@ fn agent_step_advance(
 #[tauri::command]
 fn agent_memory_recent(
     limit: Option<u32>,
-) -> Result<Vec<agent_native_host::memory::Episode>, String> {
-    let path = std::env::temp_dir().join("agent-native-memory.db");
-    let mem = agent_native_host::memory::AgentMemory::open(&path)?;
+) -> Result<Vec<kriya::memory::Episode>, String> {
+    let path = std::env::temp_dir().join("kriya-memory.db");
+    let mem = kriya::memory::AgentMemory::open(&path)?;
     mem.recent(limit.unwrap_or(20))
 }
 

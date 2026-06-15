@@ -1,7 +1,7 @@
 {
-  "name": "@agent-native/sidecar",
+  "name": "@kriya/sidecar",
   "version": "0.0.1",
-  "description": "Host the verb agent runtime from Electron or plain Node — spawn the verb-host sidecar and drive governed agent runs over stdio.",
+  "description": "Host the kriya agent runtime from Electron or plain Node — spawn the kriya-host sidecar and drive governed agent runs over stdio.",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
@@ -22,7 +22,7 @@
   "keywords": [
     "agent",
     "ai-agent",
-    "agent-native",
+    "kriya",
     "electron",
     "node",
     "sidecar",
@@ -31,11 +31,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/sandeepshekhar26/verb.git",
+    "url": "git+https://github.com/sandeepshekhar26/kriya.git",
     "directory": "packages/sidecar"
   },
-  "homepage": "https://github.com/sandeepshekhar26/verb#readme",
-  "bugs": "https://github.com/sandeepshekhar26/verb/issues",
+  "homepage": "https://github.com/sandeepshekhar26/kriya#readme",
+  "bugs": "https://github.com/sandeepshekhar26/kriya/issues",
   "publishConfig": {
     "access": "public"
   },
@@ -46,7 +46,7 @@
     "prepublishOnly": "npm run build && npm run test"
   },
   "dependencies": {
-    "@agent-native/core": "0.0.1"
+    "@kriya/core": "0.0.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

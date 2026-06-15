@@ -1,4 +1,4 @@
-# Governance policy for the Actual Budget bolt-on. verb-mcp enforces this on every tools/call
+# Governance policy for the Actual Budget bolt-on. kriya-mcp enforces this on every tools/call
 # from the external agent — the agent can only *propose*; the host decides.
 #
 # Posture: reads and routine reconciliation flow freely; anything that destroys a record or

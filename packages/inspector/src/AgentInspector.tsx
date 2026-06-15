@@ -1,10 +1,10 @@
 /**
- * The framework's dev inspector — what every agent-native app developer sees when
+ * The framework's dev inspector — what every kriya app developer sees when
  * debugging an agent run. Filterable log, per-step expand, JSONL export.
  */
 
 import { useMemo, useState } from "react";
-import type { AgentLog } from "@agent-native/core";
+import type { AgentLog } from "@kriya/core";
 
 export interface InspectorEntry extends AgentLog {
   ts: number;
