@@ -1,32 +1,35 @@
-//! Tauri backend hosting the agent loop. Exposes commands to the frontend:
-//! - `agent_start`           — begin an autonomous task
-//! - `agent_action_result`   — return the outcome of an executed action
+//! Tauri backend hosting the agent loop (delegated to the published `kriya` crate)
+//! and exposing the IPC commands the frontend calls:
+//! - `agent_start`             — begin an autonomous task
+//! - `agent_action_result`     — return the outcome of an executed action
 //! - `agent_approval_response` — return a human's approve/deny decision
-//! - `agent_memory_recent`   — read recent episodes from durable memory
+//! - `agent_step_advance`      — developer's advance/stop decision in step-mode
+//! - `agent_memory_recent`     — read recent episodes from durable memory
 
-mod agent;
-mod audit;
-mod budget;
-mod memory;
-mod permissions;
-mod protocol;
+mod deterministic;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use tauri::Emitter;
 
-use agent::{ApprovalMap, PendingMap};
-use audit::Signer;
-use permissions::Policy;
-use protocol::{
-    AgentActionResult, AgentApprovalResponse, AgentDone, AgentLog, AgentStartRequest, EVENT_DONE,
-    EVENT_LOG,
+use kriya::{
+    audit::Signer,
+    permissions::Policy,
+    protocol::{
+        AgentActionResult, AgentApprovalResponse, AgentDone, AgentLog, AgentStartRequest,
+        AgentStepAdvance, EVENT_DONE, EVENT_LOG,
+    },
+    run_task, select_backend_with_default, ApprovalMap, HostSink, PendingMap, StepAdvanceMap,
+    TauriSink,
 };
+
+use deterministic::DeterministicPlanner;
 
 pub struct AppState {
     pending: PendingMap,
     approvals: ApprovalMap,
+    advances: StepAdvanceMap,
     policy: Arc<Policy>,
     signer: Arc<Signer>,
 }
@@ -39,11 +42,27 @@ fn agent_start(
 ) -> Result<(), String> {
     let pending = state.pending.clone();
     let approvals = state.approvals.clone();
+    let advances = state.advances.clone();
     let policy = state.policy.clone();
     let signer = state.signer.clone();
 
+    // Default to the zero-cost deterministic planner; AGENT_BACKEND swaps in a real LLM.
+    let backend = select_backend_with_default(Box::new(DeterministicPlanner::new()));
+
+    // The agent loop talks to any shell through a HostSink; Tauri is just one impl.
+    let sink: Arc<dyn HostSink> = Arc::new(TauriSink::new(app.clone()));
+
     std::thread::spawn(move || {
-        if let Err(err) = agent::run_task(app.clone(), pending, approvals, policy, signer, req) {
+        if let Err(err) = run_task(
+            sink,
+            pending,
+            approvals,
+            advances,
+            policy,
+            signer,
+            backend,
+            req,
+        ) {
             let _ = app.emit(
                 EVENT_LOG,
                 AgentLog { step_id: None, level: "error".into(), message: err.clone(), detail: None },
@@ -82,10 +101,25 @@ fn agent_approval_response(
     Ok(())
 }
 
+/// Developer's "advance" or "stop" decision in step-mode.
 #[tauri::command]
-fn agent_memory_recent(limit: Option<u32>) -> Result<Vec<memory::Episode>, String> {
+fn agent_step_advance(
+    state: tauri::State<'_, AppState>,
+    response: AgentStepAdvance,
+) -> Result<(), String> {
+    let tx = state.advances.lock().unwrap().remove(&response.gate_id);
+    if let Some(tx) = tx {
+        let _ = tx.send(response.proceed);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn agent_memory_recent(
+    limit: Option<u32>,
+) -> Result<Vec<kriya::memory::Episode>, String> {
     let path = std::env::temp_dir().join("kriya-memory.db");
-    let mem = memory::AgentMemory::open(&path)?;
+    let mem = kriya::memory::AgentMemory::open(&path)?;
     mem.recent(limit.unwrap_or(20))
 }
 
@@ -95,6 +129,7 @@ pub fn run() {
     let app_state = AppState {
         pending: Arc::new(Mutex::new(HashMap::new())),
         approvals: Arc::new(Mutex::new(HashMap::new())),
+        advances: Arc::new(Mutex::new(HashMap::new())),
         policy: Arc::new(Policy::load_or_default(&policy_path)),
         signer: Arc::new(Signer::new()),
     };
@@ -105,6 +140,7 @@ pub fn run() {
             agent_start,
             agent_action_result,
             agent_approval_response,
+            agent_step_advance,
             agent_memory_recent
         ])
         .run(tauri::generate_context!())
