@@ -51,6 +51,7 @@
 pub mod agent;
 pub mod audit;
 pub mod budget;
+pub mod mcp;
 pub mod memory;
 pub mod permissions;
 pub mod protocol;
