@@ -33,6 +33,9 @@ const result = await dispatchAction("create_note", { title: "Hi" }, { caller: "a
 
 - **`registerAction(def)`** — declare a typed, permission-scoped action. Returns a callable
   handle for direct/testing use.
+- **`wrapAction(fn, opts)`** — bolt the action layer onto a function you *already* have
+  (positional args, plain return, throws) without a rewrite. Maps the agent's params onto the
+  function's arguments and normalizes its return/throw into an `ActionResult`. Augment, not migrate.
 - **`getToolSchemas()`** — MCP-compatible tool schemas for every registered action (handlers
   excluded), for an agent host to ingest.
 - **`dispatchAction(id, params, ctx)`** — validate params against the schema and run the handler.
@@ -47,6 +50,9 @@ const result = await dispatchAction("create_note", { title: "Hi" }, { caller: "a
 ```bash
 # Print an app's registered actions as MCP tool schemas
 npx agent-native dump ./dist/register-actions.js
+
+# Scaffold wrapAction(...) registrations for a file's exported functions (the codemod)
+npx agent-native wrap ./src/actions.ts --import ./actions.js > src/register-actions.ts
 ```
 
 ## Status

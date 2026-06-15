@@ -142,8 +142,14 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
   (`--script`) enables zero-config deterministic runs. Governance lives in a process the
   renderer can't tamper with. The cross-shell decoupling that lets verb bolt onto an existing
   app whatever its shell. Verified end to end (Node → Rust → Node round-trip).
-- ⬜ **`wrapAction` + codemod** (`R4`, **P0 — critical path**) — wrap an existing app's handlers
-  without a rewrite (augment, not migrate). The bolt-on path that makes the <50-LOC R5 demo real.
+- ✅ **`wrapAction` + codemod** (`R4`, **P0 — critical path**, `0afc8ca`) — `wrapAction(fn,
+  { id, description, parameters, mapParams, mapResult })` in `@agent-native/core` adapts a
+  function an app already has (positional args, plain return, throws) into a registered action,
+  normalizing the return/throw into an `ActionResult` and running the full registry path
+  (validation, audit, composition). The `agent-native wrap <file>` codemod scans exported
+  functions via the TypeScript compiler API, infers parameter schemas + required-ness + JSDoc
+  descriptions, and scaffolds the `wrapAction(...)` module. Augment, not migrate — the bolt-on
+  path that makes the <50-LOC R5 demo real. 16 tests; verified wrap→register→dump round-trip.
 - ❌ Mobile (Flutter, SwiftUI, Jetpack Compose) — **deprioritized** (premature).
 - ❌ Web framework bindings (Vue/Svelte for web) — **not doing** (don't fight WebMCP).
 - 🟡 Reference apps beyond notes: **task manager ✅** (apps/task-manager — six
