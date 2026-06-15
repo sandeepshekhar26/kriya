@@ -40,6 +40,11 @@ export interface InitConfig {
 /** The functions we wrap. A structural subset of the real `@actual-app/api`. */
 export interface ActualApi {
   init(config?: InitConfig): Promise<void>;
+  /** Load a server-hosted budget into the local dataDir (required before queries when using a
+   * sync server). `syncId` is the budget's Sync ID from the Actual app's Advanced settings. */
+  downloadBudget(syncId: string, options?: { password?: string }): Promise<void>;
+  /** Push local changes up to the sync server so other clients (the open app) see them. */
+  sync(): Promise<void>;
   shutdown(): Promise<void>;
   getAccounts(): Promise<Account[]>;
   getTransactions(accountId: string, startDate: string, endDate: string): Promise<Transaction[]>;
