@@ -1,34 +1,69 @@
 # kriya
 
-> **The governed runtime that lets an AI agent safely drive a desktop app — over MCP, on-device.**
-> Agents operate your app through **typed actions, not pixels**, and every call passes through
-> permission, human approval, budget, and a signed audit trail before it touches your data.
+> **Build desktop apps that AI agents can understand and operate** — directly, through your app's
+> real typed actions, not by screenshotting the screen and guessing where to click.
 
-As every app gets an agent, someone has to stop the agent doing the wrong thing — and prove it
-to an auditor. **kriya is that layer, for the apps the cloud can't reach**: local-first, private,
-regulated desktop software with no web API to wrap. MCP moves the calls; kriya is the safety the
-wire leaves out.
+Every app today was built for humans clicking buttons. Now AI agents need to use those same apps —
+and they shouldn't have to squint at pixels to do it. With kriya you declare each of your app's
+capabilities once as a typed **action**: a human triggers it by clicking, an agent triggers it by
+calling it — the *same* code underneath. The agent's entire view of your app is structured state
+and a typed menu of what it can do. No screenshots, no DOM scraping, no guessing.
 
-It's not a competitor to MCP — it's the **governed runtime you put behind it**. Expose your app's
-real actions to any agent (Claude Desktop, Cursor, …), and kriya enforces policy → approval →
-budget → signed audit on-device, where the data and the human are.
+*Think: React/Electron, but for the age of AI agents.* Build a new app this way, or **bolt it onto
+an app you already have** — and expose those actions to any agent (Claude Desktop, Cursor, …) over
+MCP.
+
+And because an agent operating a real app needs guardrails, kriya bakes them in: every action runs
+through **permission → human approval → budget → a signed audit trail**, on-device, before it
+touches your data.
 
 <p align="center">
-  <img src="examples/actual-budget-bolt-on/demo.gif" alt="kriya governing an agent driving Actual Budget — allowed actions signed, money-moving actions blocked pending approval, every action verifiable" width="760">
-  <br><em>An agent drives <a href="https://actualbudget.org">Actual Budget</a> through kriya: routine actions run and are signed, money-moving ones are blocked pending approval, and every receipt verifies offline. <a href="examples/actual-budget-bolt-on/DEMO.md">How this was recorded →</a></em>
+  <img src="examples/actual-budget-bolt-on/demo.gif" alt="an AI agent operating Actual Budget through kriya — routine actions run and are signed, money-moving ones are blocked pending approval, every receipt verifiable" width="760">
+  <br><em>An agent operating <a href="https://actualbudget.org">Actual Budget</a> through kriya: routine actions run and are signed; money-moving ones are blocked pending approval; every action verifies offline.</em>
 </p>
 
-## The 50-line proof
+## One app, two doors
 
-[`examples/actual-budget-bolt-on/`](examples/actual-budget-bolt-on/) bolts governed agent access
-onto [**Actual Budget**](https://actualbudget.org) — a real, shipped, local-first finance app with
-**no HTTP API** — *without changing Actual's code*. The whole integration is ~37 lines:
+```
+Human  ──clicks buttons──┐
+                         ├──▶  the same registered actions  ──▶  app state ──▶ UI
+Agent  ──calls actions───┘        (governed: permission · approval · budget · audit)
+```
 
+A developer declares each affordance once — with `registerAction(...)` for a new app, or
+`wrapAction(...)` to adopt one you already have. The agent never simulates a human: it calls the
+typed action directly, and it can never bypass the gates, because the host (not the agent) owns the
+policy and the signing key.
+
+## What you get
+
+- **Typed actions, not pixels.** Declare a capability once; humans click it, agents call it, both
+  run the same handler. The agent reasons over structured state and a typed tool schema — fast and
+  reliable, and it doesn't break when you restyle a button.
+- **Governance, built in.** Every action an agent proposes runs this gauntlet on-device, before it
+  executes:
+  1. **Permission** — a deny-by-default policy: allow / require-approval / deny.
+  2. **Human approval** — guarded actions pause for an Approve/Deny decision in *your* app's UI.
+  3. **Budget** — a per-minute cap stops a runaway or looping agent.
+  4. **Signed audit** — an Ed25519 receipt per action → append-only log, verifiable offline.
+
+  Plus persistent **memory** across runs, policy **linting**, and **step-through** debugging.
+- **Speaks MCP.** Your actions become MCP tools; the governed `kriya-mcp` server lets any external
+  agent drive your app — with every call routed *through* the gates, not around them.
+- **Cross-shell.** Runs in a Tauri backend, or as a standalone `kriya-host` sidecar that Electron
+  and plain Node apps drive over stdio — governance in a process the renderer can't tamper with.
+
+## Two ways to adopt
+
+**Build a new local-first agent app:**
+```bash
+npm create kriya-app@latest my-app    # Tauri 2 + React + Rust host, safety layer pre-wired
+```
+
+**Bolt onto an app you already have** — wrap a function it *already exposes*, no rewrite:
 ```ts
 import { wrapAction } from "kriya-core";
 
-// Wrap a function the app already has. The agent can now call it — but the host decides
-// whether it's allowed, whether a human must approve it, and signs a receipt when it runs.
 wrapAction(actual.updateTransaction, {
   id: "categorize_transaction",
   description: "Assign a category to a transaction.",
@@ -44,50 +79,10 @@ wrapAction(actual.deleteTransaction, {
 });
 ```
 
-The agent categorizes and reconciles freely; **deleting a transaction or moving money pauses for
-your approval**, and every action is signed into an audit log. Run the full governed flow with no
-setup via `ACTUAL_FAKE=1` — see the [example README](examples/actual-budget-bolt-on/).
-
-## One app, two doors
-
-```
-Human  ──clicks buttons──┐
-                         ├──▶  the same registered actions  ──▶  app state ──▶ UI
-Agent  ──calls actions───┘        (governed: policy · approval · budget · audit)
-```
-
-A developer declares each affordance once — with `registerAction(...)` for a new app, or
-`wrapAction(...)` to adopt one you already have. Humans trigger it by clicking; agents trigger it
-by calling the typed action. Both run the *exact same* business logic. The agent never simulates a
-human — and it can never bypass the gates, because the host (not the agent) owns the policy and the
-signing key.
-
-## The governance (the moat)
-
-Every action an agent proposes runs this gauntlet, on-device, before it executes:
-
-1. **Permission** — a deny-by-default YAML policy decides allow / require-approval / deny.
-2. **Human approval** — guarded actions pause for an Approve/Deny decision in *your* app's UI (or a
-   terminal prompt), then resume the in-flight call.
-3. **Budget** — a sliding-window actions-per-minute cap stops a runaway or looping agent.
-4. **Signed audit** — an Ed25519 receipt per action → append-only JSONL, verifiable offline.
-
-Plus persistent **memory** (every action across runs, in SQLite), policy **linting**, and
-**step-through** debugging. For local/regulated apps this is mandatory — and it can only happen
-in-app, on-device, which cloud MCP gateways structurally can't reach.
-
-## Two ways to adopt
-
-- **Bolt onto an app you already have** — `wrapAction(existingFn, …)` (+ an `kriya wrap`
-  codemod that scaffolds wrappers from your exported functions), then expose them over MCP with
-  the `kriya-mcp` server. Augment, not rewrite. This is the [Actual Budget demo](examples/actual-budget-bolt-on/).
-- **Build a new local-first agent app** — `npm create kriya-app@latest` scaffolds a Tauri 2 +
-  React + Rust app with the whole safety layer pre-wired.
-
-The runtime is **cross-shell**: it runs in a Tauri backend, or as a standalone sidecar process
-(`kriya-host`) that **Electron and plain Node** apps drive over stdio via
-[`kriya-sidecar`](packages/sidecar/) — so governance lives in a process the renderer can't
-tamper with.
+That snippet is the demo above: [`examples/actual-budget-bolt-on/`](examples/actual-budget-bolt-on/)
+gives a frontier agent governed access to [Actual Budget](https://actualbudget.org) — a real,
+local-first finance app with **no HTTP API** — in ~37 lines, without changing Actual's code.
+(`kriya wrap <file>` scaffolds the wrappers from your exported functions.)
 
 ## What's in the box
 
@@ -110,16 +105,13 @@ tamper with.
 Try the governed bolt-on with zero setup (in-memory budget, no real data):
 
 ```bash
-npm install
-npm run build --workspace kriya-core
-cargo build -p kriya --bin kriya-mcp --release
-cd examples/actual-budget-bolt-on && npm install && npm run build
-# then drive it like an MCP client — see the example README for the full command + Claude Desktop config
+cd examples/actual-budget-bolt-on && ./demo.sh   # builds everything on first run, then plays it
 ```
 
 Or run the reference desktop app:
 
 ```bash
+npm install
 npm run build --workspace kriya-core
 npm run tauri dev --workspace note-app   # first run compiles the Rust backend (a few min)
 ```
@@ -135,6 +127,6 @@ Pick the inference backend with `AGENT_BACKEND` (`deterministic` default, or `cl
 
 ## Status
 
-Alpha. The pattern, the cross-shell runtime, and the full safety layer work end-to-end (the wedge
-— governed MCP server, sidecar host, `wrapAction` bolt-on, and the Actual Budget flagship — are
-all shipped). APIs may still change before the first published release. MIT licensed.
+Alpha. The pattern, the cross-shell runtime, and the full safety layer work end-to-end — typed
+actions, governed MCP-server mode, the Electron/Node sidecar, the `wrapAction` bolt-on, and the
+Actual Budget flagship are all shipped. APIs may still change before a stable release. MIT licensed.
