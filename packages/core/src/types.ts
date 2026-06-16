@@ -80,17 +80,26 @@ export interface ActionDefinition<
 }
 
 /**
+ * A standards-compliant JSON Schema object (draft 2020-12). Required field names live in the
+ * `required` array at the object level — never as a per-property boolean (that's our internal
+ * {@link ParameterSchema} hint, which must not leak into emitted schemas, or strict validators
+ * like the Anthropic tool API reject the whole schema).
+ */
+export interface JSONSchemaObject {
+  type: "object";
+  properties: Record<string, object>;
+  required?: string[];
+}
+
+/**
  * MCP-compatible tool schema. This is what the registry emits for the agent host
- * to ingest — it carries everything an agent needs *except* the handler.
+ * to ingest — it carries everything an agent needs *except* the handler. `inputSchema`
+ * is standards-compliant JSON Schema (see {@link JSONSchemaObject}).
  */
 export interface ToolSchema {
   name: string;
   version: number;
   description: string;
   permissions: Permission[];
-  inputSchema: {
-    type: "object";
-    properties: Record<string, ParameterSchema>;
-    required: string[];
-  };
+  inputSchema: JSONSchemaObject;
 }

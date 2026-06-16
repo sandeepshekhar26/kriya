@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { clearRegistry, registerAction } from "../src/registry.js";
-import { toJSONSchema, paramsToJSONSchema, getMcpToolSchemas } from "../src/jsonschema.js";
+import { clearRegistry, getMcpToolSchemas, registerAction } from "../src/registry.js";
+import { toJSONSchema, paramsToJSONSchema } from "../src/jsonschema.js";
 import type { ParameterSchema } from "../src/types.js";
 
 afterEach(() => clearRegistry());

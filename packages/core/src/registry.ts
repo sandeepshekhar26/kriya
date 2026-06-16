@@ -14,6 +14,7 @@ import type {
   ToolSchema,
 } from "./types.js";
 import { formatIssues, validateParams } from "./validate.js";
+import { paramsToJSONSchema, type McpTool } from "./jsonschema.js";
 
 export class ActionValidationError extends Error {
   constructor(message: string) {
@@ -147,20 +148,33 @@ async function dispatchWithChain(
   }
 }
 
-/** Emit MCP-compatible tool schemas for every registered action (no handlers). */
+/**
+ * Emit MCP-compatible tool schemas for every registered action (no handlers).
+ *
+ * `inputSchema` is standards-compliant JSON Schema: the per-property `required` hint on our
+ * internal {@link ParameterSchema} is lifted into the object-level `required` array and never
+ * emitted as a boolean — strict validators (e.g. the Anthropic tool API) reject the latter.
+ */
 export function getToolSchemas(): ToolSchema[] {
   return [...registry.values()].map((def) => ({
     name: def.id,
     version: def.version ?? 1,
     description: def.description,
     permissions: def.permissions ?? [],
-    inputSchema: {
-      type: "object" as const,
-      properties: def.parameters,
-      required: Object.entries(def.parameters)
-        .filter(([, s]) => s.required)
-        .map(([n]) => n),
-    },
+    inputSchema: paramsToJSONSchema(def.parameters),
+  }));
+}
+
+/**
+ * Like {@link getToolSchemas}, but as the bare MCP tool shape (no kriya `permissions`) — for
+ * MCP clients that want only name/version/description/inputSchema.
+ */
+export function getMcpToolSchemas(): McpTool[] {
+  return getToolSchemas().map((t) => ({
+    name: t.name,
+    version: t.version,
+    description: t.description,
+    inputSchema: t.inputSchema,
   }));
 }
 

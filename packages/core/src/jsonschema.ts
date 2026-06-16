@@ -12,8 +12,7 @@
  * This module converts between the two without touching the original registry output.
  */
 
-import type { ParameterSchema } from "./types.js";
-import { getToolSchemas } from "./registry.js";
+import type { JSONSchemaObject, ParameterSchema } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Core converter
@@ -94,7 +93,7 @@ export function toJSONSchema(schema: ParameterSchema): object {
  * }
  * ```
  */
-export function paramsToJSONSchema(params: Record<string, ParameterSchema>): object {
+export function paramsToJSONSchema(params: Record<string, ParameterSchema>): JSONSchemaObject {
   const properties: Record<string, object> = {};
   const required: string[] = [];
 
@@ -105,9 +104,9 @@ export function paramsToJSONSchema(params: Record<string, ParameterSchema>): obj
     }
   }
 
-  const result: Record<string, unknown> = { type: "object", properties };
+  const result: JSONSchemaObject = { type: "object", properties };
   if (required.length > 0) {
-    result["required"] = required;
+    result.required = required;
   }
   return result;
 }
@@ -118,28 +117,13 @@ export function paramsToJSONSchema(params: Record<string, ParameterSchema>): obj
 
 /**
  * An MCP tool descriptor whose `inputSchema` is standards-compliant JSON Schema,
- * ready for consumption by MCP clients and external agents.
+ * ready for consumption by MCP clients and external agents. The `getMcpToolSchemas()`
+ * factory lives in `registry.js` (it reads the registry); the type lives here with the
+ * other schema shapes.
  */
 export interface McpTool {
   name: string;
   version: number;
   description: string;
   inputSchema: object;
-}
-
-/**
- * Like `getToolSchemas()`, but with `inputSchema` converted to standard JSON Schema:
- * - `required` is an array of names, not a per-property boolean.
- * - `items` is always a schema object, never a bare type string.
- *
- * The registry itself is not duplicated — this function delegates to `getToolSchemas()`
- * and post-processes the result.
- */
-export function getMcpToolSchemas(): McpTool[] {
-  return getToolSchemas().map((tool) => ({
-    name: tool.name,
-    version: tool.version,
-    description: tool.description,
-    inputSchema: paramsToJSONSchema(tool.inputSchema.properties),
-  }));
 }
