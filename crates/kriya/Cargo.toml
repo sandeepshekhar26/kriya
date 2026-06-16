@@ -1,6 +1,6 @@
 [package]
 name = "kriya"
-version = "0.1.0"
+version = "0.1.1"
 description = "Rust agent host for kriya desktop apps — protocol, signed audit, budget, persistent memory, permission policy, swappable inference backends. Pairs with kriya-core."
 license = "MIT"
 edition = "2021"

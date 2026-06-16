@@ -1,6 +1,6 @@
 {
   "name": "kriya-core",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Action registry + agent loop protocol for kriya desktop apps. Agents see your app's typed actions, not pixels.",
   "license": "MIT",
   "type": "module",
