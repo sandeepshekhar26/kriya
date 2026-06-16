@@ -64,6 +64,12 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
   the `kriya-host` binary runs the loop as a standalone process over stdio (NDJSON), with
   governance in a process the renderer can't tamper with. Latency profiling (<500ms p50) still
   ⬜ — the current `ProcessExecutor`/sidecar is correctness-first, not yet tuned.
+  ✅ **Tauri⇄Electron parity closed (P0.5 R14–R16, `93c5a67`).** The `runTask` helper now answers
+  the `awaitStep` message kind (step-mode no longer hangs); durable memory recall is exposed over the
+  sidecar protocol (`memory_recent`/`memory` + `SidecarHost.recentMemory()`), the mirror of Tauri's
+  `agent_memory_recent`; and a committed integration test plus `examples/node-sidecar-host/` drive the
+  **real** `kriya-host` binary through action + held/granted approval + memory recall. The "works in
+  Electron/Node" claim is now demoable, not just asserted. Still ⬜: latency profiling (<500 ms p50).
 
 ## 3. Permissions, approval & audit
 - ✅ YAML policy + deny-by-default + `RequiresApproval` decision
