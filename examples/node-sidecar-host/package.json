@@ -9,7 +9,7 @@
     "start": "node run.mjs"
   },
   "dependencies": {
-    "kriya-sidecar": "0.0.1",
-    "kriya-core": "0.0.1"
+    "kriya-sidecar": "0.0.2",
+    "kriya-core": "0.0.2"
   }
 }
