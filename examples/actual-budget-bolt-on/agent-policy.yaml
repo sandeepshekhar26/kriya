@@ -10,6 +10,8 @@ rules:
     allow: true
   - action: "list_transactions"
     allow: true
+  - action: "list_categories"
+    allow: true
 
   # Routine writes — categorizing/budgeting is the everyday agent task.
   - action: "categorize_transaction"

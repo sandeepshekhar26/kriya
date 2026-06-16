@@ -49,6 +49,9 @@ export function fakeActual(): ActualApi {
     async getCategories() {
       return categories;
     },
+    async getPayees() {
+      return [];
+    },
     async createCategory(category) {
       const id = `cat-${category.name.toLowerCase().replace(/\s+/g, "-")}`;
       categories.push({ id, ...category });

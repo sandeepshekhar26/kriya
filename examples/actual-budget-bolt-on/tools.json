@@ -11,6 +11,17 @@
     }
   },
   {
+    "name": "list_categories",
+    "version": 1,
+    "description": "List all budget categories with their ids and names.",
+    "permissions": [],
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    }
+  },
+  {
     "name": "list_transactions",
     "version": 1,
     "description": "List transactions for an account within a date range (YYYY-MM-DD).",
@@ -19,16 +30,13 @@
       "type": "object",
       "properties": {
         "accountId": {
-          "type": "string",
-          "required": true
+          "type": "string"
         },
         "startDate": {
-          "type": "string",
-          "required": true
+          "type": "string"
         },
         "endDate": {
-          "type": "string",
-          "required": true
+          "type": "string"
         }
       },
       "required": [
@@ -49,12 +57,10 @@
       "type": "object",
       "properties": {
         "id": {
-          "type": "string",
-          "required": true
+          "type": "string"
         },
         "category": {
-          "type": "string",
-          "required": true
+          "type": "string"
         }
       },
       "required": [
@@ -74,16 +80,13 @@
       "type": "object",
       "properties": {
         "month": {
-          "type": "string",
-          "required": true
+          "type": "string"
         },
         "categoryId": {
-          "type": "string",
-          "required": true
+          "type": "string"
         },
         "amount": {
-          "type": "number",
-          "required": true
+          "type": "number"
         }
       },
       "required": [
@@ -104,8 +107,7 @@
       "type": "object",
       "properties": {
         "id": {
-          "type": "string",
-          "required": true
+          "type": "string"
         }
       },
       "required": [
@@ -124,8 +126,7 @@
       "type": "object",
       "properties": {
         "id": {
-          "type": "string",
-          "required": true
+          "type": "string"
         },
         "transferAccountId": {
           "type": "string"
