@@ -18,6 +18,15 @@ import { loadActual, type ActualApi } from "./actual-api.js";
 import { fakeActual } from "./fake-actual.js";
 import { registerActualActions } from "./actions.js";
 
+// kriya-mcp expects line-delimited JSON on stdout. `@actual-app/api` (and any console.log it
+// makes) writes to stdout too, which would corrupt the protocol. Capture the real stdout.write
+// for our responses, then redirect everything else (console.log, library chatter, stdout writes
+// from imported modules) to stderr.
+const stdoutWrite = process.stdout.write.bind(process.stdout);
+process.stdout.write = process.stderr.write.bind(process.stderr) as typeof process.stdout.write;
+console.log = (...args: unknown[]) => console.error(...args);
+console.info = (...args: unknown[]) => console.error(...args);
+
 /** A do-nothing ActualApi so `--dump` can build the schemas without a live budget. */
 function noopActual(): ActualApi {
   const noop = async () => null as never;
@@ -50,7 +59,7 @@ async function main(): Promise<void> {
   registerActualActions(actual);
 
   if (dump) {
-    process.stdout.write(JSON.stringify(getToolSchemas(), null, 2) + "\n");
+    stdoutWrite(JSON.stringify(getToolSchemas(), null, 2) + "\n");
     return;
   }
 
@@ -67,7 +76,7 @@ async function main(): Promise<void> {
     try {
       req = JSON.parse(trimmed);
     } catch {
-      process.stdout.write(JSON.stringify({ success: false, error: "bad request JSON" }) + "\n");
+      stdoutWrite(JSON.stringify({ success: false, error: "bad request JSON" }) + "\n");
       continue;
     }
     const action = req.action ?? "";
@@ -79,7 +88,7 @@ async function main(): Promise<void> {
         process.stderr.write(`[actual-bolt-on] sync failed: ${String(err)}\n`);
       }
     }
-    process.stdout.write(
+    stdoutWrite(
       JSON.stringify({ success: result.success, data: result.data ?? null, error: result.error ?? null }) +
         "\n",
     );

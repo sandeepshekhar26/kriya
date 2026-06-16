@@ -31,6 +31,11 @@ export interface Category {
   group_id: string;
 }
 
+export interface Payee {
+  id: string;
+  name: string;
+}
+
 export interface InitConfig {
   dataDir?: string;
   serverURL?: string;
@@ -52,6 +57,7 @@ export interface ActualApi {
   updateTransaction(id: string, fields: Partial<Transaction>): Promise<null>;
   deleteTransaction(id: string): Promise<null>;
   getCategories(): Promise<Category[]>;
+  getPayees(): Promise<Payee[]>;
   createCategory(category: { name: string; group_id: string }): Promise<string>;
   setBudgetAmount(month: string, categoryId: string, amount: number): Promise<null>;
   closeAccount(
