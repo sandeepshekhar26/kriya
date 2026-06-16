@@ -23,6 +23,31 @@ matters until this path is walked.
   critical path (R1 → R3 → R4 → R5) is complete; what remains is the **video itself** + P1
   (monetize/distribute) and P2 (compliance/polish).
 
+## P0.5 — Cross-shell parity (harden the Electron/Node leg before publish)
+
+> **Why a 0.5 tier (added 2026-06-16).** The thesis (D-009) rests on the in-process layer working
+> in Tauri **and** Electron **and** plain Node. Of the three transports, the **embedded sidecar
+> (R3)** is the least proven: its convenience helper drops a message kind, it has no memory-recall
+> path, and the only test driving the real binary is CI-skipped. Publishing `kriya-sidecar` (R2/P1)
+> or building the dashboard (R6/P1) on top of that would ship rough edges to the build-time-adoption
+> audience. These three close the Tauri⇄Electron parity gaps — all additive, none touching the
+> demoable Tauri apps or the R5 MCP bolt-on. Do before P1.
+
+- ✅ **R14 · `runTask` step-mode parity (kriya-sidecar)** — shipped (`93c5a67`). Added an optional
+  `onStep` handler so the convenience helper answers `awaitStep` (auto-advancing when none is given,
+  so it never hangs). All five host→app message kinds now flow through the helper, not just the
+  low-level `SidecarHost`.
+- ✅ **R15 · Memory recall over the sidecar protocol** — shipped (`93c5a67`). Inbound `memory_recent`
+  → outbound `memory` handled directly in `run_sidecar` (no `HostSink` trait change — zero impact on
+  Tauri/MCP), plus `SidecarHost.recentMemory(limit)` (requestId-correlated, with a timeout) and an
+  exported `Episode` type in `kriya-core`. Electron now reads the same episodic memory Tauri does.
+- ✅ **R16 · Committed end-to-end sidecar proof** — shipped (`93c5a67`). Renamed the stale
+  `VERB_HOST_BIN` env var → `KRIYA_HOST_BIN`; strengthened the opt-in integration test to drive the
+  **real** `kriya-host` binary through action + held/granted approval + memory recall; added a
+  runnable `examples/node-sidecar-host/` that hosts the governed runtime from plain Node (byte-
+  identical to an Electron main process) and prints the governance trail. The "works in Electron/
+  Node" claim is now demoable, verified against the real binary.
+
 ## P1 — Monetize + distribute (after the wedge is proven)
 
 - ⬜ **R6 · Governance dashboard (the paid surface).** Cross-app/agent audit viewer, in-app policy
@@ -68,6 +93,15 @@ matters until this path is walked.
 
 ## Done (newest first)
 
+- ✅ **P0.5 · Cross-shell parity (R14 + R15 + R16)** — `93c5a67`. Hardened the embedded-sidecar leg
+  (the Electron/Node half of the thesis) to Tauri parity, all additive: **R14** the `runTask` helper
+  now answers `awaitStep` (step-mode no longer hangs); **R15** durable memory recall over the sidecar
+  protocol (`memory_recent`/`memory` + `SidecarHost.recentMemory()` + exported `Episode`), the
+  sidecar mirror of Tauri's `agent_memory_recent`; **R16** renamed `VERB_HOST_BIN`→`KRIYA_HOST_BIN`,
+  an integration test that drives the **real** `kriya-host` binary through action + held/granted
+  approval + memory recall, and a runnable `examples/node-sidecar-host/` (Node = an Electron main
+  process). Verified end to end against the real binary. Closes the Tauri⇄Electron gaps flagged in
+  PRODUCT_GAPS §2 before P1 (publish/dashboard) builds on the sidecar.
 - ✅ ⭐ **R5 · THE FLAGSHIP DEMO** — `24ed278` (2 commits: `853aa8b` persistent-handler executor
   for kriya-mcp, `24ed278` the bolt-on). [`examples/actual-budget-bolt-on/`](../examples/actual-budget-bolt-on/):
   governed agent access to **Actual Budget** (real, local-first, no-HTTP-API finance app) in a
