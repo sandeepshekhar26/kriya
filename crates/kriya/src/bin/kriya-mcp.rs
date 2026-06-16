@@ -8,7 +8,7 @@
 //!
 //! Usage:
 //!   kriya-mcp --tools <schemas.json> [--policy <policy.yaml>] [--exec "<cmd>"]
-//!            [--approval deny|tty|auto] [--name <name>]
+//!            [--approval deny|tty|gui|auto] [--name <name>]
 //!
 //!   --tools     JSON array from the SDK's getToolSchemas() (required)
 //!   --policy    YAML permission policy (default: safe built-in — create/edit allow,
@@ -16,7 +16,8 @@
 //!   --exec      command run per cleared action; it reads {"action","params"} on stdin and
 //!               writes {"success","data","error"} on stdout. Omit for discovery-only.
 //!   --approval  how guarded actions are decided: deny (default), tty (prompt a human on
-//!               the terminal), or auto (approve — trusted/testing only)
+//!               the terminal), gui (native macOS dialog — works under a TUI host like Claude
+//!               Code), or auto (approve — trusted/testing only)
 //!   --name      server name reported in `initialize` (default: kriya-mcp)
 
 use std::path::PathBuf;
@@ -28,6 +29,8 @@ use kriya::mcp::{
     ActionExecutor, ActionOutcome, ApprovalGate, AutoApprove, DenyApproval, FnExecutor, Governor,
     PersistentProcessExecutor, ProcessExecutor, Server, TtyApproval,
 };
+#[cfg(target_os = "macos")]
+use kriya::mcp::GuiApproval;
 use kriya::permissions::Policy;
 use kriya::protocol::ToolSchema;
 
@@ -46,7 +49,7 @@ fn usage_and_exit(msg: &str) -> ! {
     eprintln!("kriya-mcp: {msg}");
     eprintln!(
         "usage: kriya-mcp --tools <schemas.json> [--policy <policy.yaml>] [--exec \"<cmd>\"] \
-         [--persistent] [--approval deny|tty|auto] [--name <name>]"
+         [--persistent] [--approval deny|tty|gui|auto] [--name <name>]"
     );
     exit(2);
 }
@@ -95,7 +98,15 @@ fn build_approval(kind: &str) -> Box<dyn ApprovalGate> {
         "deny" => Box::new(DenyApproval),
         "tty" => Box::new(TtyApproval),
         "auto" => Box::new(AutoApprove),
-        other => usage_and_exit(&format!("--approval must be deny|tty|auto, got '{other}'")),
+        // Native macOS approval dialog — works even when the server is a child of a TUI host
+        // (e.g. Claude Code) that owns the controlling terminal.
+        #[cfg(target_os = "macos")]
+        "gui" => Box::new(GuiApproval),
+        #[cfg(not(target_os = "macos"))]
+        "gui" => usage_and_exit("--approval gui is only available on macOS"),
+        other => usage_and_exit(&format!(
+            "--approval must be deny|tty|gui|auto, got '{other}'"
+        )),
     }
 }
 
