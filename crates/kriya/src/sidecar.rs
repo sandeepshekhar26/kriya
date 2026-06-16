@@ -78,6 +78,20 @@ impl HostSink for StdioSink {
     }
 }
 
+/// app -> sidecar: ask for a window of recent episodic memory. Answered out-of-band with a
+/// `memory` line (request/response, not part of any run) — the sidecar mirror of the Tauri
+/// `agent_memory_recent` command, so an Electron app can power the inspector's MemoryPanel.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MemoryRecentRequest {
+    /// Echoed back on the response so a client can correlate concurrent queries.
+    #[serde(default)]
+    request_id: Option<String>,
+    /// How many newest episodes to return (default 20).
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
 /// Messages the app sends to the sidecar over stdin.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -86,6 +100,17 @@ enum Inbound {
     ActionResult { data: AgentActionResult },
     ApprovalResponse { data: AgentApprovalResponse },
     StepAdvance { data: AgentStepAdvance },
+    MemoryRecent { data: MemoryRecentRequest },
+}
+
+/// Read the newest `limit` episodes from the same durable store the host loop writes to
+/// (`<temp>/kriya-memory.db`, matching `agent::host` and the Tauri `agent_memory_recent`
+/// command). A fresh connection per query — cheap, and it tolerates a run writing from another
+/// thread. If no run has ever recorded anything the store opens empty and this returns `[]`.
+fn read_recent_memory(limit: u32) -> Result<Vec<crate::memory::Episode>, String> {
+    let path = std::env::temp_dir().join("kriya-memory.db");
+    let mem = crate::memory::AgentMemory::open(&path)?;
+    mem.recent(limit)
 }
 
 /// Run the sidecar loop: read inbound JSON lines from `reader`, drive runs, and write events
@@ -150,6 +175,23 @@ where
             Ok(Inbound::StepAdvance { data }) => {
                 if let Some(tx) = advances.lock().unwrap().remove(&data.gate_id) {
                     let _ = tx.send(data.proceed);
+                }
+            }
+            Ok(Inbound::MemoryRecent { data }) => {
+                // A quick SQLite read answered inline; reply on the same stream the events use.
+                // Always answer (with `error` set on failure) so the client never hangs on a
+                // pending query.
+                let (episodes, error) = match read_recent_memory(data.limit.unwrap_or(20)) {
+                    Ok(eps) => (eps, None),
+                    Err(e) => (Vec::new(), Some(e)),
+                };
+                let line = json!({
+                    "type": "memory",
+                    "data": { "requestId": data.request_id, "episodes": episodes, "error": error }
+                });
+                if let Ok(mut w) = out.lock() {
+                    let _ = writeln!(w, "{line}");
+                    let _ = w.flush();
                 }
             }
             Err(e) => {
@@ -243,6 +285,30 @@ mod tests {
         // run_sidecar joins the run thread before returning, so the done line is present.
         let out_text = text(&buf);
         assert!(out_text.contains("\"type\":\"done\""), "got: {out_text}");
+    }
+
+    #[test]
+    fn memory_recent_request_gets_a_correlated_memory_response() {
+        let (buf, out) = shared();
+        // No `start`, so the only output is the memory reply — deterministic to assert.
+        let req = json!({ "type": "memory_recent", "data": { "requestId": "q1", "limit": 5 } })
+            .to_string();
+        let reader = std::io::Cursor::new(format!("{req}\n"));
+
+        run_sidecar(
+            reader,
+            out,
+            Arc::new(Policy::default()),
+            Arc::new(Signer::new()),
+            || Box::new(ScriptedPlanner::from_decisions(vec![])),
+        )
+        .unwrap();
+
+        let line = text(&buf);
+        let v: Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(v["type"], "memory");
+        assert_eq!(v["data"]["requestId"], "q1"); // echoed for correlation
+        assert!(v["data"]["episodes"].is_array(), "episodes present even when empty");
     }
 
     #[test]

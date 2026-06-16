@@ -25,7 +25,10 @@ import type {
   AgentLog,
   AgentStartRequest,
   AgentStepAdvance,
+  Episode,
 } from "kriya-core";
+
+export type { Episode } from "kriya-core";
 
 /** The events the host pushes back to the app, and their payload tuples. */
 export interface SidecarEvents {
@@ -75,6 +78,11 @@ export class SidecarHost {
   readonly #child: ChildProcess | undefined;
   #buffer = "";
 
+  // Pending memory_recent queries, keyed by the requestId we minted, so concurrent calls don't
+  // cross their replies. Resolved (or rejected) when the matching `memory` line arrives.
+  readonly #memoryWaiters = new Map<string, (episodes: Episode[], error?: string) => void>();
+  #memorySeq = 0;
+
   // Fully-keyed listener registry — typed, no `any`, every event present.
   readonly #listeners: { [K in keyof SidecarEvents]: Set<Listener<SidecarEvents[K]>> } = {
     action: new Set(),
@@ -90,7 +98,12 @@ export class SidecarHost {
     this.#stdin = streams.stdin;
     this.#child = streams.child;
     streams.stdout.on("data", (chunk: Buffer | string) => this.#onData(chunk));
-    this.#child?.on("exit", (code) => this.#emit("exit", code));
+    this.#child?.on("exit", (code) => {
+      // The host is gone — no `memory` line is coming, so reject any in-flight queries rather
+      // than leaving them to time out.
+      this.#failPendingMemory("kriya-host exited before replying");
+      this.#emit("exit", code);
+    });
   }
 
   /** Spawn the `kriya-host` binary and connect to it. stderr is inherited so the host's
@@ -136,10 +149,42 @@ export class SidecarHost {
     this.#send("step_advance", advance);
   }
 
+  /**
+   * Read the newest episodes from the host's durable memory store — the sidecar equivalent of
+   * the Tauri `agent_memory_recent` command, so an Electron app can power the inspector's
+   * MemoryPanel from the same governed host. Resolves with the episodes (newest first; empty if
+   * nothing has been recorded yet), or rejects if the host reports an error, exits, or doesn't
+   * answer within `timeoutMs`.
+   */
+  recentMemory(limit?: number, timeoutMs = 5000): Promise<Episode[]> {
+    const requestId = `mem-${++this.#memorySeq}`;
+    return new Promise<Episode[]>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.#memoryWaiters.delete(requestId);
+        reject(new Error("recentMemory: timed out waiting for the host"));
+      }, timeoutMs);
+      // Don't let a pending query keep the Node event loop alive on its own.
+      timer.unref?.();
+      this.#memoryWaiters.set(requestId, (episodes, error) => {
+        clearTimeout(timer);
+        if (error) reject(new Error(error));
+        else resolve(episodes);
+      });
+      this.#send("memory_recent", { requestId, limit });
+    });
+  }
+
   /** Close stdin (signals shutdown) and kill the child if we own it. */
   close(): void {
+    this.#failPendingMemory("SidecarHost closed");
     this.#stdin.end();
     this.#child?.kill();
+  }
+
+  /** Reject every in-flight memory query — used when the host can no longer answer. */
+  #failPendingMemory(reason: string): void {
+    for (const waiter of this.#memoryWaiters.values()) waiter([], reason);
+    this.#memoryWaiters.clear();
   }
 
   #send(type: string, data: unknown): void {
@@ -182,6 +227,19 @@ export class SidecarHost {
       case "log":
         this.#emit("log", message.data as AgentLog);
         break;
+      case "memory": {
+        // Correlated reply to a recentMemory() call — route it to that waiter, not an event.
+        const data = message.data as { requestId?: string; episodes?: Episode[]; error?: string };
+        const waiter = data.requestId ? this.#memoryWaiters.get(data.requestId) : undefined;
+        if (waiter) {
+          this.#memoryWaiters.delete(data.requestId as string);
+          waiter(data.episodes ?? [], data.error);
+        } else {
+          // An uncorrelated/duplicate memory line — surface it rather than dropping silently.
+          this.#emit("parseError", line);
+        }
+        break;
+      }
       default:
         this.#emit("parseError", line);
     }
@@ -198,15 +256,23 @@ export interface RunTaskHandlers {
   dispatch: (request: AgentActionRequest) => AgentActionResult | Promise<AgentActionResult>;
   /** Decide a guarded action. Defaults to denying (the safe choice). */
   approve?: (request: AgentApprovalRequest) => boolean | Promise<boolean>;
+  /**
+   * Decide a step-mode pause: return `true` to advance to the next step, `false` to stop the
+   * run. Only consulted when the run was started with `stepMode: true`. If omitted, a step-mode
+   * pause **auto-advances** so the convenience helper never hangs — pass this (or drive
+   * {@link SidecarHost} directly) when you want a human/UI to gate each step.
+   */
+  onStep?: (event: AgentAwaitStep) => boolean | Promise<boolean>;
   /** Optional log sink (host telemetry + governance decisions). */
   onLog?: (entry: AgentLog) => void;
 }
 
 /**
  * Drive a single run to completion: send `start`, execute each requested action via
- * `handlers.dispatch`, answer approvals via `handlers.approve`, and resolve with the
- * {@link AgentDone} summary. This is the loop most Electron/Node apps want; for finer control,
- * use {@link SidecarHost} directly.
+ * `handlers.dispatch`, answer approvals via `handlers.approve`, gate step-mode pauses via
+ * `handlers.onStep`, and resolve with the {@link AgentDone} summary. This is the loop most
+ * Electron/Node apps want, and it now answers every host→app message kind the low-level
+ * {@link SidecarHost} does; for finer control, use {@link SidecarHost} directly.
  */
 export function runTask(
   host: SidecarHost,
@@ -221,6 +287,14 @@ export function runTask(
       const decide = handlers.approve ?? (() => false);
       void Promise.resolve(decide(req)).then((approved) =>
         host.sendApproval({ stepId: req.stepId, approved }),
+      );
+    });
+    host.on("awaitStep", (event) => {
+      // No onStep → advance, so a stepMode run driven by the helper completes instead of
+      // blocking until the host's step-timeout. Supply onStep for interactive single-stepping.
+      const decide = handlers.onStep ?? (() => true);
+      void Promise.resolve(decide(event)).then((proceed) =>
+        host.sendStepAdvance({ gateId: event.gateId, proceed }),
       );
     });
     if (handlers.onLog) host.on("log", handlers.onLog);

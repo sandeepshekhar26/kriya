@@ -107,6 +107,28 @@ export interface AgentStepAdvance {
   proceed: boolean;
 }
 
+/**
+ * One recorded action from the host's durable episodic memory, newest-first. Returned by the
+ * Tauri `agent_memory_recent` command and the sidecar `memory_recent` request. `params` is a
+ * JSON-encoded string exactly as the host signed it (parse it if you need the object).
+ * Mirrors the Rust `kriya::memory::Episode`.
+ */
+export interface Episode {
+  /** Unix epoch milliseconds when the action was recorded. */
+  tsMs: number;
+  actionId: string;
+  /** JSON-encoded action parameters, as signed. */
+  params: string;
+  success: boolean;
+  reasoning: string;
+  /** Ed25519 signature of the receipt (hex). */
+  signature: string;
+  /** The run this action belonged to. */
+  runId: string;
+  /** The goal that run was pursuing. */
+  goal: string;
+}
+
 /** Tauri event channel names (host → app). */
 export const AgentEvents = {
   Action: "agent://action",

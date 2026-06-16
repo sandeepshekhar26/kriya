@@ -1,0 +1,15 @@
+{
+  "name": "kriya-example-node-sidecar",
+  "version": "0.0.1",
+  "private": true,
+  "description": "P0.5 proof: host the kriya governed agent runtime from plain Node (the byte-identical code an Electron main process runs) — action dispatch, human approval, signed audit, and durable memory recall over the stdio sidecar.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "start": "node run.mjs"
+  },
+  "dependencies": {
+    "kriya-sidecar": "0.0.1",
+    "kriya-core": "0.0.1"
+  }
+}
