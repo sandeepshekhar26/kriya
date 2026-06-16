@@ -116,13 +116,140 @@ describe("runTask", () => {
     expect(types).toContain("start");
     expect(types).toContain("action_result");
   });
+
+  it("answers a step-mode pause via onStep (stop)", async () => {
+    const { host, stdout, inbound } = harness();
+    const promise = runTask(
+      host,
+      { goal: "g", state: {}, tools: [], stepMode: true },
+      {
+        dispatch: (req) => ({ stepId: req.stepId, success: true, state: {} }),
+        onStep: () => false, // a human/UI says "stop" at the first pause
+      },
+    );
+
+    // Host pauses before step 1; the helper must answer (not hang).
+    stdout.write(JSON.stringify({ type: "await_step", data: { gateId: "g1", stepNumber: 1 } }) + "\n");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(inbound().find((m) => m.type === "step_advance")).toMatchObject({
+      type: "step_advance",
+      data: { gateId: "g1", proceed: false },
+    });
+
+    stdout.write(JSON.stringify({ type: "done", data: { summary: "stopped", steps: 0 } }) + "\n");
+    expect((await promise).summary).toBe("stopped");
+  });
+
+  it("auto-advances a step-mode pause when no onStep is given (never hangs)", async () => {
+    const { host, stdout, inbound } = harness();
+    const promise = runTask(
+      host,
+      { goal: "g", state: {}, tools: [], stepMode: true },
+      { dispatch: (req) => ({ stepId: req.stepId, success: true, state: {} }) },
+    );
+
+    stdout.write(JSON.stringify({ type: "await_step", data: { gateId: "g2", stepNumber: 1 } }) + "\n");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(inbound().find((m) => m.type === "step_advance")).toMatchObject({
+      type: "step_advance",
+      data: { gateId: "g2", proceed: true },
+    });
+
+    stdout.write(JSON.stringify({ type: "done", data: { summary: "ok", steps: 1 } }) + "\n");
+    expect((await promise).summary).toBe("ok");
+  });
 });
 
-// Integration test against the real Rust binary. Opt-in: set VERB_HOST_BIN to the built
+describe("recentMemory", () => {
+  it("resolves with the episodes from the correlated memory reply", async () => {
+    const { host, stdout, inbound } = harness();
+    const promise = host.recentMemory(5);
+    await new Promise((r) => setTimeout(r, 0));
+
+    const request = inbound().find((m) => m.type === "memory_recent") as {
+      type: string;
+      data: { requestId: string; limit?: number };
+    };
+    expect(request).toBeTruthy();
+    expect(request.data.limit).toBe(5);
+
+    stdout.write(
+      JSON.stringify({
+        type: "memory",
+        data: {
+          requestId: request.data.requestId,
+          episodes: [
+            {
+              tsMs: 1,
+              actionId: "create_note",
+              params: "{}",
+              success: true,
+              reasoning: "r",
+              signature: "sig",
+              runId: "run1",
+              goal: "g",
+            },
+          ],
+        },
+      }) + "\n",
+    );
+
+    const episodes = await promise;
+    expect(episodes).toHaveLength(1);
+    expect(episodes[0]?.actionId).toBe("create_note");
+  });
+
+  it("rejects when the host reports an error", async () => {
+    const { host, stdout, inbound } = harness();
+    const promise = host.recentMemory();
+    await new Promise((r) => setTimeout(r, 0));
+    const requestId = (
+      inbound().find((m) => m.type === "memory_recent") as { data: { requestId: string } }
+    ).data.requestId;
+
+    stdout.write(
+      JSON.stringify({ type: "memory", data: { requestId, episodes: [], error: "db locked" } }) +
+        "\n",
+    );
+    await expect(promise).rejects.toThrow("db locked");
+  });
+
+  it("does not cross replies between concurrent queries", async () => {
+    const { host, stdout, inbound } = harness();
+    const first = host.recentMemory(1);
+    const second = host.recentMemory(2);
+    await new Promise((r) => setTimeout(r, 0));
+
+    const requests = inbound().filter((m) => m.type === "memory_recent") as {
+      data: { requestId: string; limit?: number };
+    }[];
+    expect(requests).toHaveLength(2);
+    const [r1, r2] = requests;
+
+    // Answer the second one first — correlation must still route it correctly.
+    stdout.write(
+      JSON.stringify({
+        type: "memory",
+        data: { requestId: r2!.data.requestId, episodes: [{ actionId: "second" }] },
+      }) + "\n",
+    );
+    stdout.write(
+      JSON.stringify({
+        type: "memory",
+        data: { requestId: r1!.data.requestId, episodes: [{ actionId: "first" }] },
+      }) + "\n",
+    );
+
+    expect((await first)[0]?.actionId).toBe("first");
+    expect((await second)[0]?.actionId).toBe("second");
+  });
+});
+
+// Integration test against the real Rust binary. Opt-in: set KRIYA_HOST_BIN to the built
 // `kriya-host` path. Skipped in CI (which doesn't build the Rust binary) so the JS suite
 // stays self-contained.
-const bin = process.env.VERB_HOST_BIN;
-describe.skipIf(!bin)("kriya-host integration", () => {
+const bin = process.env.KRIYA_HOST_BIN;
+describe.skipIf(!bin)("kriya-host integration (real binary)", () => {
   it("drives a scripted run end to end", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kriya-sidecar-"));
     const script = join(dir, "script.json");
@@ -152,6 +279,53 @@ describe.skipIf(!bin)("kriya-host integration", () => {
       );
       expect(done.steps).toBe(1);
       expect(notes).toHaveLength(1);
+    } finally {
+      host.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("holds a guarded action for approval, then surfaces both actions via recentMemory", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kriya-sidecar-"));
+    const script = join(dir, "script.json");
+    // create_* runs directly; delete_* needs approval under the default policy.
+    writeFileSync(
+      script,
+      JSON.stringify([
+        { action: "create_note", params: { title: "keep" }, reasoning: "seed" },
+        { action: "delete_note", params: { id: 1 }, reasoning: "cleanup" },
+        { done: true, summary: "done" },
+      ]),
+    );
+
+    const host = SidecarHost.spawn({ binaryPath: bin!, args: ["--script", script] });
+    // Unique goal so memory recall can isolate this run's episodes from the shared store.
+    const goal = `p05-itest-${Date.now()}`;
+    const approvalsAsked: string[] = [];
+    try {
+      const done = await runTask(
+        host,
+        { goal, state: { notes: [] }, tools: [] },
+        {
+          dispatch: (req) => ({ stepId: req.stepId, success: true, state: { notes: [] } }),
+          approve: (req) => {
+            approvalsAsked.push(req.actionId);
+            return true; // grant the held delete
+          },
+        },
+      );
+
+      // The delete was held for a human; create was not. Both ran (delete only after approval).
+      expect(approvalsAsked).toEqual(["delete_note"]);
+      expect(done.steps).toBe(2);
+
+      // Memory recall over the protocol — the Electron-parity feature. Filter by our unique
+      // goal since the durable store accumulates across every run.
+      const mine = (await host.recentMemory(50))
+        .filter((e) => e.goal === goal)
+        .map((e) => e.actionId);
+      expect(mine).toContain("create_note");
+      expect(mine).toContain("delete_note");
     } finally {
       host.close();
       rmSync(dir, { recursive: true, force: true });
