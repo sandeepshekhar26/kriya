@@ -26,6 +26,39 @@ entry points into the same business logic**.
 Both a button click and an agent tool call land on the *same* registered action. The agent
 never simulates a human — it calls the affordance directly.
 
+## One action, end to end
+
+What actually happens when the agent decides to do something — every gate is enforced by the
+host, not the agent:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Inf as Inference backend
+    participant Host as kriya host
+    participant Pol as Policy / Budget
+    participant UI as App UI
+    participant App as Registered handler
+    participant Aud as Audit + Memory
+
+    Host->>Inf: goal + structured state + tool menu + recalled memory
+    Inf-->>Host: call edit_note(id, category) + reasoning
+    Host->>Pol: permission check
+    alt requires approval
+        Host->>UI: approval request (pause)
+        UI-->>Host: Approve / Deny
+    end
+    Host->>Pol: budget (per-minute) check
+    Host->>App: run handler(params)
+    App-->>Host: result + refreshed state
+    Host->>Aud: sign Ed25519 receipt, record episode
+    Host->>Inf: next step with updated state
+    Note over Host,Inf: loop until the backend returns "done"
+```
+
+The agent only ever produces the one arrow that matters — *"call this action with these
+params."* Everything else (approval, budget, signing, state) is the host's job.
+
 ## The three layers
 
 ```
