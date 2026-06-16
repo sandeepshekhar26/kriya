@@ -53,6 +53,62 @@ impl ApprovalGate for TtyApproval {
     }
 }
 
+/// Prompt a human via a native macOS dialog (`osascript`). Unlike {@link TtyApproval}, this
+/// works even when the MCP server is a child of a TUI host (e.g. Claude Code) that owns the
+/// controlling terminal — the dialog is drawn by the window server, out-of-band from any tty.
+/// Any failure to show the dialog, a cancel, or a timeout is treated as a denial.
+#[cfg(target_os = "macos")]
+pub struct GuiApproval;
+
+#[cfg(target_os = "macos")]
+impl ApprovalGate for GuiApproval {
+    fn request(&self, action_id: &str, params: &Value) -> bool {
+        prompt_via_osascript(action_id, params).unwrap_or(false)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn prompt_via_osascript(action_id: &str, params: &Value) -> std::io::Result<bool> {
+    use std::process::Command;
+
+    let body = format!(
+        "An external agent wants to run a guarded action:\n\naction: {action_id}\nparams: {params}"
+    );
+    // Deny is both default and cancel button, so Esc / dismiss also denies. `giving up after`
+    // bounds the wait so an unattended host can't hang forever on a held action.
+    let script = format!(
+        "display dialog {body} with title \"kriya — approval required\" \
+         buttons {{\"Deny\", \"Approve\"}} default button \"Deny\" cancel button \"Deny\" \
+         with icon caution giving up after 300",
+        body = applescript_string(&body),
+    );
+
+    let output = Command::new("osascript").arg("-e").arg(script).output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // osascript echoes `button returned:Approve` only when Approve was clicked; a cancel exits
+    // non-zero with empty stdout, and a time-out yields `gave up:true` — both deny.
+    Ok(stdout.contains("button returned:Approve"))
+}
+
+/// Render a Rust string as an AppleScript string literal (quote it, escape `\`, `"`, newline).
+/// osascript receives this as source, so only AppleScript escaping is needed — no shell quoting,
+/// since {@link std::process::Command} passes the arg without a shell.
+#[cfg(target_os = "macos")]
+fn applescript_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 #[cfg(unix)]
 fn prompt_on_tty(action_id: &str, params: &Value) -> std::io::Result<bool> {
     use std::fs::OpenOptions;

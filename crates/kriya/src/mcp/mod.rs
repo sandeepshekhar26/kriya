@@ -24,6 +24,8 @@ pub mod jsonrpc;
 pub mod server;
 
 pub use approval::{ApprovalGate, AutoApprove, DenyApproval, TtyApproval};
+#[cfg(target_os = "macos")]
+pub use approval::GuiApproval;
 pub use executor::{
     ActionExecutor, ActionOutcome, FnExecutor, PersistentProcessExecutor, ProcessExecutor,
 };
