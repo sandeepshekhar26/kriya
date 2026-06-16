@@ -69,6 +69,16 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
 - ✅ YAML policy + deny-by-default + `RequiresApproval` decision
 - ✅ **Human-approval queue**: host pauses on a guarded action, emits `agent://approval`,
   blocks on a per-step channel (5-min timeout = deny), frontend modal approve/deny, resumes
+- ✅ **MCP-mode approval gates** — for external agents driving over `kriya-mcp`, approval is a
+  swappable `ApprovalGate`: `DenyApproval` (safe default), `AutoApprove` (trusted/testing),
+  `TtyApproval` (prompt on `/dev/tty`), and **`GuiApproval` (`--approval gui`, native macOS
+  dialog via `osascript`)**. The GUI gate exists because `tty` **deadlocks** when kriya-mcp runs
+  as a child of a TUI host (e.g. Claude Code) that owns the terminal in raw mode and consumes the
+  operator's keystrokes; the dialog is drawn by the window server, out-of-band from any tty, so
+  it works under the TUI — the dependable on-camera human-in-the-loop beat for the R5 demo.
+  Deny is default+cancel, `giving up after 300` bounds the wait, any failure denies (safe-by-
+  default preserved). macOS-only (cfg-gated); `--approval gui` elsewhere exits with a clear
+  message. Cross-platform GUI gate (Linux/Windows) still ⬜.
 - ⬜ Approval **queue UI** for multiple pending approvals + per-action policy editor in-app
 - 🟡 Budgets/rate-limits — actions/minute sliding-window cap enforced (host stops the run);
   api-calls/hr still ⬜
@@ -136,7 +146,8 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
   `DenyApproval` default, `AutoApprove`, `TtyApproval` prompting on `/dev/tty`), so the same
   governance serves Tauri, the R3 sidecar, or a CLI; `ProcessExecutor` shells out per call as
   the dependency-free bolt-on. Thin `kriya-mcp` binary (`--tools` / `--policy` / `--exec` /
-  `--approval`). 21 unit tests + verified end to end. Turns kriya from a rewrite into a bolt-on.
+  `--approval`, the last now `deny|tty|gui|auto` — see §3 for the `gui` native-dialog gate). 21
+  unit tests + verified end to end. Turns kriya from a rewrite into a bolt-on.
 - ✅ **Sidecar host + Electron/Node binding** (`R3`, **P0 — critical path**, `8b3a8c2`) — the
   agent loop is decoupled from Tauri behind a `HostSink` trait (`TauriSink` is one impl). The
   `kriya-host` binary runs `kriya` as a standalone process over stdio (NDJSON
