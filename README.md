@@ -22,18 +22,65 @@ touches your data.
   <br><em>An agent operating <a href="https://actualbudget.org">Actual Budget</a> through kriya: routine actions run and are signed; money-moving ones are blocked pending approval; every action verifies offline.</em>
 </p>
 
+## Why "kriya"?
+
+**kriya** (Sanskrit, क्रिया) means *action* — and, in grammar, *verb*. That is the whole idea: an
+agent shouldn't squint at your pixels, it should **act through your app's verbs**. The unit it
+works through is the *kriya* — a single typed, governed action. We bind agents to **actions**, not
+to screenshots. Same word, same bet: software you operate by *doing*, whether you're a human or a
+machine.
+
 ## One app, two doors
 
 ```
-Human  ──clicks buttons──┐
-                         ├──▶  the same registered actions  ──▶  app state ──▶ UI
-Agent  ──calls actions───┘        (governed: permission · approval · budget · audit)
+Human  ──clicks a button──┐
+                          ├──▶  the same typed action  ──▶  your handler ──▶ state ──▶ UI
+Agent  ──calls an action──┘        (governed: permission · approval · budget · audit)
 ```
 
-A developer declares each affordance once — with `registerAction(...)` for a new app, or
-`wrapAction(...)` to adopt one you already have. The agent never simulates a human: it calls the
-typed action directly, and it can never bypass the gates, because the host (not the agent) owns the
-policy and the signing key.
+You declare each capability once — `registerAction(...)` for a new app, or `wrapAction(...)` to
+adopt one you already have. The agent never simulates a human: it calls the typed action directly,
+and it **can't** bypass the gates, because the *host* (not the agent) owns the policy and the
+signing key.
+
+## How it fits together
+
+Every path in — a human click, your local agent, or an outside agent over MCP — lands on the same
+registry and runs the same gauntlet before it ever touches your data:
+
+```mermaid
+flowchart TB
+    subgraph HOST[kriya host - on-device, the agent cannot bypass]
+      direction TB
+      REG[Action registry: registerAction or wrapAction] --> PERM{Permission?}
+      PERM -->|deny| NO[Blocked]
+      PERM -->|needs approval| APPR[Human approval: Approve or Deny]
+      APPR -->|denied| NO
+      PERM -->|allow| BUD[Budget: per-minute cap]
+      APPR -->|approved| BUD
+      BUD --> RUN[Run the registered handler]
+      RUN --> SIGN[Sign Ed25519 receipt]
+    end
+
+    H([Human clicks a button]) --> REG
+    A([Local agent calls an action]) --> REG
+    EXT([External agent - Claude Desktop, Cursor]) -->|MCP| MCP[kriya-mcp governed server]
+    MCP --> REG
+
+    RUN --> STATE[(App state)]
+    STATE --> UI[UI re-renders]
+    SIGN --> AUDIT[(Append-only audit log)]
+    RUN --> MEM[(Memory: SQLite, across runs)]
+
+    STATE -. structured state .-> A
+    MEM -. recall .-> A
+    INF[Inference: deterministic / claude-cli / ollama / anthropic] -. picks next action .-> A
+```
+
+The agent's *entire* view of your app is the right-hand side: **structured state** plus a typed
+**menu of actions**. It never sees a pixel. The left-hand side — permission, approval, budget,
+signing — is enforced in the host process, so a misbehaving or jailbroken agent still can't get
+past it.
 
 ## What you get
 
@@ -60,6 +107,26 @@ policy and the signing key.
 npm create kriya-app@latest my-app    # Tauri 2 + React + Rust host, safety layer pre-wired
 ```
 
+Then declaring a capability is one small block — the *same* handler your button already calls:
+
+```ts
+import { registerAction, str } from "kriya-core";
+
+registerAction({
+  id: "create_note",
+  description: "Create a new note with a title and content.",
+  parameters: { title: str, content: str },
+  permissions: ["write:notes"],            // policy decides: allow / require approval / deny
+  handler: ({ title, content }) =>          // ← your ordinary business logic, nothing special
+    db.notes.insert({ title, content }),
+});
+```
+
+That's the whole contract. A human clicks **New note**; an agent calls `create_note` — both run
+the exact same `handler`, and the agent's call still passes permission → approval → budget → audit
+on the way in. The agent discovers it automatically (kriya turns it into a typed tool schema), so
+you write app logic, not agent plumbing. Adding the next capability is one more `registerAction`.
+
 **Bolt onto an app you already have** — wrap a function it *already exposes*, no rewrite:
 ```ts
 import { wrapAction } from "kriya-core";
@@ -83,6 +150,15 @@ That snippet is the demo above: [`examples/actual-budget-bolt-on/`](examples/act
 gives a frontier agent governed access to [Actual Budget](https://actualbudget.org) — a real,
 local-first finance app with **no HTTP API** — in ~37 lines, without changing Actual's code.
 (`kriya wrap <file>` scaffolds the wrappers from your exported functions.)
+
+> **Fewer lines — and far fewer tokens.** In that demo, having the agent categorize a transaction
+> through kriya costs **~700 tokens**: it reads structured state and emits one typed action call,
+> all text. Driving the *same* edit by **screenshot-and-click** sends the model a fresh screenshot
+> every step (~1,300–1,600 tokens each, at Claude's vision rate of ≈ width × height ÷ 750), and one
+> edit takes several — find the row, click it, open the category, pick one, verify — so realistically
+> **~8,000–15,000 tokens**. That's **~10–20× more**, slower, and brittle the moment the UI shifts.
+> Typed actions are cheaper *because* the model reasons over meaning, not pixels.
+> <br><sub>(Rough estimate, not a benchmark; image cost via Anthropic's documented formula.)</sub>
 
 ## What's in the box
 
