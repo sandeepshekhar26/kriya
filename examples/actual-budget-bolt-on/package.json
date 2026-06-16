@@ -11,7 +11,7 @@
     "dump": "node dist/handler.js --dump"
   },
   "dependencies": {
-    "@actual-app/api": "^25.0.0",
+    "@actual-app/api": "^26.6.0",
     "kriya-core": "0.0.1"
   },
   "devDependencies": {

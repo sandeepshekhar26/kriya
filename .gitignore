@@ -31,3 +31,6 @@ docs/strategy/
 examples/actual-budget-bolt-on/DEMO.md
 examples/actual-budget-bolt-on/REAL-DEMO.md
 examples/actual-budget-bolt-on/demo.cast
+
+# Local MCP host config — machine-specific paths + server password. Commit .mcp.json.example.
+examples/actual-budget-bolt-on/.mcp.json

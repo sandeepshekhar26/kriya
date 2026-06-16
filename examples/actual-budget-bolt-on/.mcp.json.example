@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "actual-budget": {
+      "command": "/abs/path/to/repo/crates/kriya/target/release/kriya-mcp",
+      "args": [
+        "--persistent",
+        "--exec", "node /abs/path/to/repo/examples/actual-budget-bolt-on/dist/handler.js",
+        "--policy", "/abs/path/to/repo/examples/actual-budget-bolt-on/agent-policy.yaml",
+        "--tools", "/abs/path/to/repo/examples/actual-budget-bolt-on/tools.json",
+        "--approval", "gui"
+      ],
+      "env": {
+        "ACTUAL_SERVER_URL": "http://localhost:5006",
+        "ACTUAL_PASSWORD": "<your Actual server password>",
+        "ACTUAL_DATA_DIR": "/tmp/kriya-actual-data",
+        "ACTUAL_SYNC_ID": "<budget Sync ID from Actual → Settings → Advanced>"
+      }
+    }
+  }
+}
