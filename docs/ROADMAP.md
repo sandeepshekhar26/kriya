@@ -23,15 +23,15 @@ matters until this path is walked.
   critical path (R1 → R3 → R4 → R5) is complete; what remains is the **video itself** + P1
   (monetize/distribute) and P2 (compliance/polish).
 
-## P0.5 — Cross-shell parity (harden the Electron/Node leg before publish)
+## P0.5 — Cross-shell parity (harden the Electron/Node leg)
 
 > **Why a 0.5 tier (added 2026-06-16).** The thesis (D-009) rests on the in-process layer working
 > in Tauri **and** Electron **and** plain Node. Of the three transports, the **embedded sidecar
-> (R3)** is the least proven: its convenience helper drops a message kind, it has no memory-recall
-> path, and the only test driving the real binary is CI-skipped. Publishing `kriya-sidecar` (R2/P1)
-> or building the dashboard (R6/P1) on top of that would ship rough edges to the build-time-adoption
-> audience. These three close the Tauri⇄Electron parity gaps — all additive, none touching the
-> demoable Tauri apps or the R5 MCP bolt-on. Do before P1.
+> (R3)** was the least proven: its convenience helper dropped a message kind, it had no memory-recall
+> path, and the only test driving the real binary was CI-skipped. Those gaps actually shipped in the
+> **already-published `kriya-sidecar` 0.0.1** (R2 ran 2026-06-15) — so P0.5 closes them and stages a
+> **0.0.2** republish, before the dashboard (R6/P1) or any external adoption builds further on the
+> sidecar. All additive, none touching the demoable Tauri apps or the R5 MCP bolt-on.
 
 - ✅ **R14 · `runTask` step-mode parity (kriya-sidecar)** — shipped (`93c5a67`). Added an optional
   `onStep` handler so the convenience helper answers `awaitStep` (auto-advancing when none is given,
@@ -53,12 +53,14 @@ matters until this path is walked.
 - ⬜ **R6 · Governance dashboard (the paid surface).** Cross-app/agent audit viewer, in-app policy
   editor, approval routing for multiple pending approvals, budget controls. Open-core
   monetization; leans on the audit/budget/approval/policy work already shipped.
-- ⬜ **R2 · Publish packages.** `kriya-core` + `kriya-inspector` → npm;
-  `kriya` → crates.io; `create-kriya-app` last. **Runbook:
-  [PUBLISHING.md](PUBLISHING.md).** Planner runs the commands (irreversible, needs credentials —
-  [D-004](DECISIONS.md)). After publish, swap the scaffolder template to the published crate
-  (PUBLISHING.md step 5). Needed for external adoption + before launch — but *after* the demo
-  proves the thesis.
+- ✅ **R2 · Publish packages** — **done 2026-06-15** (planner ran it). All four npm packages are
+  live (`kriya-core` 0.0.1, `kriya-sidecar` 0.0.1, `kriya-inspector` 0.3.0, `create-kriya-app`
+  0.2.0) and the `kriya` crate is on crates.io (0.1.0); the scaffolder template already path-swapped
+  to the published crate (`kriya = "0.1"`). **Republish pending for the P0.5 API:** today's R14–R16
+  added `recentMemory()`/`Episode` to `kriya-core` + `kriya-sidecar` (npm immutable, so a 0.0.2 bump
+  is staged) and a `memory_recent` handler to the `kriya` crate (0.1.1 staged) — versions are bumped
+  in-repo; the `npm publish`/`cargo publish` commands are the planner's ([D-004](DECISIONS.md),
+  [PUBLISHING.md](PUBLISHING.md) → "Republishing for P0.5"). Optional — only external installers need it.
 
 ## P2 — Compliance & polish
 
@@ -93,6 +95,10 @@ matters until this path is walked.
 
 ## Done (newest first)
 
+- ✅ **R2 · Publish packages** — **2026-06-15** (planner). `kriya-core` 0.0.1 · `kriya-sidecar`
+  0.0.1 · `kriya-inspector` 0.3.0 · `create-kriya-app` 0.2.0 on npm; `kriya` 0.1.0 on crates.io;
+  scaffolder template path-swapped to the published crate. Republish for the P0.5 API (core/sidecar
+  0.0.2, crate 0.1.1) is staged — see PUBLISHING.md "Republishing for P0.5"; commands are the planner's.
 - ✅ **P0.5 · Cross-shell parity (R14 + R15 + R16)** — `93c5a67`. Hardened the embedded-sidecar leg
   (the Electron/Node half of the thesis) to Tauri parity, all additive: **R14** the `runTask` helper
   now answers `awaitStep` (step-mode no longer hangs); **R15** durable memory recall over the sidecar

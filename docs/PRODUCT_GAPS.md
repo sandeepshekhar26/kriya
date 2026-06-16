@@ -193,7 +193,9 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
 
 Superseded by the live, prioritized [ROADMAP.md](ROADMAP.md). The **P0 critical path
 (R1 → R3 → R4 → R5) is complete** — the wedge is proven in code (R5 = the Actual Budget bolt-on,
-`examples/actual-budget-bolt-on/`). Immediate next: **record the R5 before/after video** (the
-YC-defining artifact), then P1 — governance dashboard (R6, the paid surface) and publishing (R2).
+`examples/actual-budget-bolt-on/`). **R2 publish is done** (all npm packages + the `kriya` crate
+live since 2026-06-15; P0.5 republish at 0.0.2/0.1.1 staged) and **P0.5 cross-shell parity is
+shipped** (R14–R16, Tauri⇄Electron). Immediate next: **record the R5 before/after video** (the
+YC-defining artifact), then the rest of P1 — governance dashboard (R6, the paid surface).
 P2 (compliance export R7, identity R8, on-device guarantee R13) follows. §4 (web/transport) and
 §6 (mobile/web bindings) stay deprioritized under decision [D-009](DECISIONS.md).
