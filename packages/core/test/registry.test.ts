@@ -74,7 +74,7 @@ describe("dispatchAction", () => {
 });
 
 describe("getToolSchemas", () => {
-  it("emits MCP-style schemas with version and required list, no handlers", () => {
+  it("emits standards-compliant JSON Schema: required is a name list, never a per-property boolean", () => {
     registerAction({
       id: "edit_thing",
       version: 2,
@@ -91,7 +91,9 @@ describe("getToolSchemas", () => {
         permissions: ["write:things"],
         inputSchema: {
           type: "object",
-          properties: { id: { type: "string", required: true }, name: { type: "string" } },
+          // the per-property `required: true` hint is lifted to the object-level array below,
+          // not emitted inside the property (strict validators reject the boolean form).
+          properties: { id: { type: "string" }, name: { type: "string" } },
           required: ["id"],
         },
       },
