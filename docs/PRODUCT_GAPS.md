@@ -40,7 +40,10 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
 - 🟡 Real inference backends: Ollama (HTTP) + Anthropic API added behind the trait
   (compile-verified; live runs pending a local model / API key). OpenAI still ⬜.
   **The local/on-device path (ollama, claude-cli) is now thesis-critical** — regulated apps
-  can't use cloud agents; the "nothing leaves the device" guarantee is tracked as **R13**.
+  can't use cloud agents. ✅ **On-device guarantee shipped (R13, `64b340f`)**: backends declare a
+  `NetworkProfile`, and a sealed policy (`on_device: true`) refuses an egressing backend +
+  signs an offline-verifiable `kriya.attestation.on_device` receipt — "nothing leaves the device,"
+  attested.
 - 🟡 **Persistent memory**: episodic log persisted to SQLite (every action across runs,
   newest-first query via `agent_memory_recent`, count surfaced at run start) AND recalled
   into the LLM prompt as a MEMORY section, so prior runs inform decisions. State snapshots
@@ -88,8 +91,10 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
 - ⬜ Approval **queue UI** for multiple pending approvals + per-action policy editor in-app
 - 🟡 Budgets/rate-limits — actions/minute sliding-window cap enforced (host stops the run);
   api-calls/hr still ⬜
-- 🟡 Ed25519 signed receipts → JSONL — works; offline **verifier** CLI ✅ (`tools/verify-receipts/`);
-  tamper tests still ⬜ (tracked as R11)
+- 🟡 Ed25519 signed receipts → JSONL — works; offline **verifier** CLI ✅ (`tools/verify-receipts/`).
+  ✅ **Per-action identity (R8, `ccdb444`)**: an optional `actor` (agent + operator) signed *inside*
+  the receipt, threaded through host + MCP governor (`--actor`) + offline verifier + console; the
+  crate's `audit.rs` now has tamper tests (forged actor/params fail). api-calls/hr cap still ⬜ (R11).
 - ✅ Policy linting — `Policy::warnings()` reports on `*` rules that allow
   everything, destructive-named patterns (delete/remove/destroy/drop/purge/wipe)
   without `require_approval`, missing explicit catch-all, and missing
