@@ -6,7 +6,7 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::audit::{now_ms, Actor, Receipt, Signer};
+use crate::audit::{now_ms, Actor, Receipt, Signer, ATTESTATION_ON_DEVICE};
 use crate::budget::BudgetTracker;
 use crate::memory::AgentMemory;
 use crate::permissions::{Decision, Policy};
@@ -147,6 +147,47 @@ pub fn run_task(
     // Who is acting (R8). Resolved once per run and stamped into every signed receipt,
     // so the audit trail attributes each action to an agent + operator, tamper-evidently.
     let actor = resolve_actor(req.agent_id.as_deref(), req.user_id.as_deref(), backend.name());
+
+    // On-device guarantee (R13). If the policy seals this run, the inference backend must
+    // not egress to a remote service. Enforce before any step runs, and sign an attestation
+    // that the run was sealed — verifiable offline alongside the action receipts.
+    if policy.on_device() {
+        let profile = backend.network_profile();
+        if profile.egresses() {
+            let summary = format!(
+                "on-device guarantee violated: backend '{}' is {} (egresses) — refusing to run a sealed task",
+                backend.name(),
+                profile.label()
+            );
+            log(sink, AgentLog::error(summary.clone()));
+            let done = AgentDone { summary, steps: 0 };
+            sink.emit_done(&done);
+            return Ok(done);
+        }
+        let attestation = signer.record(
+            Receipt::new(
+                uuid::Uuid::new_v4().to_string(),
+                ATTESTATION_ON_DEVICE.to_string(),
+                serde_json::json!({
+                    "backend": backend.name(),
+                    "network_profile": profile.label(),
+                    "egress": false,
+                }),
+                true,
+                now_ms(),
+            )
+            .with_actor(Some(actor.clone())),
+        );
+        log(
+            sink,
+            AgentLog::info(format!(
+                "on-device guarantee: sealed run attested (backend={} · {}) · sig={}…",
+                backend.name(),
+                profile.label(),
+                &attestation.signature[..attestation.signature.len().min(16)]
+            )),
+        );
+    }
 
     log(
         sink,
@@ -441,24 +482,35 @@ pub fn run_task(
 mod tests {
     use super::*;
     use crate::protocol::{ToolSchema, AgentActionResult};
+    use crate::NetworkProfile;
     use serde_json::{json, Value};
     use std::collections::HashMap;
 
     /// A scripted backend: plays back a fixed list of decisions, then is `Done`. Proves the
     /// loop runs with no LLM and no Tauri — the same device the reference apps use, generic.
+    /// Carries a configurable [`NetworkProfile`] so the on-device tests can stand in for a
+    /// genuinely-local backend (default) or a remote one.
     struct ScriptedBackend {
         steps: std::vec::IntoIter<StepDecision>,
+        profile: NetworkProfile,
     }
 
     impl ScriptedBackend {
         fn new(steps: Vec<StepDecision>) -> Self {
-            Self { steps: steps.into_iter() }
+            Self { steps: steps.into_iter(), profile: NetworkProfile::None }
+        }
+        fn with_profile(mut self, profile: NetworkProfile) -> Self {
+            self.profile = profile;
+            self
         }
     }
 
     impl Inference for ScriptedBackend {
         fn name(&self) -> &'static str {
             "scripted-test"
+        }
+        fn network_profile(&self) -> NetworkProfile {
+            self.profile
         }
         fn next_step(&mut self, _ctx: &StepContext) -> Result<StepDecision, String> {
             Ok(self
@@ -651,5 +703,126 @@ mod tests {
         assert_eq!(v["actor"]["agent"], "claude-desktop");
         assert_eq!(v["actor"]["user"], "alice");
         let _ = std::fs::remove_file(&log);
+    }
+
+    fn on_device_policy() -> Policy {
+        serde_yaml::from_str(
+            r#"
+rules:
+  - action: "create_*"
+    allow: true
+  - action: "*"
+    allow: false
+budget:
+  max_actions_per_minute: 30
+on_device: true
+"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn on_device_sealed_run_attests_then_runs() {
+        let (pending, approvals, advances) = maps();
+        let sink = Arc::new(RecordingSink {
+            events: Mutex::new(Vec::new()),
+            pending: pending.clone(),
+            reply_state: json!({"notes": []}),
+        });
+        // Default ScriptedBackend profile is NetworkProfile::None — genuinely on-device.
+        let backend = Box::new(ScriptedBackend::new(vec![
+            StepDecision::Call {
+                action_id: "create_note".into(),
+                params: json!({"title": "x"}),
+                reasoning: "go".into(),
+            },
+            StepDecision::Done { summary: "done".into() },
+        ]));
+        let req = AgentStartRequest {
+            goal: "sealed run".into(),
+            state: json!({"notes": []}),
+            tools: Vec::<ToolSchema>::new(),
+            resume: false,
+            step_mode: false,
+            agent_id: None,
+            user_id: None,
+        };
+        let log = std::env::temp_dir().join(format!("kriya-ondevice-ok-{}.jsonl", uuid::Uuid::new_v4()));
+        let _ = std::fs::remove_file(&log);
+        let signer = Arc::new(Signer::with_log_path(log.clone()));
+
+        let done = run_task(
+            sink.clone(),
+            pending,
+            approvals,
+            advances,
+            Arc::new(on_device_policy()),
+            signer,
+            backend,
+            req,
+        )
+        .expect("run_task");
+        assert_eq!(done.steps, 1);
+
+        // First line is the signed on-device attestation; the action receipt follows.
+        let body = std::fs::read_to_string(&log).expect("audit log written");
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(lines.len(), 2, "attestation + one action receipt, got: {lines:?}");
+        let attest: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(attest["action_id"], "kriya.attestation.on_device");
+        assert_eq!(attest["params"]["egress"], false);
+        assert_eq!(attest["params"]["network_profile"], "no-network");
+        // And the action actually dispatched.
+        let events = sink.events.lock().unwrap().clone();
+        assert!(events.iter().any(|e| e == "action:create_note"), "got: {events:?}");
+        let _ = std::fs::remove_file(&log);
+    }
+
+    #[test]
+    fn on_device_refuses_an_egressing_backend() {
+        let (pending, approvals, advances) = maps();
+        let sink = Arc::new(RecordingSink {
+            events: Mutex::new(Vec::new()),
+            pending: pending.clone(),
+            reply_state: Value::Null,
+        });
+        // A backend that egresses must be refused under a sealed policy — before any action.
+        let backend = Box::new(
+            ScriptedBackend::new(vec![StepDecision::Call {
+                action_id: "create_note".into(),
+                params: json!({}),
+                reasoning: "x".into(),
+            }])
+            .with_profile(NetworkProfile::Remote),
+        );
+        let req = AgentStartRequest {
+            goal: "sealed run".into(),
+            state: Value::Null,
+            tools: Vec::new(),
+            resume: false,
+            step_mode: false,
+            agent_id: None,
+            user_id: None,
+        };
+        let done = run_task(
+            sink.clone(),
+            pending,
+            approvals,
+            advances,
+            Arc::new(on_device_policy()),
+            Arc::new(Signer::new()),
+            backend,
+            req,
+        )
+        .expect("run_task");
+        assert_eq!(done.steps, 0);
+        assert!(
+            done.summary.contains("on-device guarantee violated"),
+            "got: {}",
+            done.summary
+        );
+        // The egressing backend never got to dispatch an action.
+        let events = sink.events.lock().unwrap().clone();
+        assert!(events.iter().all(|e| !e.starts_with("action:")), "got: {events:?}");
     }
 }

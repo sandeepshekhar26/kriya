@@ -145,6 +145,9 @@ impl AgentLog {
     pub fn warn(message: impl Into<String>) -> Self {
         Self { step_id: None, level: "warn".into(), message: message.into(), detail: None }
     }
+    pub fn error(message: impl Into<String>) -> Self {
+        Self { step_id: None, level: "error".into(), message: message.into(), detail: None }
+    }
 }
 
 /// Tauri channel/command names (kept in sync with the SDK's `AgentEvents`/`AgentCommands`).

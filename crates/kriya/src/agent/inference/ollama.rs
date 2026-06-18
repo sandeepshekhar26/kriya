@@ -8,7 +8,10 @@
 
 use serde_json::Value;
 
-use super::{build_prompt, extract_json, parse_decision, Inference, StepContext, StepDecision};
+use super::{
+    build_prompt, extract_json, is_loopback_url, parse_decision, Inference, NetworkProfile,
+    StepContext, StepDecision,
+};
 
 pub struct Ollama {
     host: String,
@@ -28,6 +31,16 @@ impl Ollama {
 impl Inference for Ollama {
     fn name(&self) -> &'static str {
         "ollama"
+    }
+
+    fn network_profile(&self) -> NetworkProfile {
+        // On-device only when the model server is on the loopback interface. If OLLAMA_HOST
+        // points at a remote box, prompts leave the device — report that honestly.
+        if is_loopback_url(&self.host) {
+            NetworkProfile::Localhost
+        } else {
+            NetworkProfile::Remote
+        }
     }
 
     fn next_step(&mut self, ctx: &StepContext) -> Result<StepDecision, String> {

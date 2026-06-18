@@ -1,0 +1,12 @@
+# Sealed / on-device policy for the R13 demo.
+# on_device: true makes the host REFUSE to run with an inference backend that egresses, and
+# sign an attestation that the run stayed on the device. The regulated-app posture: nothing
+# leaves the machine, and you can prove it.
+rules:
+  - action: "create_*"
+    allow: true
+  - action: "*"
+    allow: false
+budget:
+  max_actions_per_minute: 30
+on_device: true

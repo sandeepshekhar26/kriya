@@ -7,13 +7,14 @@
 //! `kriya::sidecar`; the `kriya-sidecar` npm package is the Node client.
 //!
 //! Usage:
-//!   kriya-host [--policy <policy.yaml>] [--script <script.json>]
+//!   kriya-host [--policy <policy.yaml>] [--script <script.json>] [--audit-log <path>]
 //!
-//!   --policy   YAML permission policy (default: safe built-in)
-//!   --script   a JSON array of decisions to replay deterministically (no LLM, no API key) —
-//!              the zero-config default backend for demos/CI. Without it, the backend is
-//!              selected from AGENT_BACKEND (claude-cli | ollama | anthropic), defaulting to
-//!              claude-cli. An explicit AGENT_BACKEND always wins over --script.
+//!   --policy    YAML permission policy (default: safe built-in)
+//!   --script    a JSON array of decisions to replay deterministically (no LLM, no API key) —
+//!               the zero-config default backend for demos/CI. Without it, the backend is
+//!               selected from AGENT_BACKEND (claude-cli | ollama | anthropic), defaulting to
+//!               claude-cli. An explicit AGENT_BACKEND always wins over --script.
+//!   --audit-log path for the signed-receipt JSONL log (default: $TMPDIR/kriya-audit.jsonl)
 
 use std::path::{Path, PathBuf};
 use std::process::exit;
@@ -27,17 +28,21 @@ use kriya::{run_sidecar, select_backend_with_default, Inference, SharedWriter};
 struct Args {
     policy: Option<PathBuf>,
     script: Option<PathBuf>,
+    audit_log: Option<PathBuf>,
 }
 
 fn usage_and_exit(msg: &str) -> ! {
     eprintln!("kriya-host: {msg}");
-    eprintln!("usage: kriya-host [--policy <policy.yaml>] [--script <script.json>]");
+    eprintln!(
+        "usage: kriya-host [--policy <policy.yaml>] [--script <script.json>] [--audit-log <path>]"
+    );
     exit(2);
 }
 
 fn parse_args() -> Args {
     let mut policy = None;
     let mut script = None;
+    let mut audit_log = None;
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let mut take = |label: &str| -> String {
@@ -46,11 +51,12 @@ fn parse_args() -> Args {
         match flag.as_str() {
             "--policy" => policy = Some(PathBuf::from(take("--policy"))),
             "--script" => script = Some(PathBuf::from(take("--script"))),
+            "--audit-log" => audit_log = Some(PathBuf::from(take("--audit-log"))),
             "-h" | "--help" => usage_and_exit("help"),
             other => usage_and_exit(&format!("unknown argument: {other}")),
         }
     }
-    Args { policy, script }
+    Args { policy, script, audit_log }
 }
 
 fn main() -> std::io::Result<()> {
@@ -60,7 +66,10 @@ fn main() -> std::io::Result<()> {
         Some(p) => Policy::load_or_default(p),
         None => Policy::default(),
     };
-    let signer = Arc::new(Signer::new());
+    let signer = Arc::new(match &args.audit_log {
+        Some(p) => Signer::with_log_path(p.clone()),
+        None => Signer::new(),
+    });
 
     // Validate the script once up front so a typo fails loudly at startup, not mid-run.
     if let Some(path) = &args.script {

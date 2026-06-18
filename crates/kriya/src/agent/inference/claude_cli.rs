@@ -4,7 +4,10 @@
 
 use std::process::Command;
 
-use super::{build_prompt, extract_json, parse_decision, Inference, StepContext, StepDecision};
+use super::{
+    build_prompt, extract_json, parse_decision, Inference, NetworkProfile, StepContext,
+    StepDecision,
+};
 
 pub struct ClaudeCli {
     binary: String,
@@ -19,6 +22,13 @@ impl ClaudeCli {
 impl Inference for ClaudeCli {
     fn name(&self) -> &'static str {
         "claude-cli"
+    }
+
+    fn network_profile(&self) -> NetworkProfile {
+        // The local `claude` CLI is convenient (no app-side API key), but it still reaches
+        // Anthropic's cloud — so it egresses. Honesty over the "local-first" label: a sealed,
+        // no-egress run must use a genuinely on-device model (e.g. Ollama on loopback).
+        NetworkProfile::Remote
     }
 
     fn next_step(&mut self, ctx: &StepContext) -> Result<StepDecision, String> {
