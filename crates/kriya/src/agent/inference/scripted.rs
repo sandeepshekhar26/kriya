@@ -20,7 +20,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use super::{parse_decision, Inference, StepContext, StepDecision};
+use super::{parse_decision, Inference, NetworkProfile, StepContext, StepDecision};
 
 pub struct ScriptedPlanner {
     steps: Vec<StepDecision>,
@@ -51,6 +51,11 @@ impl ScriptedPlanner {
 impl Inference for ScriptedPlanner {
     fn name(&self) -> &'static str {
         "scripted"
+    }
+
+    fn network_profile(&self) -> NetworkProfile {
+        // A scripted/deterministic planner makes no network calls — fully on-device.
+        NetworkProfile::None
     }
 
     fn next_step(&mut self, _ctx: &StepContext) -> Result<StepDecision, String> {

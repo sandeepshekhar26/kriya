@@ -8,7 +8,10 @@
 
 use serde_json::Value;
 
-use super::{build_prompt, extract_json, parse_decision, Inference, StepContext, StepDecision};
+use super::{
+    build_prompt, extract_json, parse_decision, Inference, NetworkProfile, StepContext,
+    StepDecision,
+};
 
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const API_VERSION: &str = "2023-06-01";
@@ -33,6 +36,11 @@ impl Anthropic {
 impl Inference for Anthropic {
     fn name(&self) -> &'static str {
         "anthropic"
+    }
+
+    fn network_profile(&self) -> NetworkProfile {
+        // Calls api.anthropic.com over HTTPS — data leaves the device.
+        NetworkProfile::Remote
     }
 
     fn next_step(&mut self, ctx: &StepContext) -> Result<StepDecision, String> {

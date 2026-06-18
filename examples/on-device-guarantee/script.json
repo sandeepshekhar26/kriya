@@ -1,0 +1,4 @@
+[
+  { "action": "create_note", "params": { "title": "Sealed note" }, "reasoning": "seed one action so the run does real work under the seal" },
+  { "done": true, "summary": "sealed run complete" }
+]

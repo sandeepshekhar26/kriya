@@ -43,9 +43,46 @@ pub enum StepDecision {
     Done { summary: String },
 }
 
+/// Where a backend's inference happens, network-wise (R13). This is what lets the host
+/// make and *attest* an on-device "nothing leaves the device" guarantee for regulated apps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkProfile {
+    /// No network access at all — a deterministic/scripted planner.
+    None,
+    /// Talks only to a loopback service on this machine (e.g. a local Ollama model). Data
+    /// never leaves the device.
+    Localhost,
+    /// Reaches a remote third party — prompts and data can leave the device.
+    Remote,
+}
+
+impl NetworkProfile {
+    /// True when running this backend means data can leave the device. `None` and
+    /// `Localhost` stay on-device; only `Remote` egresses.
+    pub fn egresses(self) -> bool {
+        matches!(self, NetworkProfile::Remote)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            NetworkProfile::None => "no-network",
+            NetworkProfile::Localhost => "localhost-only",
+            NetworkProfile::Remote => "remote",
+        }
+    }
+}
+
 pub trait Inference: Send {
     fn name(&self) -> &'static str;
     fn next_step(&mut self, ctx: &StepContext) -> Result<StepDecision, String>;
+
+    /// The backend's network reach (R13). Defaults to [`NetworkProfile::Remote`] — a backend
+    /// is assumed to egress unless it explicitly declares otherwise, so a newly added backend
+    /// is never *silently* treated as on-device. The host consults this to enforce + attest
+    /// the on-device guarantee.
+    fn network_profile(&self) -> NetworkProfile {
+        NetworkProfile::Remote
+    }
 }
 
 /// Select a backend from the `AGENT_BACKEND` env var, falling back to `default` when no
@@ -63,6 +100,21 @@ pub fn select_backend_with_default(default: Box<dyn Inference>) -> Box<dyn Infer
 // ---------------------------------------------------------------------------
 // Shared helpers (reused by every LLM backend)
 // ---------------------------------------------------------------------------
+
+/// True if `url`'s host is a loopback address, so traffic to it never leaves the machine.
+/// Used by backends that talk to a configurable host (e.g. Ollama) to report an honest
+/// [`NetworkProfile`] — pointing the host at a remote box correctly downgrades the guarantee.
+pub(crate) fn is_loopback_url(url: &str) -> bool {
+    let after_scheme = url.split("://").nth(1).unwrap_or(url);
+    let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
+    // Strip a trailing :port (but keep IPv6 bracketed hosts intact).
+    let host = if authority.starts_with('[') {
+        authority.split(']').next().unwrap_or(authority).trim_start_matches('[')
+    } else {
+        authority.rsplit_once(':').map(|(h, _)| h).unwrap_or(authority)
+    };
+    host == "localhost" || host == "::1" || host.starts_with("127.")
+}
 
 /// Build the standard single-action prompt used by all LLM backends.
 pub(crate) fn build_prompt(ctx: &StepContext) -> String {
@@ -196,4 +248,39 @@ pub(crate) fn parse_decision(json_str: &str) -> Result<StepDecision, String> {
         decision.get("reasoning").and_then(Value::as_str).unwrap_or("").to_string();
 
     Ok(StepDecision::Call { action_id, params, reasoning })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn network_profile_egress_classification() {
+        assert!(!NetworkProfile::None.egresses());
+        assert!(!NetworkProfile::Localhost.egresses());
+        assert!(NetworkProfile::Remote.egresses());
+    }
+
+    #[test]
+    fn loopback_urls_are_recognized() {
+        assert!(is_loopback_url("http://localhost:11434"));
+        assert!(is_loopback_url("http://127.0.0.1:11434"));
+        assert!(is_loopback_url("http://127.0.0.1"));
+        assert!(is_loopback_url("http://127.1.2.3:11434"));
+        assert!(is_loopback_url("http://[::1]:11434"));
+        // Anything off the loopback interface egresses.
+        assert!(!is_loopback_url("http://ollama.example.com:11434"));
+        assert!(!is_loopback_url("https://api.anthropic.com"));
+        assert!(!is_loopback_url("http://10.0.0.5:11434"));
+        assert!(!is_loopback_url("http://192.168.1.20:11434"));
+    }
+
+    #[test]
+    fn backends_declare_honest_network_profiles() {
+        // Deterministic = no network; the cloud backends egress; the local `claude` CLI is
+        // convenient but still reaches the cloud, so it is honestly Remote.
+        assert_eq!(scripted::ScriptedPlanner::from_decisions(vec![]).network_profile(), NetworkProfile::None);
+        assert_eq!(anthropic::Anthropic::new().network_profile(), NetworkProfile::Remote);
+        assert_eq!(claude_cli::ClaudeCli::new().network_profile(), NetworkProfile::Remote);
+    }
 }

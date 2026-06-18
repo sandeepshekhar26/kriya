@@ -33,6 +33,12 @@ pub struct Policy {
     rules: Vec<Rule>,
     #[serde(default)]
     budget: Budget,
+    /// On-device guarantee (R13). When `true`, the in-process host refuses to run with an
+    /// inference backend that egresses to a remote service, and signs an attestation that the
+    /// run was sealed — the "nothing leaves the device" posture regulated apps need. Default
+    /// `false` (off, fully backward compatible).
+    #[serde(default)]
+    on_device: bool,
 }
 
 impl Default for Policy {
@@ -46,6 +52,7 @@ impl Default for Policy {
                 Rule { action: "*".into(), allow: false, require_approval: false },
             ],
             budget: Budget::default(),
+            on_device: false,
         }
     }
 }
@@ -62,6 +69,11 @@ impl Policy {
     /// The configured per-minute action cap, if any.
     pub fn max_actions_per_minute(&self) -> Option<u32> {
         self.budget.max_actions_per_minute
+    }
+
+    /// Whether the on-device guarantee (R13) is in force for this policy.
+    pub fn on_device(&self) -> bool {
+        self.on_device
     }
 
     pub fn check(&self, action_id: &str) -> Decision {
@@ -207,6 +219,29 @@ rules:
         let warns = p.warnings();
         assert!(warns.iter().any(|w| w.contains("no explicit catch-all")), "got: {warns:?}");
         assert!(warns.iter().any(|w| w.contains("budget.max_actions_per_minute")), "got: {warns:?}");
+    }
+
+    #[test]
+    fn on_device_flag_parses_and_defaults_off() {
+        // Absent → off (backward compatible).
+        let off = policy_from(
+            r#"
+rules:
+  - action: "*"
+    allow: false
+"#,
+        );
+        assert!(!off.on_device());
+        // Explicitly sealed.
+        let on = policy_from(
+            r#"
+rules:
+  - action: "*"
+    allow: false
+on_device: true
+"#,
+        );
+        assert!(on.on_device());
     }
 
     #[test]

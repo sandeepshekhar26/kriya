@@ -31,6 +31,11 @@ impl Actor {
     }
 }
 
+/// Reserved `action_id` for the R13 on-device attestation receipt — a signed record that a
+/// run was sealed (the inference backend made no remote egress). Recognizable by verifiers
+/// and the console as an attestation rather than an app action.
+pub const ATTESTATION_ON_DEVICE: &str = "kriya.attestation.on_device";
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Receipt {
     pub step_id: String,
