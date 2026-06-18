@@ -6,7 +6,7 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::audit::{now_ms, Receipt, Signer};
+use crate::audit::{now_ms, Actor, Receipt, Signer};
 use crate::budget::BudgetTracker;
 use crate::memory::AgentMemory;
 use crate::permissions::{Decision, Policy};
@@ -37,6 +37,25 @@ const STEP_TIMEOUT: Duration = Duration::from_secs(300);
 
 fn log(sink: &dyn HostSink, entry: AgentLog) {
     sink.emit_log(&entry);
+}
+
+/// Resolve who is acting (R8) for receipt attribution. The agent identity prefers an
+/// explicit `agent_id` from the request, else the backend's name. The user identity
+/// prefers an explicit `user_id`, else the OS user, else `"local"`. Always yields a
+/// non-empty pair so every receipt carries attribution.
+fn resolve_actor(req_agent: Option<&str>, req_user: Option<&str>, backend_name: &str) -> Actor {
+    let nonempty = |s: &str| !s.trim().is_empty();
+    let agent = req_agent
+        .filter(|s| nonempty(s))
+        .unwrap_or(backend_name)
+        .to_string();
+    let user = req_user
+        .filter(|s| nonempty(s))
+        .map(str::to_string)
+        .or_else(|| std::env::var("USER").ok().filter(|s| nonempty(s)))
+        .or_else(|| std::env::var("USERNAME").ok().filter(|s| nonempty(s)))
+        .unwrap_or_else(|| "local".to_string());
+    Actor::new(agent, user)
 }
 
 /// Ask the app for a human decision on a held action and block until it arrives
@@ -124,6 +143,10 @@ pub fn run_task(
     // Stable id for this run. Stamped on every episode written below, so a crashed
     // run can be reconstructed end-to-end from durable memory.
     let run_id = uuid::Uuid::new_v4().to_string();
+
+    // Who is acting (R8). Resolved once per run and stamped into every signed receipt,
+    // so the audit trail attributes each action to an agent + operator, tamper-evidently.
+    let actor = resolve_actor(req.agent_id.as_deref(), req.user_id.as_deref(), backend.name());
 
     log(
         sink,
@@ -363,14 +386,17 @@ pub fn run_task(
             }
         }
 
-        // Sign and record the receipt regardless of success.
-        let signed = signer.record(Receipt {
-            step_id: step_id.clone(),
-            action_id: action_id.clone(),
-            params: params.clone(),
-            success: result.success,
-            ts_ms: now_ms(),
-        });
+        // Sign and record the receipt regardless of success, stamped with who acted (R8).
+        let signed = signer.record(
+            Receipt::new(
+                step_id.clone(),
+                action_id.clone(),
+                params.clone(),
+                result.success,
+                now_ms(),
+            )
+            .with_actor(Some(actor.clone())),
+        );
         log(
             sink,
             AgentLog {
@@ -509,6 +535,8 @@ mod tests {
             tools: Vec::<ToolSchema>::new(),
             resume: false,
             step_mode: false,
+            agent_id: None,
+            user_id: None,
         };
 
         let done = run_task(
@@ -551,6 +579,8 @@ mod tests {
             tools: Vec::new(),
             resume: false,
             step_mode: false,
+            agent_id: None,
+            user_id: None,
         };
         run_task(
             sink.clone(),
@@ -566,5 +596,60 @@ mod tests {
         // No action event was emitted — the denied action never reached the sink/app.
         let events = sink.events.lock().unwrap().clone();
         assert!(events.iter().all(|e| !e.starts_with("action:")), "got: {events:?}");
+    }
+
+    #[test]
+    fn resolve_actor_prefers_request_then_falls_back() {
+        // Explicit identity from the request wins.
+        let a = resolve_actor(Some("claude-desktop"), Some("alice"), "deterministic");
+        assert_eq!(a, Actor::new("claude-desktop", "alice"));
+        // Blank agent falls back to the backend name; blank user falls back to the OS user
+        // (or "local"), never empty.
+        let b = resolve_actor(Some("  "), Some(""), "ollama");
+        assert_eq!(b.agent, "ollama");
+        assert!(!b.user.trim().is_empty());
+    }
+
+    #[test]
+    fn actor_is_stamped_into_the_signed_receipt() {
+        let (pending, approvals, advances) = maps();
+        let sink = Arc::new(RecordingSink {
+            events: Mutex::new(Vec::new()),
+            pending: pending.clone(),
+            reply_state: json!({"notes": []}),
+        });
+        let backend = Box::new(ScriptedBackend::new(vec![
+            StepDecision::Call {
+                action_id: "create_note".into(),
+                params: json!({"title": "hi"}),
+                reasoning: "first".into(),
+            },
+            StepDecision::Done { summary: "done".into() },
+        ]));
+        let req = AgentStartRequest {
+            goal: "make a note".into(),
+            state: json!({"notes": []}),
+            tools: Vec::<ToolSchema>::new(),
+            resume: false,
+            step_mode: false,
+            agent_id: Some("claude-desktop".into()),
+            user_id: Some("alice".into()),
+        };
+
+        // Isolated audit log so we can read back exactly the receipt this run wrote.
+        let log = std::env::temp_dir().join(format!("kriya-host-actor-{}.jsonl", uuid::Uuid::new_v4()));
+        let _ = std::fs::remove_file(&log);
+        let signer = Arc::new(Signer::with_log_path(log.clone()));
+
+        run_task(sink, pending, approvals, advances, Arc::new(Policy::default()), signer, backend, req)
+            .expect("run_task");
+
+        let body = std::fs::read_to_string(&log).expect("audit log written");
+        let line = body.lines().next().expect("one receipt line");
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(v["action_id"], "create_note");
+        assert_eq!(v["actor"]["agent"], "claude-desktop");
+        assert_eq!(v["actor"]["user"], "alice");
+        let _ = std::fs::remove_file(&log);
     }
 }

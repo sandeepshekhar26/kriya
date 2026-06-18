@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use crate::audit::{now_ms, Receipt, SignedReceipt, Signer};
+use crate::audit::{now_ms, Actor, Receipt, SignedReceipt, Signer};
 use crate::budget::BudgetTracker;
 use crate::permissions::{Decision, Policy};
 
@@ -44,6 +44,9 @@ pub struct Governor {
     budget: BudgetTracker,
     approval: Box<dyn ApprovalGate>,
     executor: Box<dyn ActionExecutor>,
+    /// Who the external agent is (R8). Set by the binary from the MCP client identity;
+    /// stamped into every signed receipt so cross-app audit attributes each call.
+    actor: Option<Actor>,
 }
 
 impl Governor {
@@ -54,7 +57,13 @@ impl Governor {
         executor: Box<dyn ActionExecutor>,
     ) -> Self {
         let budget = BudgetTracker::new(policy.max_actions_per_minute());
-        Self { policy, signer, budget, approval, executor }
+        Self { policy, signer, budget, approval, executor, actor: None }
+    }
+
+    /// Attribute every receipt this governor signs to `actor` (R8). Chainable on `new`.
+    pub fn with_actor(mut self, actor: Option<Actor>) -> Self {
+        self.actor = actor;
+        self
     }
 
     /// Run one action through policy → approval → budget → execute → audit.
@@ -81,13 +90,17 @@ impl Governor {
 
         // 5. Sign + append a receipt, success or failure. The signing key never leaves the
         //    host, so the agent can propose and run an action but cannot forge its receipt.
-        let receipt = self.signer.record(Receipt {
-            step_id: uuid::Uuid::new_v4().to_string(),
-            action_id: action_id.to_string(),
-            params: params.clone(),
-            success: outcome.success,
-            ts_ms: now_ms(),
-        });
+        //    The receipt carries who acted (R8) when the binary supplied an identity.
+        let receipt = self.signer.record(
+            Receipt::new(
+                uuid::Uuid::new_v4().to_string(),
+                action_id.to_string(),
+                params.clone(),
+                outcome.success,
+                now_ms(),
+            )
+            .with_actor(self.actor.clone()),
+        );
 
         DispatchOutcome::Executed { outcome, receipt }
     }
@@ -206,6 +219,42 @@ budget:
             DispatchOutcome::BudgetExceeded(_)
         ));
         assert_eq!(ran.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn receipt_carries_actor_when_set() {
+        let ran = Arc::new(AtomicUsize::new(0));
+        let mut g = Governor::new(
+            Arc::new(Policy::default()),
+            signer(),
+            Box::new(DenyApproval),
+            counting_executor(ran.clone()),
+        )
+        .with_actor(Some(crate::audit::Actor::new("claude-desktop", "alice")));
+        match g.dispatch("create_note", &json!({"title": "hi"})) {
+            DispatchOutcome::Executed { receipt, .. } => {
+                assert_eq!(
+                    receipt.receipt.actor,
+                    Some(crate::audit::Actor::new("claude-desktop", "alice"))
+                );
+            }
+            other => panic!("expected Executed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn receipt_has_no_actor_by_default() {
+        let ran = Arc::new(AtomicUsize::new(0));
+        let mut g = Governor::new(
+            Arc::new(Policy::default()),
+            signer(),
+            Box::new(DenyApproval),
+            counting_executor(ran.clone()),
+        );
+        match g.dispatch("create_note", &json!({})) {
+            DispatchOutcome::Executed { receipt, .. } => assert!(receipt.receipt.actor.is_none()),
+            other => panic!("expected Executed, got {other:?}"),
+        }
     }
 
     #[test]

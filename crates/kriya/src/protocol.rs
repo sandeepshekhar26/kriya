@@ -40,6 +40,14 @@ pub struct AgentStartRequest {
     /// same way you'd single-step a debugger. Defaults to false (run to completion).
     #[serde(default)]
     pub step_mode: bool,
+    /// Optional identity of the agent driving this run (R8). When absent the host
+    /// falls back to the backend name. Stamped into every signed receipt's `actor`.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    /// Optional identity of the human/operator the run acts for (R8). When absent the
+    /// host falls back to the OS user. Stamped into every signed receipt's `actor`.
+    #[serde(default)]
+    pub user_id: Option<String>,
 }
 
 /// host -> app: execute this action on the agent's behalf.

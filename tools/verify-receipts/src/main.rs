@@ -28,6 +28,15 @@ use serde_json::Value;
 // canonical serialization order that was signed).
 // ---------------------------------------------------------------------------
 
+/// Who took the action (R8). Mirrors `kriya::audit::Actor` — serialized in declaration
+/// order (`agent`, then `user`), which is also alphabetical, so it matches the host's
+/// canonical bytes whether re-derived by struct order or by sorted-key order.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Actor {
+    agent: String,
+    user: String,
+}
+
 /// The unsigned portion of a receipt. Field order is load-bearing: serde_json
 /// serializes struct fields in declaration order, and the host signs
 /// `serde_json::to_vec(&receipt)` over this exact shape.
@@ -42,6 +51,11 @@ struct Receipt {
     params: Value,
     success: bool,
     ts_ms: u64,
+    /// Optional identity attribution (R8). Declared LAST and skipped when absent so the
+    /// re-derived canonical bytes are byte-identical to the host's for both the original
+    /// (actor-less) receipts and the new attributed ones.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    actor: Option<Actor>,
 }
 
 /// A full JSONL line as written by the host: the Receipt fields flattened,
@@ -235,6 +249,18 @@ mod tests {
             params: json!({ "id": "note-1", "category": "work" }),
             success: true,
             ts_ms: 1_700_000_000_000_u64,
+            actor: None,
+        }
+    }
+
+    fn make_receipt_with_actor() -> Receipt {
+        Receipt {
+            step_id: "step-xyz".to_string(),
+            action_id: "delete_transaction".to_string(),
+            params: json!({ "id": "txn-1" }),
+            success: true,
+            ts_ms: 1_700_000_000_500_u64,
+            actor: Some(Actor { agent: "claude-desktop".to_string(), user: "alice".to_string() }),
         }
     }
 
@@ -249,6 +275,33 @@ mod tests {
         let line = serde_json::to_string(&signed).unwrap();
         let (_, _, outcome) = verify_line(&line);
         assert_eq!(outcome, Outcome::Ok, "round-trip signature must verify");
+    }
+
+    #[test]
+    fn round_trip_with_actor_ok() {
+        // An attributed receipt (R8) must re-derive byte-identically and verify.
+        let key = SigningKey::from_bytes(&KEY_A);
+        let signed = sign_receipt(&key, &make_receipt_with_actor());
+        let line = serde_json::to_string(&signed).unwrap();
+        assert!(line.contains("\"actor\":{\"agent\":\"claude-desktop\",\"user\":\"alice\"}"));
+        let (_, _, outcome) = verify_line(&line);
+        assert_eq!(outcome, Outcome::Ok, "actor-bearing receipt must verify");
+    }
+
+    #[test]
+    fn tampered_actor_fails() {
+        // Swapping the operator after signing must invalidate the receipt — attribution
+        // is inside the signed bytes, so it cannot be forged.
+        let key = SigningKey::from_bytes(&KEY_A);
+        let signed = sign_receipt(&key, &make_receipt_with_actor());
+
+        let mut obj: serde_json::Map<String, Value> =
+            serde_json::from_str(&serde_json::to_string(&signed).unwrap()).unwrap();
+        obj.insert("actor".to_string(), json!({ "agent": "claude-desktop", "user": "mallory" }));
+        let line = serde_json::to_string(&obj).unwrap();
+
+        let (_, _, outcome) = verify_line(&line);
+        assert!(matches!(outcome, Outcome::Fail(_)), "tampered actor must not verify");
     }
 
     // ── tamper tests ───────────────────────────────────────────────────────
