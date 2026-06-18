@@ -50,6 +50,23 @@ async function connect(): Promise<ActualApi> {
   return actual;
 }
 
+// Bridge until kriya-core 0.0.2 is published: 0.0.1's getToolSchemas() leaks the per-parameter
+// `required: true` flag INTO each property subschema, which is invalid JSON Schema draft 2020-12,
+// so the Anthropic API rejects the tools when an MCP client (Claude Code) relays them. Strip it so
+// the dumped tools.json stays valid even on re-dump. (0.0.2's getToolSchemas already emits it
+// correctly — drop this once this example depends on ^0.0.2.)
+function sanitizeSchemas(schemas: unknown[]): unknown[] {
+  for (const tool of schemas as Array<{ inputSchema?: { properties?: Record<string, unknown> } }>) {
+    const props = tool.inputSchema?.properties;
+    if (!props) continue;
+    for (const key of Object.keys(props)) {
+      const prop = props[key];
+      if (prop && typeof prop === "object") delete (prop as Record<string, unknown>).required;
+    }
+  }
+  return schemas;
+}
+
 async function main(): Promise<void> {
   const dump = process.argv.includes("--dump");
 
@@ -59,7 +76,7 @@ async function main(): Promise<void> {
   registerActualActions(actual);
 
   if (dump) {
-    stdoutWrite(JSON.stringify(getToolSchemas(), null, 2) + "\n");
+    stdoutWrite(JSON.stringify(sanitizeSchemas(getToolSchemas() as unknown[]), null, 2) + "\n");
     return;
   }
 

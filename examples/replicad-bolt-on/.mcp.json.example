@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "replicad-cad": {
+      "command": "/abs/path/to/repo/crates/kriya/target/release/kriya-mcp",
+      "args": [
+        "--persistent",
+        "--exec", "node /abs/path/to/repo/examples/replicad-bolt-on/dist/handler.js",
+        "--policy", "/abs/path/to/repo/examples/replicad-bolt-on/agent-policy.yaml",
+        "--tools", "/abs/path/to/repo/examples/replicad-bolt-on/tools.json",
+        "--approval", "gui"
+      ]
+    }
+  }
+}

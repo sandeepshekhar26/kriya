@@ -32,5 +32,9 @@ examples/actual-budget-bolt-on/DEMO.md
 examples/actual-budget-bolt-on/REAL-DEMO.md
 examples/actual-budget-bolt-on/demo.cast
 
-# Local MCP host config — machine-specific paths + server password. Commit .mcp.json.example.
+# Local MCP host config — machine-specific paths (+ secrets for actual-budget). Commit .mcp.json.example.
 examples/actual-budget-bolt-on/.mcp.json
+examples/replicad-bolt-on/.mcp.json
+
+# CAD geometry exports (output, not source)
+*.stl

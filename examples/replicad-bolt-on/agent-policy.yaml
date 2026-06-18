@@ -1,0 +1,39 @@
+# Governance policy for the Replicad CAD bolt-on. kriya-mcp enforces this on every tools/call from
+# the external agent — the agent can only *propose*; the host decides.
+#
+# Posture: reads and routine edits (resize a dimension, drill a hole) flow freely; anything that
+# destroys geometry (delete a feature/body, reset the model) pauses for on-device human approval;
+# everything else is denied by default; and a per-minute cap stops a runaway agent.
+rules:
+  # Read-only — safe to let the agent do unattended.
+  - action: "get_model"
+    allow: true
+  - action: "measure"
+    allow: true
+  - action: "export_stl"
+    allow: true
+
+  # Routine edits — resizing and drilling are the everyday agent task.
+  - action: "set_parameter"
+    allow: true
+  - action: "add_hole"
+    allow: true
+
+  # Destructive — require a human's go-ahead, every time.
+  - action: "delete_feature"
+    allow: true
+    require_approval: true
+  - action: "delete_body"
+    allow: true
+    require_approval: true
+  - action: "reset_model"
+    allow: true
+    require_approval: true
+
+  # Everything else: denied (deny-by-default). An agent cannot invoke anything not listed above.
+  - action: "*"
+    allow: false
+
+budget:
+  # A looping agent can't thrash your model: at most 30 actions per rolling minute.
+  max_actions_per_minute: 30

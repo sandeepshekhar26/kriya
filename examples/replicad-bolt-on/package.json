@@ -1,0 +1,22 @@
+{
+  "name": "kriya-example-replicad",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Flagship demo #2: bolt governed, agent-callable actions onto a Replicad (OpenCascade) parametric CAD model — resize and drill freely, but deleting a body needs human approval, and every change is signed.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dump": "node dist/handler.js --dump"
+  },
+  "dependencies": {
+    "kriya-core": "0.0.1",
+    "replicad": "^0.23.1",
+    "replicad-opencascadejs": "^0.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.6.0"
+  }
+}
