@@ -1,0 +1,130 @@
+[
+  {
+    "name": "get_model",
+    "version": 1,
+    "description": "Get the current parametric model: dimension parameters and hole features.",
+    "permissions": [],
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    }
+  },
+  {
+    "name": "measure",
+    "version": 1,
+    "description": "Compute the model's bounding box (mm) and solid volume (mm³) via the CAD kernel.",
+    "permissions": [],
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    }
+  },
+  {
+    "name": "export_stl",
+    "version": 1,
+    "description": "Realize the current solid and export it to an STL file; returns the path and size.",
+    "permissions": [],
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    }
+  },
+  {
+    "name": "set_parameter",
+    "version": 1,
+    "description": "Set a named dimension parameter (width, height, thickness, cornerRadius) in millimetres.",
+    "permissions": [
+      "edit:parameter"
+    ],
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "value": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "name",
+        "value"
+      ]
+    }
+  },
+  {
+    "name": "add_hole",
+    "version": 1,
+    "description": "Add a through-hole at (x, y) mm from the plate centre, with the given diameter (mm).",
+    "permissions": [
+      "edit:feature"
+    ],
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        },
+        "diameter": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "diameter"
+      ]
+    }
+  },
+  {
+    "name": "delete_feature",
+    "version": 1,
+    "description": "Delete a feature (hole) by its id.",
+    "permissions": [
+      "delete:feature"
+    ],
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ]
+    }
+  },
+  {
+    "name": "delete_body",
+    "version": 1,
+    "description": "Delete the model's solid body. Destroys the geometry.",
+    "permissions": [
+      "delete:body"
+    ],
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    }
+  },
+  {
+    "name": "reset_model",
+    "version": 1,
+    "description": "Reset the model to the default plate, discarding all edits.",
+    "permissions": [
+      "reset:model"
+    ],
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    }
+  }
+]
