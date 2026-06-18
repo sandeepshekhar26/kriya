@@ -8,7 +8,7 @@
 //!
 //! Usage:
 //!   kriya-mcp --tools <schemas.json> [--policy <policy.yaml>] [--exec "<cmd>"]
-//!            [--approval deny|tty|gui|auto] [--name <name>]
+//!            [--approval deny|tty|gui|auto] [--name <name>] [--actor <agent>] [--user <user>]
 //!
 //!   --tools     JSON array from the SDK's getToolSchemas() (required)
 //!   --policy    YAML permission policy (default: safe built-in — create/edit allow,
@@ -19,12 +19,16 @@
 //!               the terminal), gui (native macOS dialog — works under a TUI host like Claude
 //!               Code), or auto (approve — trusted/testing only)
 //!   --name      server name reported in `initialize` (default: kriya-mcp)
+//!   --actor     identity of the agent/client driving the server — stamped into every signed
+//!               receipt's `actor` field (R8). Omit to leave receipts unattributed.
+//!   --user      operator identity the run acts for (default: $USER). Only used with --actor.
+//!   --audit-log path for the signed-receipt JSONL log (default: $TMPDIR/kriya-audit.jsonl)
 
 use std::path::PathBuf;
 use std::process::exit;
 use std::sync::Arc;
 
-use kriya::audit::Signer;
+use kriya::audit::{Actor, Signer};
 use kriya::mcp::{
     ActionExecutor, ActionOutcome, ApprovalGate, AutoApprove, DenyApproval, FnExecutor, Governor,
     PersistentProcessExecutor, ProcessExecutor, Server, TtyApproval,
@@ -43,13 +47,17 @@ struct Args {
     approval: String,
     name: String,
     persistent: bool,
+    actor: Option<String>,
+    user: Option<String>,
+    audit_log: Option<PathBuf>,
 }
 
 fn usage_and_exit(msg: &str) -> ! {
     eprintln!("kriya-mcp: {msg}");
     eprintln!(
         "usage: kriya-mcp --tools <schemas.json> [--policy <policy.yaml>] [--exec \"<cmd>\"] \
-         [--persistent] [--approval deny|tty|gui|auto] [--name <name>]"
+         [--persistent] [--approval deny|tty|gui|auto] [--name <name>] \
+         [--actor <agent>] [--user <user>] [--audit-log <path>]"
     );
     exit(2);
 }
@@ -61,6 +69,9 @@ fn parse_args() -> Args {
     let mut approval = "deny".to_string();
     let mut name = "kriya-mcp".to_string();
     let mut persistent = false;
+    let mut actor: Option<String> = None;
+    let mut user: Option<String> = None;
+    let mut audit_log: Option<PathBuf> = None;
 
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -75,6 +86,9 @@ fn parse_args() -> Args {
             "--approval" => approval = take("--approval"),
             "--name" => name = take("--name"),
             "--persistent" => persistent = true,
+            "--actor" => actor = Some(take("--actor")),
+            "--user" => user = Some(take("--user")),
+            "--audit-log" => audit_log = Some(PathBuf::from(take("--audit-log"))),
             "-h" | "--help" => usage_and_exit("help"),
             other => usage_and_exit(&format!("unknown argument: {other}")),
         }
@@ -83,7 +97,19 @@ fn parse_args() -> Args {
     let Some(tools) = tools else {
         usage_and_exit("--tools <schemas.json> is required");
     };
-    Args { tools, policy, exec, approval, name, persistent }
+    Args { tools, policy, exec, approval, name, persistent, actor, user, audit_log }
+}
+
+/// Build the receipt actor (R8) from the binary's identity flags. Returns `None` when
+/// no `--actor` was given, leaving receipts unattributed (backward compatible). When an
+/// agent id is given, the operator defaults to `$USER`, then `"local"`.
+fn build_actor(agent: Option<String>, user: Option<String>) -> Option<Actor> {
+    let agent = agent?;
+    let user = user
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| std::env::var("USER").ok().filter(|s| !s.trim().is_empty()))
+        .unwrap_or_else(|| "local".to_string());
+    Some(Actor::new(agent, user))
 }
 
 fn load_tools(path: &PathBuf) -> Vec<ToolSchema> {
@@ -131,11 +157,16 @@ fn main() -> std::io::Result<()> {
         Some(p) => Policy::load_or_default(p),
         None => Policy::default(),
     };
-    let signer = Arc::new(Signer::new());
+    let signer = Arc::new(match &args.audit_log {
+        Some(p) => Signer::with_log_path(p.clone()),
+        None => Signer::new(),
+    });
     let approval = build_approval(&args.approval);
     let executor = build_executor(args.exec.clone(), args.persistent);
 
-    let governor = Governor::new(Arc::new(policy), signer.clone(), approval, executor);
+    let actor = build_actor(args.actor.clone(), args.user.clone());
+    let governor = Governor::new(Arc::new(policy), signer.clone(), approval, executor)
+        .with_actor(actor.clone());
     let mut server = Server::new(&args.name, SERVER_VERSION, schemas, governor);
 
     // Banner to stderr — stdout is reserved for the JSON-RPC stream.
@@ -144,10 +175,15 @@ fn main() -> std::io::Result<()> {
         (Some(cmd), false) => format!("{cmd} (per-call)"),
         (None, _) => "<none: discovery only>".to_string(),
     };
+    let actor_desc = match &actor {
+        Some(a) => format!("{}/{}", a.agent, a.user),
+        None => "<unattributed>".to_string(),
+    };
     eprintln!(
-        "[kriya-mcp] serving {} governed tool(s) · approval={} · exec={} · audit log={}",
+        "[kriya-mcp] serving {} governed tool(s) · approval={} · actor={} · exec={} · audit log={}",
         server.tool_count(),
         args.approval,
+        actor_desc,
         exec_desc,
         signer.log_path().display()
     );

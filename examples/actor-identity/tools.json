@@ -1,0 +1,12 @@
+[
+  {
+    "name": "categorize_transaction",
+    "description": "Assign a category to a transaction (allowed by policy)",
+    "inputSchema": { "type": "object", "properties": { "id": { "type": "string" } } }
+  },
+  {
+    "name": "delete_transaction",
+    "description": "Permanently delete a transaction (guarded — requires approval)",
+    "inputSchema": { "type": "object", "properties": { "id": { "type": "string" } } }
+  }
+]

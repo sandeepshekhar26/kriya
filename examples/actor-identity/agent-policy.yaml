@@ -1,0 +1,12 @@
+# Demo policy for the R8 actor-identity example.
+# categorize is routine (allowed); deleting a transaction is destructive (held for a human).
+rules:
+  - action: "categorize_*"
+    allow: true
+  - action: "delete_*"
+    allow: true
+    require_approval: true
+  - action: "*"
+    allow: false
+budget:
+  max_actions_per_minute: 30
