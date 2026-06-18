@@ -3,6 +3,38 @@
 > **Build desktop apps that AI agents can understand and operate** — directly, through your app's
 > real typed actions, not by screenshotting the screen and guessing where to click.
 
+## The three frontiers of "agent meets software"
+
+AI agents need to operate software. That interaction is splitting into three tiers — two have
+emerging standards, one has nothing:
+
+```
+                        ┌─────────────────────────────────────────────────────┐
+                        │        How agents reach software today              │
+                        ├─────────────┬─────────────────┬─────────────────────┤
+                        │  Web apps   │   Cloud APIs    │  Desktop / local    │
+                        │             │                 │  apps               │
+  Standard              │  WebMCP     │   MCP           │  ❌ None            │
+                        │  (W3C trial)│   (Linux Fdn)   │                     │
+  Agent interface       │  Declared   │   REST / tool   │  Screenshots +      │
+                        │  tools in   │   schemas       │  pixel-clicking     │
+                        │  the page   │                 │                     │
+  Governance            │  Browser    │   Gateway-level  │  ❌ None —          │
+                        │  sandbox    │   (immature)    │  can't permission,  │
+                        │             │                 │  audit, or gate     │
+  Who's building it     │  Google,    │   Anthropic,    │  ← kriya is here    │
+                        │  browser    │   OpenAI,       │                     │
+                        │  vendors    │   Microsoft     │                     │
+                        └─────────────┴─────────────────┴─────────────────────┘
+```
+
+**The gap:** a local app with no API and private data — a POS terminal, a finance tool, a
+healthcare workstation — can't be governed from the outside. Governance must live where the data
+and the human are: **inside the app, on the device.** That's the frontier kriya builds for.
+([Full article →](https://medium.com/@sandeepshekhar26/the-three-frontiers-of-agent-meets-software-and-the-one-nobodys-building-for-a7cafda13715))
+
+---
+
 Every app today was built for humans clicking buttons. Now AI agents need to use those same apps —
 and they shouldn't have to squint at pixels to do it. With kriya you declare each of your app's
 capabilities once as a typed **action**: a human triggers it by clicking, an agent triggers it by
@@ -151,14 +183,14 @@ gives a frontier agent governed access to [Actual Budget](https://actualbudget.o
 local-first finance app with **no HTTP API** — in ~37 lines, without changing Actual's code.
 (`kriya wrap <file>` scaffolds the wrappers from your exported functions.)
 
-> **Fewer lines — and far fewer tokens.** In that demo, having the agent categorize a transaction
-> through kriya costs **~700 tokens**: it reads structured state and emits one typed action call,
-> all text. Driving the *same* edit by **screenshot-and-click** sends the model a fresh screenshot
-> every step (~1,300–1,600 tokens each, at Claude's vision rate of ≈ width × height ÷ 750), and one
-> edit takes several — find the row, click it, open the category, pick one, verify — so realistically
-> **~8,000–15,000 tokens**. That's **~10–20× more**, slower, and brittle the moment the UI shifts.
-> Typed actions are cheaper *because* the model reasons over meaning, not pixels.
-> <br><sub>(Rough estimate, not a benchmark; image cost via Anthropic's documented formula.)</sub>
+> **Fewer lines — and far fewer tokens.** A published benchmark (Reflex, May 2026) ran vision-based
+> and typed-action agents on the same task with Claude Sonnet: vision needed **551,000 input tokens
+> across 53 steps** (~17 min); typed actions needed **12,000 tokens in 8 calls** (~20 sec) —
+> **~45× more tokens and ~50× slower**. In kriya's own Actual Budget demo the ratio is similar:
+> categorizing a transaction costs ~700 tokens via a typed action vs. ~8,000–15,000 tokens when
+> screenshot-and-clicking the same edit. Typed actions are cheaper *because* the model reasons over
+> meaning, not pixels.
+> <br><sub>(Benchmark: [Reflex, May 2026](https://medium.com/@sandeepshekhar26/the-three-frontiers-of-agent-meets-software-and-the-one-nobodys-building-for-a7cafda13715); kriya estimate via Anthropic's documented image-token formula.)</sub>
 
 ## What's in the box
 
@@ -200,6 +232,43 @@ Pick the inference backend with `AGENT_BACKEND` (`deterministic` default, or `cl
 - [architecture.md](architecture.md) — how the pattern works, end to end
 - [docs/ROADMAP.md](docs/ROADMAP.md) — what's built and what's next
 - [docs/PRODUCT_GAPS.md](docs/PRODUCT_GAPS.md) — honest feature-completion tracker
+
+## Why this matters now
+
+- **EU AI Act** high-risk obligations take effect **August 2, 2026** — penalties up to 7% of
+  worldwide annual turnover. Agents touching real data need auditable, governed interfaces.
+- **Gartner** projects 40% of enterprise apps will embed AI agents by end of 2026 — and 40% of
+  enterprises will demote or decommission autonomous agents by 2027 due to governance gaps.
+- The **NSA AI Security Center** (May 2026) warned that MCP's rapid adoption has outpaced its
+  security model; a **CoSAI** whitepaper identified nearly 40 MCP-specific threats across 12
+  categories.
+- For desktop/local apps, the only GA product is Microsoft Copilot Studio — still vision-based,
+  still ungoverned. That's the gap kriya fills.
+
+## Enterprise — kriya Console
+
+The runtime in this repo makes a *single* app safely agent-drivable, on-device, and stays **MIT,
+free, forever**. Organizations running agents across **many** apps, users, and machines need one
+layer more: somewhere to oversee and *prove* what every agent did, and to set the policy
+centrally. That's **kriya Console** — a separate, commercial product for teams and regulated
+deployments, built on top of this open runtime. *The engine is open; the cockpit is paid.*
+
+The Console never changes how the runtime works — it consumes the same Ed25519-signed receipts
+and the same `agent-policy.yaml` the open host already emits and enforces:
+
+- **Cross-app audit, verified locally.** Aggregate the signed audit logs from every kriya app and
+  verify them on-device — nothing leaves the machine. Tampered or forged entries are flagged,
+  giving you one trustworthy view of what every agent across the org actually did.
+- **Author policy centrally.** Decide what every agent may do — allow, require approval, or deny —
+  across all your apps from one place, spot the actions you haven't governed yet, and validate it
+  before it ships. The Console produces the policy the open runtime enforces.
+- **The foundation for regulated rollouts.** Tamper-evident audit plus centrally-enforced policy
+  is what **EU AI Act** (enforcement opens Aug 2026) and **SOC 2** ask for when an agent touches
+  real data — on-device, where cloud MCP gateways structurally can't reach. (One-click
+  compliance-evidence export is on the Console roadmap.)
+
+Enterprise & regulated deployments → [kriyanative.com](https://kriyanative.com) ·
+Sandeepshekhar26@gmail.com.
 
 ## Status
 
