@@ -50,6 +50,8 @@ matters until this path is walked.
 
 ## P1 — Monetize + distribute (after the wedge is proven)
 
+> **Repo split (D-011 / [LICENSING.md](LICENSING.md)):** R6 → 🔒 private **`kriya-console`** (Proprietary/ARR). R2 = 🌐 public (done).
+
 - ⬜ **R6 · Governance dashboard (the paid surface).** Cross-app/agent audit viewer, in-app policy
   editor, approval routing for multiple pending approvals, budget controls. Open-core
   monetization; leans on the audit/budget/approval/policy work already shipped.
@@ -64,18 +66,45 @@ matters until this path is walked.
 
 ## P2 — Compliance & polish
 
-- ⬜ **R7 · Compliance-evidence export.** Audit log → SOC 2 / ISO 42001 / EU AI Act artifacts.
-  The willingness-to-pay hook (EU AI Act enforcement opens Aug 2026).
-- ⬜ **R8 · Agent + user identity per action.** Who (which agent / which user) took each action;
-  ties into the governance category.
-- ⬜ **R13 · On-device guarantee.** Local-model-first posture (ollama / claude-cli) + a
-  "no network egress" assertion the audit log can attest — the regulated-app selling point that
-  *nothing leaves the device*. Thesis-critical for the regulated ICP.
+> **Repo split (D-011):** R7 → 🔒 `kriya-console`; **R8 splits** (signed-receipt `actor` field 🌐 public, identity-mgmt 🔒 private); R13 / R9 / R10 / R11 → 🌐 public.
+
+- ✅ **R7 · Compliance-evidence export** — shipped in 🔒 `kriya-console` (`a7e9d68`): audit log →
+  SOC 2 / ISO 42001 / EU AI Act evidence bundle (integrity + R8 attribution + R13 on-device +
+  control mapping), Markdown/JSON export. The willingness-to-pay hook (EU AI Act enforcement opens
+  Aug 2026).
+- 🟡 **R8 · Agent + user identity per action.** Public **signed-receipt `actor` field** shipped
+  (`ccdb444` runtime + `57784fb` console) — agent + operator stamped *inside* the signed bytes
+  (tamper-evident), threaded through the in-process host, MCP governor (`--actor`), the offline
+  verifier, and the console audit table. Still ⬜: the 🔒 identity-**management** half (SSO/OIDC,
+  RBAC, per-user dashboards).
+- ✅ **R13 · On-device guarantee** — shipped (`64b340f`). A sealed policy (`on_device: true`) makes
+  the in-process host refuse an egressing inference backend and sign a `kriya.attestation.on_device`
+  receipt (verifiable offline). Backends declare an honest `NetworkProfile` (scripted=none,
+  Ollama=localhost-only/remote, claude-cli + Anthropic=remote). The regulated-ICP "nothing leaves
+  the device" posture, attested.
 - ⬜ **R9 · Resume-ability UI + persist approval queue.** A reference-app button to trigger
   `resume: true`; persist pending approvals so a run interrupted mid-approval re-issues the
   guarded action instead of skipping it.
 - ⬜ **R10 · OpenAI inference backend + retry/backoff + frontier-escalation fallback.**
 - ⬜ **R11 · Audit-receipt tamper tests** + finish the budget (api-calls/hr cap).
+
+## P3 — Ecosystem reach (after the paid surface is proven; pull forward with a design partner)
+
+> **Why a new tier (added 2026-06-17).** The governed in-process layer is currently **JS/TS-only**
+> (`kriya-core` / `wrapAction`). The biggest unserved *in-process* surface — CAD (FreeCAD / Blender /
+> Fusion 360), data/ML, scientific & engineering desktop tools, much enterprise scripting, and a lot
+> of accounting/ERP (e.g. Tally is C++ + the TDL DSL + a local XML/HTTP gateway) — is reachable today
+> only via the MCP + `ProcessExecutor` **bridge** (governed at the process boundary, not in-process).
+> A Python binding upgrades that whole class to first-class, in-process `wrapAction` targets.
+
+- ⬜ **R17 · Python SDK binding** (🌐 public, MIT). A Python `registerAction` / `wrapAction` mirror of
+  `kriya-core` that speaks the **same stdio/NDJSON protocol** to the existing `kriya-host` binary —
+  feasible because R3 made the host transport/binding-agnostic, so this is a *second binding, not a
+  new host* (the Node `kriya-sidecar` already proves the path). Unlocks the Python in-process ICP:
+  CAD automation, data/ML, scientific/engineering, accounting. **Sequencing:** not ahead of R6 (the
+  paid console) or R7 (the compliance hook); pull forward the moment a concrete CAD / ERP / Python
+  design partner is real. The near-term CAD demo (**JSCAD / Replicad**) is **JS/TS already** and needs
+  none of this — build it on the clean in-process path now.
 
 ## Launch (after the wedge + publish; gated on planner's go)
 
@@ -95,6 +124,20 @@ matters until this path is walked.
 
 ## Done (newest first)
 
+- ✅ **R8 (public half) · Signed-receipt `actor` field** — `ccdb444` (runtime) + `57784fb` (console).
+  Records *who* took each action (agent + operator) **inside** the Ed25519-signed receipt, so the
+  attribution is tamper-evident. Threaded through the in-process host (resolves from the run
+  request, else backend name + OS user), the MCP `Governor` (`kriya-mcp --actor/--user`), the
+  offline `verify-receipts` verifier, and the console's TS verifier + audit table — all
+  cross-checked against real Rust-signed receipts. Additive (`skip_if_none`): pre-R8 receipts sign
+  byte-identically. Demo: `examples/actor-identity/`. The identity-**management** half (SSO/RBAC)
+  stays in 🔒 `kriya-console`.
+- ✅ **R13 · On-device guarantee** — `64b340f`. `NetworkProfile` + `Inference::network_profile()`
+  (defaults to `remote` — a backend is never *silently* on-device); a sealed policy
+  (`on_device: true`) makes the host refuse an egressing backend before any step and sign a
+  `kriya.attestation.on_device` receipt, verifiable offline alongside the action receipts. Honest
+  classification (Ollama on loopback = on-device, claude-cli + Anthropic = remote). Demo:
+  `examples/on-device-guarantee/`. The regulated-ICP "nothing leaves the device" posture, attested.
 - ✅ **R2 · Publish packages** — **2026-06-15** (planner). `kriya-core` 0.0.1 · `kriya-sidecar`
   0.0.1 · `kriya-inspector` 0.3.0 · `create-kriya-app` 0.2.0 on npm; `kriya` 0.1.0 on crates.io;
   scaffolder template path-swapped to the published crate. Republish for the P0.5 API (core/sidecar
