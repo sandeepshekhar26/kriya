@@ -175,6 +175,14 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
   functions via the TypeScript compiler API, infers parameter schemas + required-ness + JSDoc
   descriptions, and scaffolds the `wrapAction(...)` module. Augment, not migrate — the bolt-on
   path that makes the <50-LOC R5 demo real. 16 tests; verified wrap→register→dump round-trip.
+- ✅ **Python SDK binding** (`R17`, **P3**, `fae5909` + `5f1b67a`) — [`bindings/python/`](../bindings/python/):
+  one `pip install kriya` package mirroring `kriya-core` (`register_action`/`wrap_action`, schema,
+  validation, composition, draft-clean JSON-Schema export) **and** `kriya-sidecar` (the `Host` stdio
+  NDJSON driver + `run_task` + `recent_memory()`). Zero runtime deps; 51 unit tests + an opt-in
+  integration test against the real `kriya-host` (action + held/granted approval + memory recall) + a
+  runnable example. The first non-JS language on the in-process layer — *a second binding, not a new
+  host* — and the `bindings/` convention for **R18 (.NET)** / **R19 (JVM)** (decision [D-012]). Async
+  handlers are the only follow-up (handlers run on the host reader thread today).
 - ❌ Mobile (Flutter, SwiftUI, Jetpack Compose) — **deprioritized** (premature).
 - ❌ Web framework bindings (Vue/Svelte for web) — **not doing** (don't fight WebMCP).
 - 🟡 Reference apps beyond notes: **task manager ✅** (apps/task-manager — six
