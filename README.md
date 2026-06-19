@@ -236,6 +236,7 @@ Pick the inference backend with `AGENT_BACKEND` (`deterministic` default, or `cl
 - [docs/SECURITY.md](docs/SECURITY.md) — how the signed audit trail is tamper-evident (and an honest threat model)
 - [docs/ROADMAP.md](docs/ROADMAP.md) — what's built and what's next
 - [docs/PRODUCT_GAPS.md](docs/PRODUCT_GAPS.md) — honest feature-completion tracker
+- [docs/CONTINUE.md](docs/CONTINUE.md) — copy-paste prompt to advance the roadmap by one item
 
 ## Why this matters now
 
