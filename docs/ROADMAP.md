@@ -95,7 +95,18 @@ matters until this path is walked.
 > Fusion 360), data/ML, scientific & engineering desktop tools, much enterprise scripting, and a lot
 > of accounting/ERP (e.g. Tally is C++ + the TDL DSL + a local XML/HTTP gateway) — is reachable today
 > only via the MCP + `ProcessExecutor` **bridge** (governed at the process boundary, not in-process).
-> A Python binding upgrades that whole class to first-class, in-process `wrapAction` targets.
+> A second-language binding upgrades that whole class to first-class, in-process `wrapAction` targets.
+>
+> **The language ladder (research 2026-06-19, decision [D-012](DECISIONS.md), full ranking in
+> [strategy/language-bindings.md](strategy/language-bindings.md)).** R3 made the host
+> binding-agnostic (NDJSON over stdio), so each new language is *a second binding, not a new host* —
+> the cost is roughly flat, and the order is set by **on-thesis app surface**, not popularity:
+> **R17 Python** (CAD / data-ML / scientific / quant) → **R18 C#/.NET** ⭐ (the bullseye: WPF/WinForms
+> LOB — regulated health/finance/manufacturing/gov Windows desktop) → **R19 Java/Kotlin** (the JVM
+> half of regulated enterprise desktop). C++ is design-partner-gated; **Go and Ruby are explicit
+> traps** (server/web/CLI ecosystems where a good cloud API already exists — where the thesis says
+> kriya isn't needed). All demand-pulled: ship a binding when a real design partner in that ecosystem
+> appears.
 
 - ⬜ **R17 · Python SDK binding** (🌐 public, MIT). A Python `registerAction` / `wrapAction` mirror of
   `kriya-core` that speaks the **same stdio/NDJSON protocol** to the existing `kriya-host` binary —
@@ -105,6 +116,26 @@ matters until this path is walked.
   paid console) or R7 (the compliance hook); pull forward the moment a concrete CAD / ERP / Python
   design partner is real. The near-term CAD demo (**JSCAD / Replicad**) is **JS/TS already** and needs
   none of this — build it on the clean in-process path now.
+
+- ⬜ **R18 · C#/.NET SDK binding** ⭐ (🌐 public, MIT) — *the #1 second binding after Python
+  ([D-012](DECISIONS.md))*. A `registerAction`/`wrapAction` mirror shipped on **NuGet** that speaks the
+  same stdio/NDJSON protocol to `kriya-host`, with a **WPF or WinForms** sample. Unlocks the largest
+  and highest-willingness-to-pay slab of the ICP: regulated/LOB **Windows desktop** (health, finance,
+  manufacturing HMIs, gov), plus the SolidWorks/Revit/Unity add-in world (also C#). The only existing
+  .NET desktop MCP path today is **accessibility-tree scraping**; **Windows 11's On-Device Agent
+  Registry is actively pushing every local app toward typed, signed, on-device MCP** — creating demand
+  while leaving the governance batteries (in-app approval, budget, signed audit, memory) for kriya to
+  own. Low-effort binding (clean NuGet + stdio child process, no FFI). **Pull forward the instant a
+  concrete .NET desktop design partner appears.**
+- ⬜ **R19 · Java/Kotlin (JVM) SDK binding** (🌐 public, MIT) — one binding (Java, usable from
+  Kotlin/Scala) on **Maven Central**, with a Swing or JavaFX sample. Captures the JVM half of
+  regulated enterprise desktop (EU public sector, banks, hospitals, industrial control dashboards) —
+  the same seam, second-largest surface after .NET.
+- ❌ **C++ binding — deferred (design-partner-gated).** Highest stakes (EDA, medical imaging, CAD
+  kernels) but its marquee apps are reachable via the .NET/Python add-in SDKs anyway, and it has no
+  universal package manager. Build only behind a specific embedded/medical-device partner.
+- ❌ **Go / Ruby bindings — not doing (traps).** Server/web/CLI ecosystems where a good cloud API
+  usually exists — exactly where the thesis says kriya isn't needed. See [D-012](DECISIONS.md).
 
 ## Launch (after the wedge + publish; gated on planner's go)
 
