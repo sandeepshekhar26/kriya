@@ -127,6 +127,97 @@ fn await_step(
     proceed
 }
 
+/// Dispatch one cleared action to the app, wait for its result, sign the receipt, and persist the
+/// episode. Shared by the main loop and the resume-time re-issue path (R9) so both produce an
+/// identical signed + recorded action. Returns the app's result (with the refreshed state).
+#[allow(clippy::too_many_arguments)]
+fn dispatch_and_record(
+    sink: &dyn HostSink,
+    pending: &PendingMap,
+    signer: &Signer,
+    memory: &Option<AgentMemory>,
+    run_id: &str,
+    goal: &str,
+    actor: &Actor,
+    step_id: &str,
+    action_id: &str,
+    params: &serde_json::Value,
+    reasoning: &str,
+) -> Result<AgentActionResult, String> {
+    let (tx, rx) = std::sync::mpsc::channel::<AgentActionResult>();
+    pending.lock().unwrap().insert(step_id.to_string(), tx);
+
+    sink.emit_action(&AgentActionRequest {
+        step_id: step_id.to_string(),
+        action_id: action_id.to_string(),
+        params: params.clone(),
+        reasoning: reasoning.to_string(),
+    });
+
+    let result = match rx.recv_timeout(RESULT_TIMEOUT) {
+        Ok(r) => r,
+        Err(_) => {
+            pending.lock().unwrap().remove(step_id);
+            return Err(format!("timed out waiting for result of {action_id}"));
+        }
+    };
+
+    if !result.success {
+        if let Some(err) = &result.error {
+            log(
+                sink,
+                AgentLog {
+                    step_id: Some(step_id.to_string()),
+                    level: "warn".into(),
+                    message: format!("{action_id} returned an error: {err}"),
+                    detail: None,
+                },
+            );
+        }
+    }
+
+    // Sign and record the receipt regardless of success, stamped with who acted (R8).
+    let signed = signer.record(
+        Receipt::new(
+            step_id.to_string(),
+            action_id.to_string(),
+            params.clone(),
+            result.success,
+            now_ms(),
+        )
+        .with_actor(Some(actor.clone())),
+    );
+    log(
+        sink,
+        AgentLog {
+            step_id: Some(step_id.to_string()),
+            level: "info".into(),
+            message: format!(
+                "receipt signed · sig={}…",
+                &signed.signature[..signed.signature.len().min(16)]
+            ),
+            detail: None,
+        },
+    );
+
+    // Persist this action to durable episodic memory, stamped with the run_id + goal so resume
+    // can reconstruct this run if the process dies.
+    if let Some(m) = memory {
+        let _ = m.record(
+            signed.receipt.ts_ms,
+            run_id,
+            goal,
+            action_id,
+            params,
+            result.success,
+            reasoning,
+            &signed.signature,
+        );
+    }
+
+    Ok(result)
+}
+
 /// Run the agent loop, sending events through `sink` (Tauri, sidecar, or test recorder).
 /// Results flow back through the shared channel maps, whatever the transport.
 pub fn run_task(
@@ -136,8 +227,29 @@ pub fn run_task(
     advances: StepAdvanceMap,
     policy: Arc<Policy>,
     signer: Arc<Signer>,
+    backend: Box<dyn Inference>,
+    req: AgentStartRequest,
+) -> Result<AgentDone, String> {
+    // Durable episodic memory across runs. Failure to open is non-fatal — the agent still works,
+    // just without persistent recall/resume. Injected into the inner loop so tests can drive a
+    // controlled store.
+    let memory = AgentMemory::open(&std::env::temp_dir().join("kriya-memory.db")).ok();
+    run_task_with_memory(sink, pending, approvals, advances, policy, signer, backend, req, memory)
+}
+
+/// The agent loop with an explicit memory store — the testable core. `run_task` opens the default
+/// store and delegates here; tests inject a controlled store to drive resume/re-issue paths.
+#[allow(clippy::too_many_arguments)]
+fn run_task_with_memory(
+    sink: Arc<dyn HostSink>,
+    pending: PendingMap,
+    approvals: ApprovalMap,
+    advances: StepAdvanceMap,
+    policy: Arc<Policy>,
+    signer: Arc<Signer>,
     mut backend: Box<dyn Inference>,
     req: AgentStartRequest,
+    memory: Option<AgentMemory>,
 ) -> Result<AgentDone, String> {
     let sink: &dyn HostSink = sink.as_ref();
     // Stable id for this run. Stamped on every episode written below, so a crashed
@@ -206,9 +318,6 @@ pub fn run_task(
         log(sink, AgentLog::warn(format!("policy: {concern}")));
     }
 
-    // Durable episodic memory across runs. Failure to open is non-fatal — the agent
-    // still works, just without persistent recall.
-    let memory = AgentMemory::open(&std::env::temp_dir().join("kriya-memory.db")).ok();
     // Recall a window of prior-run actions to feed the backend as context.
     let recent_memory: Vec<String> = memory
         .as_ref()
@@ -236,6 +345,8 @@ pub fn run_task(
     let mut history: Vec<StepRecord> = Vec::new();
     let mut steps: u32 = 0;
     let mut budget = BudgetTracker::new(policy.max_actions_per_minute());
+    // The prior run we resumed from (if any), so we can re-issue its still-pending approvals (R9).
+    let mut resume_run_id: Option<String> = None;
 
     // Resume path: if requested and we have a prior run for this goal, reseed
     // history so the inference backend doesn't re-propose actions already taken.
@@ -244,6 +355,7 @@ pub fn run_task(
         if let Some(m) = &memory {
             match m.last_resumable_run(&req.goal) {
                 Ok(Some(prior)) => {
+                    resume_run_id = Some(prior.run_id.clone());
                     let count = prior.completed.len();
                     for step in prior.completed {
                         history.push(StepRecord {
@@ -281,6 +393,85 @@ pub fn run_task(
     // Tracks the previous step's outcome to surface in each step-mode pause.
     let mut last_action_id: Option<String> = None;
     let mut last_success: Option<bool> = None;
+
+    // Re-issue any approvals that were still pending when the prior run was interrupted (R9): the
+    // process died before the human decided, so the guarded action was never resolved. Re-request
+    // it (re-checking the *current* policy) instead of silently dropping it. Runs once, before the
+    // backend-driven loop, so the resumed run finishes the business the crash left hanging.
+    if let Some(prior_run_id) = &resume_run_id {
+        if let Some(m) = &memory {
+            let pendings = m.unresolved_pending_approvals(prior_run_id).unwrap_or_default();
+            if !pendings.is_empty() {
+                log(
+                    sink,
+                    AgentLog::info(format!(
+                        "resume: {} approval(s) were pending when the prior run was interrupted — re-issuing",
+                        pendings.len()
+                    )),
+                );
+            }
+            for p in pendings {
+                if steps >= MAX_STEPS {
+                    break;
+                }
+                let step_id = uuid::Uuid::new_v4().to_string();
+                let proceed = match policy.check(&p.action_id) {
+                    Decision::Deny => {
+                        log(
+                            sink,
+                            AgentLog::warn(format!(
+                                "{} is now denied by policy — not re-issued on resume.",
+                                p.action_id
+                            )),
+                        );
+                        false
+                    }
+                    Decision::Allow => true,
+                    Decision::RequiresApproval => {
+                        request_approval(sink, &approvals, &step_id, &p.action_id, &p.params, &p.reasoning)
+                    }
+                };
+                // Resolve the *original* pending row so a second resume doesn't re-issue it again.
+                let _ = m.resolve_pending_approval(&p.step_id);
+                if !proceed {
+                    log(
+                        sink,
+                        AgentLog::warn(format!("{} not approved on resume — skipped.", p.action_id)),
+                    );
+                    history.push(StepRecord { action_id: p.action_id, params: p.params, success: false });
+                    continue;
+                }
+                if let Err(reason) = budget.check_and_record(now_ms()) {
+                    let done = AgentDone { summary: format!("Stopped: {reason}."), steps };
+                    log(sink, AgentLog::error(format!("{} blocked — {reason}", p.action_id)));
+                    sink.emit_done(&done);
+                    return Ok(done);
+                }
+                let result = dispatch_and_record(
+                    sink,
+                    &pending,
+                    signer.as_ref(),
+                    &memory,
+                    &run_id,
+                    &req.goal,
+                    &actor,
+                    &step_id,
+                    &p.action_id,
+                    &p.params,
+                    &p.reasoning,
+                )?;
+                last_action_id = Some(p.action_id.clone());
+                last_success = Some(result.success);
+                history.push(StepRecord {
+                    action_id: p.action_id,
+                    params: p.params,
+                    success: result.success,
+                });
+                state = result.state;
+                steps += 1;
+            }
+        }
+    }
 
     loop {
         if steps >= MAX_STEPS {
@@ -337,6 +528,12 @@ pub fn run_task(
         match policy.check(&action_id) {
             Decision::Allow => {}
             Decision::RequiresApproval => {
+                // Persist the held action so a crash mid-approval can re-issue it on resume (R9).
+                if let Some(m) = &memory {
+                    let _ = m.record_pending_approval(
+                        &run_id, &req.goal, &step_id, &action_id, &params, &reasoning, now_ms(),
+                    );
+                }
                 let approved = request_approval(
                     sink,
                     &approvals,
@@ -345,6 +542,11 @@ pub fn run_task(
                     &params,
                     &reasoning,
                 );
+                // The human decided (approve/deny/timeout) within this run → resolved; only a
+                // process death mid-wait leaves it unresolved for resume to pick up.
+                if let Some(m) = &memory {
+                    let _ = m.resolve_pending_approval(&step_id);
+                }
                 if !approved {
                     log(
                         sink,
@@ -394,77 +596,20 @@ pub fn run_task(
             return Ok(done);
         }
 
-        // Dispatch to the app and wait for it to run the handler (transport-agnostic).
-        let (tx, rx) = std::sync::mpsc::channel::<AgentActionResult>();
-        pending.lock().unwrap().insert(step_id.clone(), tx);
-
-        sink.emit_action(&AgentActionRequest {
-            step_id: step_id.clone(),
-            action_id: action_id.clone(),
-            params: params.clone(),
-            reasoning: reasoning.clone(),
-        });
-
-        let result = match rx.recv_timeout(RESULT_TIMEOUT) {
-            Ok(r) => r,
-            Err(_) => {
-                pending.lock().unwrap().remove(&step_id);
-                return Err(format!("timed out waiting for result of {action_id}"));
-            }
-        };
-
-        if !result.success {
-            if let Some(err) = &result.error {
-                log(
-                    sink,
-                    AgentLog {
-                        step_id: Some(step_id.clone()),
-                        level: "warn".into(),
-                        message: format!("{action_id} returned an error: {err}"),
-                        detail: None,
-                    },
-                );
-            }
-        }
-
-        // Sign and record the receipt regardless of success, stamped with who acted (R8).
-        let signed = signer.record(
-            Receipt::new(
-                step_id.clone(),
-                action_id.clone(),
-                params.clone(),
-                result.success,
-                now_ms(),
-            )
-            .with_actor(Some(actor.clone())),
-        );
-        log(
+        // Dispatch the cleared action, sign + record it (shared with the resume re-issue path).
+        let result = dispatch_and_record(
             sink,
-            AgentLog {
-                step_id: Some(step_id.clone()),
-                level: "info".into(),
-                message: format!(
-                    "receipt signed · sig={}…",
-                    &signed.signature[..signed.signature.len().min(16)]
-                ),
-                detail: None,
-            },
-        );
-
-        // Persist this action to durable episodic memory, stamped with the run_id +
-        // goal so resume can reconstruct this run if the process dies.
-        if let Some(m) = &memory {
-            let _ = m.record(
-                signed.receipt.ts_ms,
-                &run_id,
-                &req.goal,
-                &action_id,
-                &params,
-                result.success,
-                &reasoning,
-                &signed.signature,
-            );
-        }
+            &pending,
+            signer.as_ref(),
+            &memory,
+            &run_id,
+            &req.goal,
+            &actor,
+            &step_id,
+            &action_id,
+            &params,
+            &reasoning,
+        )?;
 
         last_action_id = Some(action_id.clone());
         last_success = Some(result.success);
@@ -549,6 +694,42 @@ mod tests {
         fn emit_await_step(&self, _ev: &AgentAwaitStep) {
             self.events.lock().unwrap().push("await_step".into());
         }
+        fn emit_done(&self, done: &AgentDone) {
+            self.events.lock().unwrap().push(format!("done:{}", done.steps));
+        }
+        fn emit_log(&self, _entry: &AgentLog) {}
+    }
+
+    /// Like [`RecordingSink`] but also auto-grants approvals (sends `true` back through the
+    /// approval map) so a single-threaded test can exercise the held → approved → dispatched path
+    /// without waiting on the 300s approval timeout. Used by the R9 resume re-issue test.
+    struct ReissueSink {
+        events: Mutex<Vec<String>>,
+        pending: PendingMap,
+        approvals: ApprovalMap,
+        reply_state: Value,
+    }
+
+    impl HostSink for ReissueSink {
+        fn emit_action(&self, req: &AgentActionRequest) {
+            self.events.lock().unwrap().push(format!("action:{}", req.action_id));
+            if let Some(tx) = self.pending.lock().unwrap().remove(&req.step_id) {
+                let _ = tx.send(AgentActionResult {
+                    step_id: req.step_id.clone(),
+                    success: true,
+                    data: Value::Null,
+                    error: None,
+                    state: self.reply_state.clone(),
+                });
+            }
+        }
+        fn emit_approval(&self, req: &AgentApprovalRequest) {
+            self.events.lock().unwrap().push(format!("approval:{}", req.action_id));
+            if let Some(tx) = self.approvals.lock().unwrap().remove(&req.step_id) {
+                let _ = tx.send(true); // grant on the spot
+            }
+        }
+        fn emit_await_step(&self, _ev: &AgentAwaitStep) {}
         fn emit_done(&self, done: &AgentDone) {
             self.events.lock().unwrap().push(format!("done:{}", done.steps));
         }
@@ -648,6 +829,68 @@ mod tests {
         // No action event was emitted — the denied action never reached the sink/app.
         let events = sink.events.lock().unwrap().clone();
         assert!(events.iter().all(|e| !e.starts_with("action:")), "got: {events:?}");
+    }
+
+    #[test]
+    fn resume_reissues_an_approval_left_pending_by_a_crash() {
+        // A run dies after one completed step while a guarded action is still awaiting a human.
+        // On resume, the host must re-request + dispatch that held action, not silently drop it.
+        let dir = std::env::temp_dir().join(format!("kriya-r9-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("memory.db");
+
+        // Seed the crashed prior run "R": one completed step + one unresolved pending approval.
+        let seed = AgentMemory::open(&db).unwrap();
+        seed.record(1, "R", "tidy", "create_note", &json!({ "title": "keep" }), true, "seed", "sig")
+            .unwrap();
+        seed.record_pending_approval("R", "tidy", "old-step", "delete_note", &json!({ "id": 1 }), "cleanup", 2)
+            .unwrap();
+        assert_eq!(seed.unresolved_pending_approvals("R").unwrap().len(), 1);
+
+        let (pending, approvals, advances) = maps();
+        let sink = Arc::new(ReissueSink {
+            events: Mutex::new(Vec::new()),
+            pending: pending.clone(),
+            approvals: approvals.clone(),
+            reply_state: json!({ "notes": [] }),
+        });
+        // The backend has nothing new to propose — the only work is draining the held approval.
+        let backend = Box::new(ScriptedBackend::new(vec![StepDecision::Done {
+            summary: "resumed".into(),
+        }]));
+        let req = AgentStartRequest {
+            goal: "tidy".into(),
+            state: json!({ "notes": [] }),
+            tools: Vec::new(),
+            resume: true,
+            step_mode: false,
+            agent_id: None,
+            user_id: None,
+        };
+
+        let run_mem = AgentMemory::open(&db).unwrap();
+        run_task_with_memory(
+            sink.clone(),
+            pending,
+            approvals,
+            advances,
+            Arc::new(Policy::default()),
+            Arc::new(Signer::with_log_path(dir.join("audit.jsonl"))),
+            backend,
+            req,
+            Some(run_mem),
+        )
+        .expect("run_task_with_memory");
+
+        // The held delete_note was re-issued on resume: approval re-requested, then dispatched.
+        let events = sink.events.lock().unwrap().clone();
+        assert!(events.contains(&"approval:delete_note".to_string()), "got: {events:?}");
+        assert!(events.contains(&"action:delete_note".to_string()), "got: {events:?}");
+
+        // And it's now resolved, so a second resume would not re-issue it again.
+        assert_eq!(seed.unresolved_pending_approvals("R").unwrap().len(), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
