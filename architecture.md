@@ -144,6 +144,108 @@ JSON, and its entire vocabulary is the typed tool schema.
 - **The protocol mirrors JSON-RPC request/response**, keyed by `stepId`, so it ports cleanly off
   Tauri IPC to WebSocket/HTTP later (dev inspector, hosted cloud) without reshaping messages.
 
+## Two front-ends onto one registry: governed MCP-server mode
+
+The loop above is the **in-process** front-end: the Rust host drives the registry directly over
+Tauri IPC. **Governed MCP-server mode** (roadmap [R1](docs/ROADMAP.md)) is the *second* front-end
+onto the same registry — it exposes the exact same actions to an **external** agent (Claude
+Desktop, Cursor, …) speaking the real Model Context Protocol, and routes every call through the
+**same** policy → approval → budget → signed-audit gates. The app is written once; a human button,
+the in-process agent, and an outside MCP client all land on the same handler.
+
+This is **not a new protocol.** `kriya-mcp` *speaks* MCP — JSON-RPC 2.0 with `initialize` /
+`tools/list` / `tools/call`, protocol revision `2025-06-18`, the spec's `Tool` and `CallToolResult`
+shapes. The differentiator is not the tool exposure (any MCP server does that); it is that **every
+`tools/call` is governed before it reaches the app.** The governance is the add-on, not the wire
+format.
+
+### From a registered action to a governed MCP tool
+
+```
+  registerAction({ id, parameters, permissions, handler })   ← your app (TypeScript),
+        │                                                       the same handler a button calls
+        │  getToolSchemas()  →  MCP tool schemas: { name, description, inputSchema }
+        │                       inputSchema is JSON Schema (draft 2020-12); handlers stripped
+        ▼
+  kriya dump app.js  >  tools.json        ← the live registry, frozen to a static schema file
+  ───────────────────────────────────────  process boundary: Node → Rust
+        ▼
+  kriya-mcp --tools tools.json --policy policy.yaml --exec "node handler.js"
+        │   stdio JSON-RPC: initialize · tools/list (discovery) · tools/call (governed)
+        ▼
+  Governor:  policy → approval → budget → execute → Ed25519 receipt
+        │    execute() is a trait; the bolt-on executor writes one line of
+        │    {"action","params"} and reads back {"success","data","error"}
+        ▼
+  handler.js  →  dispatchAction(id, params, { caller: "agent" })   ← back in your app,
+                                                                      the SAME registry path
+```
+
+Three things build that chain:
+
+1. **Export** — `getToolSchemas()` ([`registry.ts`](packages/core/src/registry.ts)) walks the
+   registry and emits one MCP-compatible schema per action, dropping the handler. `paramsToJSONSchema()`
+   ([`jsonschema.ts`](packages/core/src/jsonschema.ts)) lifts kriya's compact `ParameterSchema` into
+   standards-compliant JSON Schema (per-property `required` → object-level `required[]`), so strict
+   validators like the Anthropic tool API accept it.
+2. **Freeze** — `kriya dump <entry>` ([`cli.ts`](packages/core/src/cli.ts)) imports the app's action
+   module (registration is a side effect) and prints those schemas as `tools.json`.
+3. **Serve** — the `kriya-mcp` binary ([`src/bin/kriya-mcp.rs`](crates/kriya/src/bin/kriya-mcp.rs))
+   loads `tools.json` + a policy and runs the JSON-RPC loop. `--exec` names the per-call handler;
+   `--persistent` keeps it alive across calls (for handlers holding an expensive connection);
+   `--approval deny|tty|gui|auto` decides guarded actions; `--actor`/`--user` stamp the receipt's
+   identity (R8).
+
+### One external `tools/call`, end to end
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Ext as External agent
+    participant Mcp as kriya-mcp (stdio)
+    participant Gov as Governor
+    participant Exec as Executor
+    participant App as Registered handler
+    participant Aud as Audit log
+
+    Ext->>Mcp: tools/list
+    Mcp-->>Ext: tool schemas (from tools.json)
+    Ext->>Mcp: tools/call { name, arguments }
+    Mcp->>Gov: dispatch(name, args)
+    Gov->>Gov: policy → approval → budget
+    alt cleared every gate
+        Gov->>Exec: execute(name, args)
+        Exec->>App: {"action","params"} on stdin
+        App-->>Exec: {"success","data","error"}
+        Gov->>Aud: sign Ed25519 receipt (success or failure)
+        Gov-->>Mcp: executed (outcome + receipt)
+        Mcp-->>Ext: result — refreshed state
+    else blocked (denied / unapproved / over budget)
+        Gov-->>Mcp: blocked — never signed
+        Mcp-->>Ext: isError result with a readable reason
+    end
+```
+
+### Why it is built this way
+
+- **Identical gates to the in-process host.** The governor ([`mcp/governor.rs`](crates/kriya/src/mcp/governor.rs))
+  runs the same deny-by-default policy, human approval, per-minute budget, and signed audit the host
+  enforces — the external agent gets capability, the host keeps control. A *proposing* agent can
+  never *approve* its own guarded call or forge a receipt; the signing key stays in Rust.
+- **Blocked calls are not signed.** Receipts attest to what actually ran, matching the host's audit
+  semantics. A denied / unapproved / over-budget call comes back to the agent as an MCP *error result*
+  (`isError: true`) it can read and reason about — not a JSON-RPC protocol error (those are reserved
+  for malformed or unknown requests).
+- **Execution and approval are traits.** [`ActionExecutor`](crates/kriya/src/mcp/executor.rs)
+  abstracts *how* a cleared action runs — a Tauri webview dispatch, a sidecar (R3), or the
+  dependency-free `ProcessExecutor` / `PersistentProcessExecutor` that shells out over the line
+  contract above. The governance never changes; only the last hop does.
+- **This is the bolt-on.** An existing app gains a governed agent surface by pointing `kriya-mcp` at
+  a schema file and a handler — no rewrite of its own code. See
+  [`examples/replicad-bolt-on/`](examples/replicad-bolt-on/): a governed agent over a real OpenCascade
+  CAD model, wired with a [`.mcp.json`](examples/replicad-bolt-on/.mcp.json) and a persistent
+  [`src/handler.ts`](examples/replicad-bolt-on/src/handler.ts).
+
 ## Beyond Phase 0 (mostly shipped)
 
 The seams Phase 0 stubbed have since landed: the **human-approval queue** (host blocks on a
@@ -151,9 +253,10 @@ per-step channel, frontend modal), **persistent agent memory** (SQLite, across r
 **offline receipt verifier** (`tools/verify-receipts`), the **`create-kriya-app` scaffolder**,
 plus **action composition**, **resume-ability**, **step-through**, and **policy linting**. Two
 reference apps (notes + tasks) now share the extracted `kriya` crate, each plugging
-in its own scripted planner. Still open: hot-reload of the registry, and the strategic next
-builds — governed MCP-server mode, sidecar/Electron host, `wrapAction` bolt-on (the critical
-path to the YC demo). See [docs/ROADMAP.md](docs/ROADMAP.md) and
+in its own scripted planner. The strategic builds that were next when this was written —
+governed MCP-server mode (the section above), the sidecar/Electron host, and the `wrapAction`
+bolt-on — have since shipped, so the in-process pattern now has an external twin. Still open:
+hot-reload of the registry. See [docs/ROADMAP.md](docs/ROADMAP.md) and
 [docs/PRODUCT_GAPS.md](docs/PRODUCT_GAPS.md).
 
 ## File map
@@ -171,4 +274,8 @@ path to the YC demo). See [docs/ROADMAP.md](docs/ROADMAP.md) and
 | Signed audit trail | `crates/kriya/src/audit.rs` |
 | Budget + persistent memory | `crates/kriya/src/{budget,memory}.rs` |
 | Protocol (Rust) | `crates/kriya/src/protocol.rs` |
+| MCP tool-schema export (TS) | `getToolSchemas()` in `packages/core/src/registry.ts`, `packages/core/src/jsonschema.ts` |
+| `kriya` CLI (`dump` schemas / `wrap` codemod) | `packages/core/src/cli.ts` |
+| Governed MCP server (Rust) | `crates/kriya/src/mcp/` — `jsonrpc`, `server`, `governor`, `executor`, `approval` |
+| `kriya-mcp` binary | `crates/kriya/src/bin/kriya-mcp.rs` |
 | App-specific deterministic planner + Tauri glue | `apps/note-app/src-tauri/src/{deterministic,lib}.rs` (task-manager mirrors this) |
