@@ -48,6 +48,17 @@ pub struct CompletedStep {
     pub success: bool,
 }
 
+/// A guarded action the host held for a human and that was never resolved — recorded durably so a
+/// run interrupted mid-approval (the process died before the human decided) can re-issue it on
+/// resume instead of silently dropping it (R9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingApproval {
+    pub step_id: String,
+    pub action_id: String,
+    pub params: Value,
+    pub reasoning: String,
+}
+
 impl AgentMemory {
     /// Open (creating if needed) the episodic store at `path`.
     pub fn open(path: &std::path::Path) -> Result<Self, String> {
@@ -91,6 +102,27 @@ impl AgentMemory {
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_episodes_goal_id ON episodes (goal, id)",
             [],
+        )
+        .map_err(|e| e.to_string())?;
+
+        // Pending human approvals (R9). Recorded when the host holds a guarded action for a human,
+        // marked resolved when the human decides. A row left UNRESOLVED means the run was
+        // interrupted mid-approval (the process died before a decision arrived) — resume re-issues
+        // those so the guarded action isn't silently dropped. A separate table from `episodes`
+        // (which records only what RAN); created lazily, so existing stores upgrade on next open.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS pending_approvals (
+                 id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                 run_id    TEXT    NOT NULL,
+                 goal      TEXT    NOT NULL,
+                 step_id   TEXT    NOT NULL,
+                 action_id TEXT    NOT NULL,
+                 params    TEXT    NOT NULL,
+                 reasoning TEXT    NOT NULL,
+                 ts_ms     INTEGER NOT NULL,
+                 resolved  INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE INDEX IF NOT EXISTS idx_pending_run ON pending_approvals (run_id, resolved);",
         )
         .map_err(|e| e.to_string())?;
 
@@ -211,6 +243,70 @@ impl AgentMemory {
             completed,
         }))
     }
+
+    /// Record that a guarded action is awaiting a human decision (R9). It stays unresolved until
+    /// [`AgentMemory::resolve_pending_approval`] is called; if the process dies first, the row
+    /// remains unresolved and [`AgentMemory::unresolved_pending_approvals`] surfaces it on resume.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_pending_approval(
+        &self,
+        run_id: &str,
+        goal: &str,
+        step_id: &str,
+        action_id: &str,
+        params: &Value,
+        reasoning: &str,
+        ts_ms: u128,
+    ) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT INTO pending_approvals
+                   (run_id, goal, step_id, action_id, params, reasoning, ts_ms, resolved)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
+                params![run_id, goal, step_id, action_id, params.to_string(), reasoning, ts_ms as i64],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Mark a held action resolved — the human approved or denied it (or it timed out) *within*
+    /// the run, so a later resume must not re-issue it. Keyed by the per-step id.
+    pub fn resolve_pending_approval(&self, step_id: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE pending_approvals SET resolved = 1 WHERE step_id = ?1",
+                params![step_id],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// The still-unresolved held actions for a run, oldest first — what resume re-issues.
+    pub fn unresolved_pending_approvals(&self, run_id: &str) -> Result<Vec<PendingApproval>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT step_id, action_id, params, reasoning FROM pending_approvals
+                 WHERE run_id = ?1 AND resolved = 0 ORDER BY id ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![run_id], |r| {
+                let step_id: String = r.get(0)?;
+                let action_id: String = r.get(1)?;
+                let params_str: String = r.get(2)?;
+                let reasoning: String = r.get(3)?;
+                Ok((step_id, action_id, params_str, reasoning))
+            })
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (step_id, action_id, params_str, reasoning) = row.map_err(|e| e.to_string())?;
+            let params: Value = serde_json::from_str(&params_str).unwrap_or(Value::Null);
+            out.push(PendingApproval { step_id, action_id, params, reasoning });
+        }
+        Ok(out)
+    }
 }
 
 fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, String> {
@@ -297,5 +393,37 @@ mod tests {
             m.record(i, "r", "g", "edit_note", &json!({}), true, "", "s").unwrap();
         }
         assert_eq!(m.recent(3).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn pending_approval_round_trip_and_resolve() {
+        let m = AgentMemory::open_in_memory().unwrap();
+        m.record_pending_approval("r1", "g1", "s1", "delete_note", &json!({ "id": "n1" }), "cleanup", 10)
+            .unwrap();
+        m.record_pending_approval("r1", "g1", "s2", "close_account", &json!({ "id": "a1" }), "user asked", 11)
+            .unwrap();
+
+        let pend = m.unresolved_pending_approvals("r1").unwrap();
+        assert_eq!(pend.len(), 2);
+        assert_eq!(pend[0].action_id, "delete_note"); // oldest first
+        assert_eq!(pend[0].params, json!({ "id": "n1" }));
+        assert_eq!(pend[0].reasoning, "cleanup");
+        assert_eq!(pend[1].action_id, "close_account");
+
+        // Resolving one drops it from the unresolved set; the other remains re-issuable.
+        m.resolve_pending_approval("s1").unwrap();
+        let pend = m.unresolved_pending_approvals("r1").unwrap();
+        assert_eq!(pend.len(), 1);
+        assert_eq!(pend[0].step_id, "s2");
+    }
+
+    #[test]
+    fn unresolved_pending_approvals_are_scoped_to_their_run() {
+        let m = AgentMemory::open_in_memory().unwrap();
+        m.record_pending_approval("run_a", "g", "sa", "delete_note", &json!({}), "x", 1).unwrap();
+        m.record_pending_approval("run_b", "g", "sb", "delete_note", &json!({}), "x", 2).unwrap();
+        assert_eq!(m.unresolved_pending_approvals("run_a").unwrap().len(), 1);
+        assert_eq!(m.unresolved_pending_approvals("run_b").unwrap().len(), 1);
+        assert_eq!(m.unresolved_pending_approvals("run_c").unwrap().len(), 0);
     }
 }
