@@ -66,7 +66,7 @@ matters until this path is walked.
 
 ## P2 — Compliance & polish
 
-> **Repo split (D-011):** R7 → 🔒 `kriya-console`; **R8 splits** (signed-receipt `actor` field 🌐 public, identity-mgmt 🔒 private); R13 / R9 / R10 / R11 → 🌐 public.
+> **Repo split (D-011):** R7 → 🔒 `kriya-console`; **R8 splits** (signed-receipt `actor` field 🌐 public, identity-mgmt 🔒 private); R13 / R9 / R10 / R11 / R20 → 🌐 public.
 
 - ✅ **R7 · Compliance-evidence export** — shipped in 🔒 `kriya-console` (`a7e9d68`): audit log →
   SOC 2 / ISO 42001 / EU AI Act evidence bundle (integrity + R8 attribution + R13 on-device +
@@ -87,6 +87,15 @@ matters until this path is walked.
   guarded action instead of skipping it.
 - ⬜ **R10 · OpenAI inference backend + retry/backoff + frontier-escalation fallback.**
 - ⬜ **R11 · Audit-receipt tamper tests** + finish the budget (api-calls/hr cap).
+- ⬜ **R20 · Durable host signing identity + tamper-evident log chaining** (🌐 public). Closes the two
+  honest limitations in [SECURITY.md](SECURITY.md): (1) the signing key is currently **ephemeral**
+  (`rand::random()` per host process, not persisted) — persist a host identity key (optionally
+  OS-keychain / hardware-backed) so the audit trust anchor is **stable across runs**, not per-session;
+  (2) receipts are independently signed, so **whole-receipt deletion/truncation isn't detectable** —
+  hash-chain each receipt to its predecessor (+ optional external anchoring) so a complete-log
+  guarantee is possible. Turns "no retained receipt was altered" into "the log is complete and the
+  signer is permanent" — the cross-month compliance story R7's evidence export leans on. Surfaced
+  while documenting the crypto in this session (2026-06-19).
 
 ## P3 — Ecosystem reach (after the paid surface is proven; pull forward with a design partner)
 
