@@ -1,0 +1,6 @@
+[
+  { "action": "create_note", "params": { "title": "Groceries" }, "reasoning": "seed a note to work with" },
+  { "action": "create_note", "params": { "title": "scratch — delete me" }, "reasoning": "a throwaway note" },
+  { "action": "delete_note", "params": { "id": 2 }, "reasoning": "remove the throwaway — this one needs a human" },
+  { "done": true, "summary": "created two notes and removed the throwaway" }
+]
