@@ -108,14 +108,12 @@ matters until this path is walked.
 > kriya isn't needed). All demand-pulled: ship a binding when a real design partner in that ecosystem
 > appears.
 
-- ⬜ **R17 · Python SDK binding** (🌐 public, MIT). A Python `registerAction` / `wrapAction` mirror of
-  `kriya-core` that speaks the **same stdio/NDJSON protocol** to the existing `kriya-host` binary —
-  feasible because R3 made the host transport/binding-agnostic, so this is a *second binding, not a
-  new host* (the Node `kriya-sidecar` already proves the path). Unlocks the Python in-process ICP:
-  CAD automation, data/ML, scientific/engineering, accounting. **Sequencing:** not ahead of R6 (the
-  paid console) or R7 (the compliance hook); pull forward the moment a concrete CAD / ERP / Python
-  design partner is real. The near-term CAD demo (**JSCAD / Replicad**) is **JS/TS already** and needs
-  none of this — build it on the clean in-process path now.
+- ✅ **R17 · Python SDK binding** — shipped (`fae5909` + `5f1b67a`). See **Done** below. A Python
+  `register_action` / `wrap_action` mirror of `kriya-core` + the `kriya-sidecar` host driver, in one
+  `pip install kriya` package under `bindings/python/`. Unlocks the Python in-process ICP: CAD
+  automation (FreeCAD/Blender), data/ML, scientific/engineering, quant/accounting. *Pulled forward
+  ahead of R6/R7 this session as a deliberate "stay-ahead / breadth" build, not a design-partner
+  trigger.* The near-term CAD demo (**JSCAD / Replicad**) is **JS/TS already** and needs none of this.
 
 - ⬜ **R18 · C#/.NET SDK binding** ⭐ (🌐 public, MIT) — *the #1 second binding after Python
   ([D-012](DECISIONS.md))*. A `registerAction`/`wrapAction` mirror shipped on **NuGet** that speaks the
@@ -155,6 +153,17 @@ matters until this path is walked.
 
 ## Done (newest first)
 
+- ✅ **R17 · Python SDK binding** — `fae5909` (library + unit tests) + `5f1b67a` (integration +
+  example). [`bindings/python/`](../bindings/python/): one `pip install kriya` package mirroring
+  `kriya-core` (registry, schema, validation, draft-clean JSON-Schema export, `register_action` /
+  `wrap_action` with composition + cycle/depth guards) and `kriya-sidecar` (the `Host` stdio NDJSON
+  driver + `run_task`, camelCase wire, `recent_memory()` correlation). Zero runtime deps. **51 unit
+  tests** green with `python -m unittest` (no binary), plus an opt-in **integration test that drives
+  the real `kriya-host`** through action dispatch + a held/granted approval + memory recall, and a
+  runnable `examples/note_app_host.py` (the Python mirror of `node-sidecar-host`). Verified end to
+  end: two signed creates, `delete_note` held for approval then signed, episodes recalled. *A second
+  binding, not a new host* — the first non-JS language on the in-process layer; sets the `bindings/`
+  convention for R18 (.NET) / R19 (JVM).
 - ✅ **R8 (public half) · Signed-receipt `actor` field** — `ccdb444` (runtime) + `57784fb` (console).
   Records *who* took each action (agent + operator) **inside** the Ed25519-signed receipt, so the
   attribution is tamper-evident. Threaded through the in-process host (resolves from the run

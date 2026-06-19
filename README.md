@@ -129,8 +129,10 @@ past it.
   Plus persistent **memory** across runs, policy **linting**, and **step-through** debugging.
 - **Speaks MCP.** Your actions become MCP tools; the governed `kriya-mcp` server lets any external
   agent drive your app — with every call routed *through* the gates, not around them.
-- **Cross-shell.** Runs in a Tauri backend, or as a standalone `kriya-host` sidecar that Electron
-  and plain Node apps drive over stdio — governance in a process the renderer can't tamper with.
+- **Cross-shell, cross-language.** Runs in a Tauri backend, or as a standalone `kriya-host` sidecar
+  that Electron, plain Node, **and Python** apps drive over stdio — governance in a process the
+  renderer can't tamper with. One Rust host, a binding per language (TS + Python today; .NET/JVM
+  next).
 
 ## Two ways to adopt
 
@@ -201,6 +203,7 @@ local-first finance app with **no HTTP API** — in ~37 lines, without changing 
 | [`kriya-inspector`](packages/inspector/) | Drop-in React dev inspector — step log, approval modal, memory replay |
 | [`create-kriya-app`](packages/create-kriya-app/) | Scaffolder for a new local-first agent app |
 | [`kriya`](crates/kriya/) | Rust agent host — step loop, swappable inference, permissions, budget, signed audit, memory, **governed MCP-server mode** |
+| [`kriya` (Python)](bindings/python/) | **Python binding** — `register_action` / `wrap_action` + the `Host` stdio driver, for PyQt/PySide/Tk apps, FreeCAD/Blender plugins, data & quant tools (`pip install kriya`) |
 
 **Binaries:** `kriya-mcp` (governed MCP server — external agents drive your app through the gates) ·
 `kriya-host` (the stdio sidecar) · [`tools/verify-receipts`](tools/verify-receipts/) (offline audit-log verifier).
