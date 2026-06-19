@@ -32,6 +32,13 @@ export function App() {
   const awaitStep = useAwaitStep();
   const runCount = useRunCount();
   const [stepMode, setStepMode] = useState(false);
+  // The last goal we started, so "Resume" can re-run it with resume: true (R9).
+  const [lastGoal, setLastGoal] = useState<string | null>(null);
+
+  const start = (goal: string) => {
+    setLastGoal(goal);
+    void runAgentTask(goal, { stepMode });
+  };
 
   return (
     <div className="app">
@@ -57,17 +64,24 @@ export function App() {
           </button>
           <button
             className="primary"
-            onClick={() => runAgentTask(ORGANIZE_GOAL, { stepMode })}
+            onClick={() => start(ORGANIZE_GOAL)}
             disabled={running || notes.length === 0}
           >
             {running ? "Agent working…" : "Run agent: organize"}
           </button>
           <button
-            onClick={() => runAgentTask(REMOVE_IDEAS_GOAL, { stepMode })}
+            onClick={() => start(REMOVE_IDEAS_GOAL)}
             disabled={running || notes.length === 0}
             title="Agent will propose deletes, which require your approval"
           >
             Run agent: remove ideas
+          </button>
+          <button
+            onClick={() => lastGoal && void runAgentTask(lastGoal, { resume: true, stepMode })}
+            disabled={running || !lastGoal}
+            title="Re-run the last task with resume: reseed its completed steps and re-issue any action that was left pending approval when it stopped (R9)"
+          >
+            Resume last task
           </button>
         </div>
       </header>
