@@ -48,18 +48,20 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
   newest-first query via `agent_memory_recent`, count surfaced at run start) AND recalled
   into the LLM prompt as a MEMORY section, so prior runs inform decisions. State snapshots
   + vector recall (embeddings) still ⬜.
-- 🟡 Resume-ability — durable run reconstruction is wired end-to-end. Each
+- ✅ Resume-ability — durable run reconstruction is wired end-to-end. Each
   run mints a stable `run_id` (UUID at `run_task` entry); every audit episode
   in SQLite memory now carries `run_id` + `goal`. `AgentStartRequest.resume:
   true` makes the host call `memory.last_resumable_run(goal)`, reseed the
   in-memory `history` with the prior run's completed steps, and continue from
   there. Backwards-compatible: old episodes (pre-migration) get empty
   `run_id`/`goal` via ALTER TABLE + DEFAULT, indexed on `(goal, id)` for fast
-  lookup. 5 new memory tests cover round-trip, goal isolation, newest-run
-  picking, and the limit query (9/9 host tests pass). What's still ⬜: a
-  reference-app UI button to trigger `resume: true`, and resume mid-approval
-  (the approval queue isn't persisted yet, so a guarded action interrupted
-  mid-approval isn't re-issued — it's just skipped from history reseeding).
+  lookup. ✅ **R9 closed the two gaps (`4873812` + `fede962` + `1a37038`):** a
+  durable `pending_approvals` store records a guarded action when the host holds
+  it for a human and resolves it once they decide — so a run interrupted
+  *mid-approval* leaves the row unresolved, and on resume the host drains the
+  prior run's unresolved approvals, re-checks policy, and **re-issues** (re-requests
+  + re-dispatches) each held action instead of skipping it. note-app has a "Resume
+  last task" button. 64 crate tests (incl. a seeded-crash resume test); clippy clean.
 - ⬜ Retry/backoff, graceful "this is too hard → escalate to frontier model" fallback
 - ⬜ Multi-agent orchestration (concurrent agents per app)
 - ✅ Separate-process agent host (don't share the app's main thread) — **shipped as the R3

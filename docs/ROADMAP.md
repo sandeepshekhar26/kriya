@@ -82,9 +82,10 @@ matters until this path is walked.
   receipt (verifiable offline). Backends declare an honest `NetworkProfile` (scripted=none,
   Ollama=localhost-only/remote, claude-cli + Anthropic=remote). The regulated-ICP "nothing leaves
   the device" posture, attested.
-- ⬜ **R9 · Resume-ability UI + persist approval queue.** A reference-app button to trigger
-  `resume: true`; persist pending approvals so a run interrupted mid-approval re-issues the
-  guarded action instead of skipping it.
+- ✅ **R9 · Resume-ability UI + persist approval queue** — shipped (`4873812` + `fede962` +
+  `1a37038`). See **Done** below. Pending approvals are now persisted durably; a run interrupted
+  mid-approval re-issues the held action on resume instead of dropping it, and note-app has a
+  "Resume last task" button.
 - ⬜ **R10 · OpenAI inference backend + retry/backoff + frontier-escalation fallback.**
 - ⬜ **R11 · Audit-receipt tamper tests** + finish the budget (api-calls/hr cap).
 - ⬜ **R20 · Durable host signing identity + tamper-evident log chaining** (🌐 public). Closes the two
@@ -162,6 +163,17 @@ matters until this path is walked.
 
 ## Done (newest first)
 
+- ✅ **R9 · Resume-ability UI + persist approval queue** — `4873812` (durable `pending_approvals`
+  store in episodic memory) + `fede962` (host re-issues unresolved approvals on resume) + `1a37038`
+  (note-app "Resume last task" button). The host records a guarded action when it holds it for a
+  human and resolves it once the human decides; a run that dies mid-approval leaves the row
+  unresolved, so on resume — after reseeding completed history — the host drains the prior run's
+  unresolved approvals, re-checks the current policy, and re-requests + re-dispatches each held
+  action instead of silently dropping it (a second resume won't re-issue). The dispatch→sign→record
+  path was extracted into a shared `dispatch_and_record` so re-issued actions are signed + audited
+  identically; `run_task` split into a thin wrapper + a testable `run_task_with_memory`. 64 crate
+  tests (incl. a seeded-crash resume test) + clippy clean. The reference-app button surfaces the
+  already-plumbed `resume: true` (task-manager can mirror it trivially).
 - ✅ **R17 · Python SDK binding** — `fae5909` (library + unit tests) + `5f1b67a` (integration +
   example). [`bindings/python/`](../bindings/python/): one `pip install kriya` package mirroring
   `kriya-core` (registry, schema, validation, draft-clean JSON-Schema export, `register_action` /
