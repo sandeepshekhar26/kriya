@@ -252,4 +252,87 @@ mod tests {
         signed.receipt.params = json!({ "amount": 1_000_000 });
         assert!(!verifies(&signed), "tampered params must invalidate the receipt");
     }
+
+    /// A fresh, untampered signed receipt to mutate in the tamper tests below.
+    fn baseline() -> (Signer, SignedReceipt) {
+        let s = signer();
+        let signed = s.record(Receipt::new(
+            "step-x".into(),
+            "delete_transaction".into(),
+            json!({ "id": "txn-9", "amount": 250 }),
+            true,
+            1_700_000_000_123,
+        ));
+        assert!(verifies(&signed), "control: untampered receipt must verify");
+        (s, signed)
+    }
+
+    #[test]
+    fn tampering_the_action_id_breaks_the_signature() {
+        let (_s, mut signed) = baseline();
+        signed.receipt.action_id = "list_transactions".into(); // disguise a delete as a read
+        assert!(!verifies(&signed), "rewriting which action ran must invalidate the receipt");
+    }
+
+    #[test]
+    fn tampering_the_success_flag_breaks_the_signature() {
+        let (_s, mut signed) = baseline();
+        signed.receipt.success = false; // claim a successful action failed (or vice versa)
+        assert!(!verifies(&signed), "flipping the outcome must invalidate the receipt");
+    }
+
+    #[test]
+    fn tampering_the_step_id_breaks_the_signature() {
+        let (_s, mut signed) = baseline();
+        signed.receipt.step_id = "step-other".into();
+        assert!(!verifies(&signed), "rewriting the step id must invalidate the receipt");
+    }
+
+    #[test]
+    fn tampering_the_timestamp_breaks_the_signature() {
+        let (_s, mut signed) = baseline();
+        signed.receipt.ts_ms = 0; // backdate the action
+        assert!(!verifies(&signed), "rewriting when it happened must invalidate the receipt");
+    }
+
+    #[test]
+    fn adding_an_actor_after_signing_breaks_the_signature() {
+        // The inverse of tampering an existing actor: an actor-less receipt was signed over five
+        // fields, so attaching attribution afterward changes the canonical bytes and fails.
+        let (_s, mut signed) = baseline();
+        assert!(signed.receipt.actor.is_none());
+        signed.receipt.actor = Some(Actor::new("forged-agent", "mallory"));
+        assert!(!verifies(&signed), "fabricating attribution after signing must fail");
+    }
+
+    #[test]
+    fn a_forged_signature_does_not_verify() {
+        let (_s, mut signed) = baseline();
+        // Flip the first hex nibble — still well-formed 64-byte hex, but not the real signature.
+        let mut chars: Vec<char> = signed.signature.chars().collect();
+        chars[0] = if chars[0] == '0' { '1' } else { '0' };
+        signed.signature = chars.into_iter().collect();
+        assert!(!verifies(&signed), "a forged signature must not verify");
+    }
+
+    #[test]
+    fn a_mismatched_public_key_does_not_verify() {
+        let (_s, mut signed) = baseline();
+        // Swap in a *different* signer's public key — the signature was made by the original key,
+        // so claiming a different signer produced it must fail (no key-substitution attack).
+        let other = signer();
+        signed.public_key = other.public_key().to_string();
+        assert!(!verifies(&signed), "a receipt must not verify against the wrong public key");
+    }
+
+    #[test]
+    fn malformed_signature_or_pubkey_hex_does_not_verify() {
+        let (_s, mut signed) = baseline();
+        let good_sig = signed.signature.clone();
+        signed.signature = "not-hex".into();
+        assert!(!verifies(&signed), "non-hex signature must be rejected, not panic");
+        signed.signature = good_sig;
+        signed.public_key = "deadbeef".into(); // valid hex but wrong length (not 32 bytes)
+        assert!(!verifies(&signed), "wrong-length public key must be rejected, not panic");
+    }
 }
