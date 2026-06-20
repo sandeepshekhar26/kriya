@@ -66,7 +66,7 @@ matters until this path is walked.
 
 ## P2 — Compliance & polish
 
-> **Repo split (D-011):** R7 → 🔒 `kriya-console`; **R8 splits** (signed-receipt `actor` field 🌐 public, identity-mgmt 🔒 private); R13 / R9 / R10 / R11 / R20 → 🌐 public.
+> **Repo split (D-011):** R7 → 🔒 `kriya-console`; **R8 splits** (signed-receipt `actor` field 🌐 public, identity-mgmt 🔒 private); R13 / R9 / R10 / R11 / R20 / R21 → 🌐 public.
 
 - ✅ **R7 · Compliance-evidence export** — shipped in 🔒 `kriya-console` (`a7e9d68`): audit log →
   SOC 2 / ISO 42001 / EU AI Act evidence bundle (integrity + R8 attribution + R13 on-device +
@@ -87,7 +87,8 @@ matters until this path is walked.
   mid-approval re-issues the held action on resume instead of dropping it, and note-app has a
   "Resume last task" button.
 - ⬜ **R10 · OpenAI inference backend + retry/backoff + frontier-escalation fallback.**
-- ⬜ **R11 · Audit-receipt tamper tests** + finish the budget (api-calls/hr cap).
+- ✅ **R11 · Audit-receipt tamper tests + finish the budget (api-calls/hr cap)** — shipped
+  (`44637f5` + `e2ae449`). See **Done** below.
 - ⬜ **R20 · Durable host signing identity + tamper-evident log chaining** (🌐 public). Closes the two
   honest limitations in [SECURITY.md](SECURITY.md): (1) the signing key is currently **ephemeral**
   (`rand::random()` per host process, not persisted) — persist a host identity key (optionally
@@ -97,6 +98,17 @@ matters until this path is walked.
   guarantee is possible. Turns "no retained receipt was altered" into "the log is complete and the
   signer is permanent" — the cross-month compliance story R7's evidence export leans on. Surfaced
   while documenting the crypto in this session (2026-06-19).
+- ⬜ **R21 · Deterministic canonical receipt serialisation** (🌐 public). Today the signed canonical
+  bytes rely on `serde_json` emitting `params` object keys in sorted order — true only because the
+  `preserve_order` feature is **not** enabled in the current builds. A downstream dependency unifying
+  that feature would silently reorder keys and break cross-verifier reproducibility (the offline
+  `tools/verify-receipts` and the console TS verifier each re-derive the signed bytes independently;
+  see [SECURITY.md](SECURITY.md) §"The cryptography"). **Fix:** perform an *explicit recursive
+  key-sort* in `crates/kriya/src/audit.rs::record()` before signing, and apply the identical sort in
+  `tools/verify-receipts` (and the console verifier), so the canonical bytes are independent of any
+  consumer's `serde_json` feature flags. Low-effort, additive, no wire-format change. Hardens the
+  audit trail and the sufficiency of the patent's canonicalisation claim (claim 8). Surfaced during
+  the patent-draft revalidation (2026-06-20); pairs with R20 (audit hardening) and R11 (tamper tests).
 
 ## P3 — Ecosystem reach (after the paid surface is proven; pull forward with a design partner)
 
@@ -163,6 +175,16 @@ matters until this path is walked.
 
 ## Done (newest first)
 
+- ✅ **R11 · Audit-receipt tamper tests + finish the budget (api-calls/hr cap)** — `44637f5`
+  (budget) + `e2ae449` (tamper tests). **Budget battery complete:** a second, independent
+  trailing-hour cap on inference/API calls (`budget.max_api_calls_per_hour`) bounds model *cost*,
+  next to the existing per-minute action cap that bounds bursts — a loop can't run up unbounded
+  backend spend even when it dispatches few/no actions. `budget.rs` refactored onto a reusable
+  sliding window (per-minute API + tests unchanged); the host meters each `backend.next_step()` and
+  stops on exceed. **Tamper-evidence hardened:** 8 new audit tests prove that rewriting any signed
+  field (action_id / success / step_id / ts_ms), fabricating an actor after signing, a forged
+  signature, a substituted public key, or malformed hex all fail to verify — the cryptographic
+  spine of [SECURITY.md](SECURITY.md). 69 crate tests + clippy clean.
 - ✅ **R9 · Resume-ability UI + persist approval queue** — `4873812` (durable `pending_approvals`
   store in episodic memory) + `fede962` (host re-issues unresolved approvals on resume) + `1a37038`
   (note-app "Resume last task" button). The host records a guarded action when it holds it for a

@@ -123,7 +123,8 @@ past it.
   executes:
   1. **Permission** — a deny-by-default policy: allow / require-approval / deny.
   2. **Human approval** — guarded actions pause for an Approve/Deny decision in *your* app's UI.
-  3. **Budget** — a per-minute cap stops a runaway or looping agent.
+  3. **Budget** — a per-minute action cap *and* a per-hour inference-call cap stop a runaway or
+     looping agent (the second bounds model cost, not just action bursts).
   4. **Signed audit** — an Ed25519 receipt per action → append-only log, verifiable offline.
 
   Plus persistent **memory** across runs, policy **linting**, and **step-through** debugging.

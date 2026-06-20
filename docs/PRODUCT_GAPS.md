@@ -91,12 +91,17 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
   default preserved). macOS-only (cfg-gated); `--approval gui` elsewhere exits with a clear
   message. Cross-platform GUI gate (Linux/Windows) still ⬜.
 - ⬜ Approval **queue UI** for multiple pending approvals + per-action policy editor in-app
-- 🟡 Budgets/rate-limits — actions/minute sliding-window cap enforced (host stops the run);
-  api-calls/hr still ⬜
-- 🟡 Ed25519 signed receipts → JSONL — works; offline **verifier** CLI ✅ (`tools/verify-receipts/`).
+- ✅ Budgets/rate-limits — **two independent sliding-window caps (R11, `44637f5`)**: actions/minute
+  bounds bursts against the app (safety), and `budget.max_api_calls_per_hour` bounds inference/API
+  calls (cost) so a loop can't run up unbounded model spend even when it dispatches few/no actions.
+  The host stops the run on either; both share a reusable `SlidingWindow`.
+- ✅ Ed25519 signed receipts → JSONL — works; offline **verifier** CLI ✅ (`tools/verify-receipts/`).
   ✅ **Per-action identity (R8, `ccdb444`)**: an optional `actor` (agent + operator) signed *inside*
-  the receipt, threaded through host + MCP governor (`--actor`) + offline verifier + console; the
-  crate's `audit.rs` now has tamper tests (forged actor/params fail). api-calls/hr cap still ⬜ (R11).
+  the receipt, threaded through host + MCP governor (`--actor`) + offline verifier + console.
+  ✅ **Comprehensive tamper tests (R11, `e2ae449`)**: rewriting any signed field (action_id /
+  success / step_id / ts_ms / params / actor), fabricating an actor after signing, a forged
+  signature, a substituted public key, or malformed hex all fail to verify (the spine of
+  [SECURITY.md](SECURITY.md)). Durable signing identity + hash-chaining the log is R20.
 - ✅ Policy linting — `Policy::warnings()` reports on `*` rules that allow
   everything, destructive-named patterns (delete/remove/destroy/drop/purge/wipe)
   without `require_approval`, missing explicit catch-all, and missing
