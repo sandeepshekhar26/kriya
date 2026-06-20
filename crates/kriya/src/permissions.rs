@@ -26,6 +26,11 @@ pub struct Budget {
     /// Max actions the agent may take in any trailing 60-second window. `None` = no cap.
     #[serde(default)]
     pub max_actions_per_minute: Option<u32>,
+    /// Max inference/API calls the agent may make in any trailing 60-minute window. `None` = no
+    /// cap. Independent of the per-minute action cap: this bounds model *cost* (each agent step is
+    /// one backend call, possibly paid/remote), not action bursts against the app.
+    #[serde(default)]
+    pub max_api_calls_per_hour: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -69,6 +74,11 @@ impl Policy {
     /// The configured per-minute action cap, if any.
     pub fn max_actions_per_minute(&self) -> Option<u32> {
         self.budget.max_actions_per_minute
+    }
+
+    /// The configured per-hour inference/API-call cap, if any.
+    pub fn max_api_calls_per_hour(&self) -> Option<u32> {
+        self.budget.max_api_calls_per_hour
     }
 
     /// Whether the on-device guarantee (R13) is in force for this policy.
@@ -242,6 +252,33 @@ on_device: true
 "#,
         );
         assert!(on.on_device());
+    }
+
+    #[test]
+    fn budget_caps_parse_and_default_to_none() {
+        // Absent → no caps (backward compatible).
+        let none = policy_from(
+            r#"
+rules:
+  - action: "*"
+    allow: false
+"#,
+        );
+        assert_eq!(none.max_actions_per_minute(), None);
+        assert_eq!(none.max_api_calls_per_hour(), None);
+        // Both caps set, independently.
+        let set = policy_from(
+            r#"
+rules:
+  - action: "*"
+    allow: false
+budget:
+  max_actions_per_minute: 60
+  max_api_calls_per_hour: 500
+"#,
+        );
+        assert_eq!(set.max_actions_per_minute(), Some(60));
+        assert_eq!(set.max_api_calls_per_hour(), Some(500));
     }
 
     #[test]

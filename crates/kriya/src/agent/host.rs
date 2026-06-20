@@ -344,7 +344,8 @@ fn run_task_with_memory(
     let mut state = req.state.clone();
     let mut history: Vec<StepRecord> = Vec::new();
     let mut steps: u32 = 0;
-    let mut budget = BudgetTracker::new(policy.max_actions_per_minute());
+    let mut budget = BudgetTracker::new(policy.max_actions_per_minute())
+        .with_api_calls_per_hour(policy.max_api_calls_per_hour());
     // The prior run we resumed from (if any), so we can re-issue its still-pending approvals (R9).
     let mut resume_run_id: Option<String> = None;
 
@@ -498,6 +499,16 @@ fn run_task_with_memory(
                 sink.emit_done(&done);
                 return Ok(done);
             }
+        }
+
+        // API-call budget (cost): cap how often we hit the model per hour, independent of the
+        // per-minute action cap. Checked before each inference call so a loop can't run up
+        // unbounded backend cost even when it dispatches few (or no) actions.
+        if let Err(reason) = budget.check_and_record_api_call(now_ms()) {
+            let done = AgentDone { summary: format!("Stopped: {reason}."), steps };
+            log(sink, AgentLog::error(reason.clone()));
+            sink.emit_done(&done);
+            return Ok(done);
         }
 
         let decision = {
@@ -889,6 +900,76 @@ mod tests {
 
         // And it's now resolved, so a second resume would not re-issue it again.
         assert_eq!(seed.unresolved_pending_approvals("R").unwrap().len(), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn api_call_budget_stops_the_run() {
+        // A policy capping inference at 1 call/hour: the first call runs (one action dispatches),
+        // the second is refused and the run stops — independent of any action cap. Also exercises
+        // the YAML parse of budget.max_api_calls_per_hour end to end.
+        let dir = std::env::temp_dir().join(format!("kriya-r11-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let policy_path = dir.join("policy.yaml");
+        std::fs::write(
+            &policy_path,
+            "rules:\n  - action: \"*\"\n    allow: true\nbudget:\n  max_api_calls_per_hour: 1\n",
+        )
+        .unwrap();
+        let policy = Arc::new(Policy::load_or_default(&policy_path));
+        assert_eq!(policy.max_api_calls_per_hour(), Some(1));
+
+        let (pending, approvals, advances) = maps();
+        let sink = Arc::new(RecordingSink {
+            events: Mutex::new(Vec::new()),
+            pending: pending.clone(),
+            reply_state: json!({ "notes": [] }),
+        });
+        // Two actions queued, but the 1/hour api-call cap stops the run before the second call.
+        let backend = Box::new(ScriptedBackend::new(vec![
+            StepDecision::Call {
+                action_id: "create_note".into(),
+                params: json!({ "title": "a" }),
+                reasoning: "1".into(),
+            },
+            StepDecision::Call {
+                action_id: "create_note".into(),
+                params: json!({ "title": "b" }),
+                reasoning: "2".into(),
+            },
+            StepDecision::Done { summary: "done".into() },
+        ]));
+        let req = AgentStartRequest {
+            goal: "make notes".into(),
+            state: json!({ "notes": [] }),
+            tools: Vec::new(),
+            resume: false,
+            step_mode: false,
+            agent_id: None,
+            user_id: None,
+        };
+
+        let done = run_task(
+            sink.clone(),
+            pending,
+            approvals,
+            advances,
+            policy,
+            Arc::new(Signer::with_log_path(dir.join("audit.jsonl"))),
+            backend,
+            req,
+        )
+        .expect("run_task");
+
+        // Exactly one inference call → one action dispatched, then stopped by the api-call budget.
+        let events = sink.events.lock().unwrap().clone();
+        assert_eq!(
+            events.iter().filter(|e| e.starts_with("action:")).count(),
+            1,
+            "got: {events:?}"
+        );
+        assert!(done.summary.contains("api calls/hour"), "summary: {}", done.summary);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
