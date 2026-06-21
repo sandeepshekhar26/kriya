@@ -61,10 +61,10 @@ Actual Budget flagship. The one artifact still outstanding is the **video** — 
 > **Repo split (D-011 / [LICENSING.md](LICENSING.md)):** R6 → 🔒 private **`kriya-console`** (Proprietary/ARR). R2 = 🌐 public (done).
 
 - 🟡 **R6 · Governance dashboard (the paid surface)** — in progress in 🔒 private `kriya-console`:
-  the cross-app/agent audit viewer, org policy editor, and multi-approval routing are built; remaining
-  is in-dashboard budget controls + per-user dashboards. (The D-011 split keeps the build invisible to
-  this public repo — only this public status marker was stale at ⬜.) Open-core monetization; leans on
-  the audit/budget/approval/policy primitives this repo ships.
+  cross-app/agent audit viewer, org policy editor, multi-approval routing, **live budget controls**,
+  and **per-user/agent + RBAC dashboards** are built; the remaining surface is hosted-tier (SSO/OIDC
+  sign-in). (The D-011 split keeps the build invisible to this public repo.) Open-core monetization;
+  leans on the audit/budget/approval/policy primitives this repo ships.
 - ✅ **R2 · Publish packages** — **done 2026-06-15** (planner ran it). All four npm packages are
   live (`kriya-core` 0.0.1, `kriya-sidecar` 0.0.1, `kriya-inspector` 0.3.0, `create-kriya-app`
   0.2.0) and the `kriya` crate is on crates.io (0.1.0); the scaffolder template already path-swapped
@@ -80,13 +80,14 @@ Actual Budget flagship. The one artifact still outstanding is the **video** — 
 
 - ✅ **R7 · Compliance-evidence export** — shipped in 🔒 `kriya-console` (`a7e9d68`): audit log →
   SOC 2 / ISO 42001 / EU AI Act evidence bundle (integrity + R8 attribution + R13 on-device +
-  control mapping), Markdown/JSON export. The willingness-to-pay hook (EU AI Act enforcement opens
-  Aug 2026).
+  control mapping), Markdown/JSON export. The willingness-to-pay hook (EU AI Act high-risk
+  obligations now Dec 2027 per the Digital Omnibus; SOC 2 / record-keeping demand is already here).
 - 🟡 **R8 · Agent + user identity per action.** Public **signed-receipt `actor` field** shipped
   (`ccdb444` runtime + `57784fb` console) — agent + operator stamped *inside* the signed bytes
   (tamper-evident), threaded through the in-process host, MCP governor (`--actor`), the offline
-  verifier, and the console audit table. Still ⬜: the 🔒 identity-**management** half (SSO/OIDC,
-  RBAC, per-user dashboards).
+  verifier, and the console audit table. The 🔒 identity-**management** half is now mostly built in
+  the private console (**RBAC** roles keyed on the operator + **per-user/agent dashboards**); only
+  **SSO/OIDC sign-in** remains (hosted-tier — it needs a backend the client-only console doesn't have).
 - ✅ **R13 · On-device guarantee** — shipped (`64b340f`). A sealed policy (`on_device: true`) makes
   the in-process host refuse an egressing inference backend and sign a `kriya.attestation.on_device`
   receipt (verifiable offline). Backends declare an honest `NetworkProfile` (scripted=none,
