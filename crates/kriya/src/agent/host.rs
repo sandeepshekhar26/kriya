@@ -15,6 +15,7 @@ use crate::protocol::{
     AgentLog, AgentStartRequest,
 };
 
+use super::inference::retry::{next_step_with_retry, RetryAttempt};
 use super::inference::{Inference, StepContext, StepDecision, StepRecord};
 use super::transport::HostSink;
 
@@ -346,6 +347,8 @@ fn run_task_with_memory(
     let mut steps: u32 = 0;
     let mut budget = BudgetTracker::new(policy.max_actions_per_minute())
         .with_api_calls_per_hour(policy.max_api_calls_per_hour());
+    // How a *transient* backend error is retried before the host gives up on a step (R10).
+    let retry_policy = policy.retry_policy();
     // The prior run we resumed from (if any), so we can re-issue its still-pending approvals (R9).
     let mut resume_run_id: Option<String> = None;
 
@@ -511,6 +514,10 @@ fn run_task_with_memory(
             return Ok(done);
         }
 
+        // Ask the backend for the next step, retrying a *transient* failure (network blip,
+        // rate-limit, parse hiccup) a bounded number of times with backoff (R10). A
+        // deterministic/scripted backend never errors, so this takes the success path on the
+        // first attempt with no sleeps or retries — identical behavior to the old bare `?`.
         let decision = {
             let ctx = StepContext {
                 goal: &req.goal,
@@ -519,7 +526,36 @@ fn run_task_with_memory(
                 history: &history,
                 recent_memory: &recent_memory,
             };
-            backend.next_step(&ctx)?
+            let on_retry = |a: &RetryAttempt| {
+                log(
+                    sink,
+                    AgentLog::warn(format!(
+                        "inference backend failed (retry {}/{} after {:?}): {}",
+                        a.retry_number, a.max_retries, a.backoff, a.error
+                    )),
+                );
+            };
+            match next_step_with_retry(backend.as_mut(), &ctx, &retry_policy, on_retry, std::thread::sleep)
+            {
+                Ok(d) => d,
+                // The backend kept failing past the retry budget — it cannot make progress on a
+                // flaky/unreachable model. Escalate by ending the run *gracefully*: a descriptive
+                // AgentDone + an error log, never a hang or a panic. A regulated workstation host
+                // must degrade cleanly. (Building the actual frontier-model escalation backend is
+                // the demand-pulled, off-wedge half of R10 — see the roadmap.)
+                Err(exhausted) => {
+                    let summary = format!(
+                        "Stopped: the inference backend '{}' could not produce a next step — {}. Aborting cleanly after {} step(s).",
+                        backend.name(),
+                        exhausted,
+                        steps
+                    );
+                    log(sink, AgentLog::error(summary.clone()));
+                    let done = AgentDone { summary, steps };
+                    sink.emit_done(&done);
+                    return Ok(done);
+                }
+            }
         };
 
         let (action_id, params, reasoning) = match decision {
@@ -674,6 +710,59 @@ mod tests {
                 .next()
                 .unwrap_or(StepDecision::Done { summary: "script exhausted".into() }))
         }
+    }
+
+    /// A backend that returns `Err` on the first `fail_n` calls to `next_step` (a transient
+    /// failure: blip / rate-limit / parse hiccup), then plays back `steps`. Drives the R10
+    /// retry/escalation paths through the real host loop. `fail_n = u32::MAX` never recovers.
+    struct FlakyScriptedBackend {
+        fail_n: u32,
+        calls: u32,
+        steps: std::vec::IntoIter<StepDecision>,
+    }
+
+    impl FlakyScriptedBackend {
+        fn new(fail_n: u32, steps: Vec<StepDecision>) -> Self {
+            Self { fail_n, calls: 0, steps: steps.into_iter() }
+        }
+    }
+
+    impl Inference for FlakyScriptedBackend {
+        fn name(&self) -> &'static str {
+            "flaky-scripted-test"
+        }
+        fn network_profile(&self) -> NetworkProfile {
+            NetworkProfile::None
+        }
+        fn next_step(&mut self, _ctx: &StepContext) -> Result<StepDecision, String> {
+            self.calls += 1;
+            if self.calls <= self.fail_n {
+                return Err(format!("transient backend failure #{}", self.calls));
+            }
+            Ok(self
+                .steps
+                .next()
+                .unwrap_or(StepDecision::Done { summary: "script exhausted".into() }))
+        }
+    }
+
+    /// A policy that retries fast (1ms backoff) so the host-level retry tests don't sleep for the
+    /// production default. Written through YAML so it also exercises the `retry:` parse path.
+    fn fast_retry_policy(max_retries: u32) -> Policy {
+        serde_yaml::from_str(&format!(
+            r#"
+rules:
+  - action: "*"
+    allow: true
+budget:
+  max_actions_per_minute: 60
+retry:
+  max_retries: {max_retries}
+  initial_backoff_ms: 1
+  max_backoff_ms: 1
+"#,
+        ))
+        .unwrap()
     }
 
     /// A test sink that records event tags AND, because `emit_action` runs inline on the loop
@@ -1148,5 +1237,110 @@ on_device: true
         // The egressing backend never got to dispatch an action.
         let events = sink.events.lock().unwrap().clone();
         assert!(events.iter().all(|e| !e.starts_with("action:")), "got: {events:?}");
+    }
+
+    #[test]
+    fn transient_backend_failure_is_retried_then_the_run_completes() {
+        // The backend's first two `next_step` calls fail transiently; the retry budget rides
+        // them out, and the run proceeds to dispatch the action and finish normally — no run is
+        // lost to a network blip. (R10 reliability half.)
+        let (pending, approvals, advances) = maps();
+        let sink = Arc::new(RecordingSink {
+            events: Mutex::new(Vec::new()),
+            pending: pending.clone(),
+            reply_state: json!({ "notes": [] }),
+        });
+        let backend = Box::new(FlakyScriptedBackend::new(
+            2,
+            vec![
+                StepDecision::Call {
+                    action_id: "create_note".into(),
+                    params: json!({ "title": "survived a blip" }),
+                    reasoning: "first".into(),
+                },
+                StepDecision::Done { summary: "all done".into() },
+            ],
+        ));
+        let req = AgentStartRequest {
+            goal: "make a note despite a flaky backend".into(),
+            state: json!({ "notes": [] }),
+            tools: Vec::<ToolSchema>::new(),
+            resume: false,
+            step_mode: false,
+            agent_id: None,
+            user_id: None,
+        };
+
+        let dir = std::env::temp_dir().join(format!("kriya-r10-ok-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let done = run_task(
+            sink.clone(),
+            pending,
+            approvals,
+            advances,
+            Arc::new(fast_retry_policy(3)),
+            Arc::new(Signer::with_log_path(dir.join("audit.jsonl"))),
+            backend,
+            req,
+        )
+        .expect("run_task");
+
+        // The run recovered and completed: the action dispatched after the retries.
+        assert_eq!(done.steps, 1, "summary: {}", done.summary);
+        let events = sink.events.lock().unwrap().clone();
+        assert_eq!(events, vec!["action:create_note".to_string(), "done:1".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn backend_that_always_fails_escalates_to_a_clean_done() {
+        // The backend never produces a step. Past the retry budget the host must end the run
+        // GRACEFULLY — a descriptive AgentDone + error log — never hang or panic. (R10: the
+        // "too-hard → escalate/abort cleanly" fallback a regulated workstation host needs.)
+        let (pending, approvals, advances) = maps();
+        let sink = Arc::new(RecordingSink {
+            events: Mutex::new(Vec::new()),
+            pending: pending.clone(),
+            reply_state: Value::Null,
+        });
+        let backend = Box::new(FlakyScriptedBackend::new(u32::MAX, vec![]));
+        let req = AgentStartRequest {
+            goal: "drive an unreachable backend".into(),
+            state: Value::Null,
+            tools: Vec::new(),
+            resume: false,
+            step_mode: false,
+            agent_id: None,
+            user_id: None,
+        };
+
+        let dir = std::env::temp_dir().join(format!("kriya-r10-fail-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // run_task returns Ok (clean end), not Err — the loop never propagates the backend error
+        // as a hard failure that would wedge or crash the host.
+        let done = run_task(
+            sink.clone(),
+            pending,
+            approvals,
+            advances,
+            Arc::new(fast_retry_policy(2)),
+            Arc::new(Signer::with_log_path(dir.join("audit.jsonl"))),
+            backend,
+            req,
+        )
+        .expect("run_task returns a clean AgentDone, not an error");
+
+        assert_eq!(done.steps, 0, "no action ran");
+        assert!(
+            done.summary.contains("could not produce a next step")
+                && done.summary.contains("Aborting cleanly"),
+            "expected a descriptive escalation summary, got: {}",
+            done.summary
+        );
+        // It ended via the done channel and never dispatched an action.
+        let events = sink.events.lock().unwrap().clone();
+        assert!(events.iter().any(|e| e.starts_with("done:")), "got: {events:?}");
+        assert!(events.iter().all(|e| !e.starts_with("action:")), "got: {events:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
