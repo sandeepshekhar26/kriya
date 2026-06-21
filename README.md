@@ -233,6 +233,7 @@ Pick the inference backend with `AGENT_BACKEND` (`deterministic` default, or `cl
 
 ## Docs
 
+- [docs/THREE-FRONTIERS.md](docs/THREE-FRONTIERS.md) — **the positioning essay** (the *why*): the three surfaces agents reach software through, and the desktop/local one nobody's governing
 - [architecture.md](architecture.md) — how the pattern works, end to end
 - [docs/SECURITY.md](docs/SECURITY.md) — how the signed audit trail is tamper-evident (and an honest threat model)
 - [docs/ROADMAP.md](docs/ROADMAP.md) — what's built and what's next
