@@ -140,10 +140,13 @@ fn verify_line(line: &str) -> (String, String, Outcome) {
     let signature = Signature::from_bytes(&sig_bytes);
 
     // ── canonical message — must byte-match what audit.rs signed ───────────
-    // `serde_json::to_vec` of the unsigned Receipt struct (no preserve_order;
-    // struct fields serialize in declaration order: step_id, action_id, params,
-    // success, ts_ms).
-    let msg = match serde_json::to_vec(&signed.receipt) {
+    // `serde_json::to_vec` of the unsigned Receipt struct (struct fields serialize in declaration
+    // order: step_id, action_id, params, success, ts_ms, actor), with `params` object keys sorted
+    // by the identical canonicalization audit.rs applies (R21) — so the bytes match regardless of
+    // either build's serde_json `preserve_order` setting.
+    let mut receipt = signed.receipt;
+    receipt.params = canonical_value(&receipt.params);
+    let msg = match serde_json::to_vec(&receipt) {
         Ok(v) => v,
         Err(e) => {
             return (
@@ -158,6 +161,24 @@ fn verify_line(line: &str) -> (String, String, Outcome) {
     match verifying_key.verify(&msg, &signature) {
         Ok(()) => (action_id, step_id, Outcome::Ok),
         Err(e) => (action_id, step_id, Outcome::Fail(format!("bad signature: {e}"))),
+    }
+}
+
+/// Recursively sort object keys so the re-derived canonical bytes are independent of serde_json's
+/// `preserve_order` feature — byte-for-byte identical to `kriya::audit`'s canonicalization (R21).
+fn canonical_value(v: &Value) -> Value {
+    match v {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let mut out = serde_json::Map::new();
+            for k in keys {
+                out.insert(k.clone(), canonical_value(&map[k]));
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(canonical_value).collect()),
+        other => other.clone(),
     }
 }
 

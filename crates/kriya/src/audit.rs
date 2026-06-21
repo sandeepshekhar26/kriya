@@ -108,8 +108,14 @@ impl Signer {
     }
 
     /// Sign a receipt and append it to the audit log. Returns the signed receipt.
-    pub fn record(&self, receipt: Receipt) -> SignedReceipt {
-        // Canonical bytes = JSON of the unsigned receipt.
+    pub fn record(&self, mut receipt: Receipt) -> SignedReceipt {
+        // Canonicalize before signing (R21): recursively sort `params` object keys so the signed
+        // bytes never depend on a consumer's serde_json `preserve_order` feature. `serde_json::Value`
+        // maps are already key-ordered in the current builds, so this is byte-identical today — it
+        // just makes the guarantee explicit and robust if a dependency ever flips that feature. The
+        // offline `tools/verify-receipts` applies the identical sort before re-deriving the bytes.
+        receipt.params = canonical_value(&receipt.params);
+        // Canonical bytes = compact JSON of the unsigned (now key-sorted) receipt.
         let msg = serde_json::to_vec(&receipt).unwrap_or_default();
         let signature = hex::encode(self.key.sign(&msg).to_bytes());
         let signed = SignedReceipt {
@@ -135,6 +141,26 @@ pub fn now_ms() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0)
+}
+
+/// Recursively sort object keys in a JSON value so its serialization is deterministic regardless of
+/// serde_json's `preserve_order` feature (R21). Applied to receipt `params` before signing so the
+/// signed canonical bytes are reproducible by any verifier without depending on a build flag. Arrays
+/// preserve order (semantic) but their object elements are sorted; scalars pass through unchanged.
+fn canonical_value(v: &Value) -> Value {
+    match v {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let mut out = serde_json::Map::new();
+            for k in keys {
+                out.insert(k.clone(), canonical_value(&map[k]));
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(canonical_value).collect()),
+        other => other.clone(),
+    }
 }
 
 #[cfg(test)]
@@ -334,5 +360,23 @@ mod tests {
         signed.signature = good_sig;
         signed.public_key = "deadbeef".into(); // valid hex but wrong length (not 32 bytes)
         assert!(!verifies(&signed), "wrong-length public key must be rejected, not panic");
+    }
+
+    #[test]
+    fn params_are_canonically_key_sorted_before_signing() {
+        // R21: params keys are recursively sorted into the signed (and stored) receipt — including
+        // nested objects and objects inside arrays — so the canonical bytes don't depend on any
+        // consumer's serde_json `preserve_order` feature.
+        let s = signer();
+        let signed = s.record(Receipt::new(
+            "s".into(),
+            "a".into(),
+            json!({ "z": 1, "a": { "y": 2, "b": 3 }, "m": [ { "q": 1, "p": 2 } ] }),
+            true,
+            1,
+        ));
+        assert!(verifies(&signed), "canonicalized receipt must verify");
+        let serialized = serde_json::to_string(&signed.receipt.params).unwrap();
+        assert_eq!(serialized, r#"{"a":{"b":3,"y":2},"m":[{"p":2,"q":1}],"z":1}"#);
     }
 }
