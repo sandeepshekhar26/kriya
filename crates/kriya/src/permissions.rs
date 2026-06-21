@@ -4,6 +4,9 @@
 
 use serde::Deserialize;
 
+use crate::agent::inference::retry::RetryPolicy;
+use std::time::Duration;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decision {
     Allow,
@@ -33,11 +36,48 @@ pub struct Budget {
     pub max_api_calls_per_hour: Option<u32>,
 }
 
+/// Tunes how a *transient* inference-backend error is retried before the host gives up on a
+/// step (R10). Optional in policy: when absent the host uses [`RetryPolicy::default`]. Lets an
+/// operator dial reliability (e.g. a flaky local model vs. an expensive rate-limited cloud model)
+/// without code changes. Has no effect on deterministic/scripted backends — they never error.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RetryConfig {
+    /// Retries after the first attempt. `0` = fail-fast (one attempt). Total attempts = this + 1.
+    #[serde(default)]
+    pub max_retries: Option<u32>,
+    /// Backoff in milliseconds before the first retry; doubles each retry (capped by `max_backoff_ms`).
+    #[serde(default)]
+    pub initial_backoff_ms: Option<u64>,
+    /// Upper bound on a single backoff wait, in milliseconds.
+    #[serde(default)]
+    pub max_backoff_ms: Option<u64>,
+}
+
+impl RetryConfig {
+    /// Fold this config onto [`RetryPolicy::default`], overriding only the fields that are set.
+    fn to_policy(&self) -> RetryPolicy {
+        let mut p = RetryPolicy::default();
+        if let Some(n) = self.max_retries {
+            p.max_retries = n;
+        }
+        if let Some(ms) = self.initial_backoff_ms {
+            p.initial_backoff = Duration::from_millis(ms);
+        }
+        if let Some(ms) = self.max_backoff_ms {
+            p.max_backoff = Duration::from_millis(ms);
+        }
+        p
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Policy {
     rules: Vec<Rule>,
     #[serde(default)]
     budget: Budget,
+    /// Optional retry/backoff tuning for transient inference failures (R10).
+    #[serde(default)]
+    retry: Option<RetryConfig>,
     /// On-device guarantee (R13). When `true`, the in-process host refuses to run with an
     /// inference backend that egresses to a remote service, and signs an attestation that the
     /// run was sealed — the "nothing leaves the device" posture regulated apps need. Default
@@ -57,6 +97,7 @@ impl Default for Policy {
                 Rule { action: "*".into(), allow: false, require_approval: false },
             ],
             budget: Budget::default(),
+            retry: None,
             on_device: false,
         }
     }
@@ -79,6 +120,12 @@ impl Policy {
     /// The configured per-hour inference/API-call cap, if any.
     pub fn max_api_calls_per_hour(&self) -> Option<u32> {
         self.budget.max_api_calls_per_hour
+    }
+
+    /// The retry/backoff policy for transient inference failures (R10). Uses the sane default
+    /// when no `retry:` section is configured.
+    pub fn retry_policy(&self) -> RetryPolicy {
+        self.retry.as_ref().map(RetryConfig::to_policy).unwrap_or_default()
     }
 
     /// Whether the on-device guarantee (R13) is in force for this policy.
@@ -279,6 +326,50 @@ budget:
         );
         assert_eq!(set.max_actions_per_minute(), Some(60));
         assert_eq!(set.max_api_calls_per_hour(), Some(500));
+    }
+
+    #[test]
+    fn retry_config_parses_and_defaults_sanely() {
+        // Absent → the host's default retry policy (3 retries, 250ms→5s).
+        let none = policy_from(
+            r#"
+rules:
+  - action: "*"
+    allow: false
+"#,
+        );
+        let def = none.retry_policy();
+        assert_eq!(def.max_retries, 3);
+        assert_eq!(def.initial_backoff, Duration::from_millis(250));
+        assert_eq!(def.max_backoff, Duration::from_secs(5));
+
+        // A partial override leaves the unspecified fields at their defaults.
+        let tuned = policy_from(
+            r#"
+rules:
+  - action: "*"
+    allow: false
+retry:
+  max_retries: 5
+  initial_backoff_ms: 100
+"#,
+        );
+        let rp = tuned.retry_policy();
+        assert_eq!(rp.max_retries, 5);
+        assert_eq!(rp.initial_backoff, Duration::from_millis(100));
+        assert_eq!(rp.max_backoff, Duration::from_secs(5), "unspecified field keeps the default");
+
+        // Fail-fast: explicit zero retries.
+        let off = policy_from(
+            r#"
+rules:
+  - action: "*"
+    allow: false
+retry:
+  max_retries: 0
+"#,
+        );
+        assert_eq!(off.retry_policy().max_retries, 0);
     }
 
     #[test]
