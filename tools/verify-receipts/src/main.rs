@@ -56,6 +56,11 @@ struct Receipt {
     /// (actor-less) receipts and the new attributed ones.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     actor: Option<Actor>,
+    /// Hash of the previous receipt LINE in the log (R20). Declared LAST and skipped when absent so
+    /// an unchained (genesis / pre-R20) receipt re-derives byte-identically. Part of the signed
+    /// bytes; the chain is verified against the SHA-256 of the preceding raw line in `main`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prev_hash: Option<String>,
 }
 
 /// A full JSONL line as written by the host: the Receipt fields flattened,
@@ -182,6 +187,15 @@ fn canonical_value(v: &Value) -> Value {
     }
 }
 
+/// Lowercase-hex SHA-256 — must match `kriya::audit`'s chain hash (over the exact raw line) so the
+/// chain can be re-checked offline (R20).
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -200,13 +214,30 @@ fn main() {
         }
     };
 
+    let (ok_count, fail_count, chain_breaks) = verify_log(&content);
+    println!("verified {ok_count}, failed {fail_count}, chain breaks {chain_breaks}");
+
+    if fail_count > 0 || chain_breaks > 0 {
+        process::exit(1);
+    }
+}
+
+/// Verify every line of an audit log: (1) **signatures** — no retained receipt was altered; and
+/// (2) the **hash chain** — the log is complete (no whole-receipt deletion/truncation/reorder).
+/// Prints a per-line report and returns `(ok, failed, chain_breaks)`. Pure over its input so it is
+/// unit-testable without a file or `process::exit`.
+fn verify_log(content: &str) -> (u32, u32, u32) {
     let mut ok_count: u32 = 0;
     let mut fail_count: u32 = 0;
+    let mut chain_breaks: u32 = 0;
+    // SHA-256 of the previous non-empty line, to check the next receipt's prev_hash against (R20).
+    let mut prev_line_hash: Option<String> = None;
 
     for line in content.lines() {
         if line.trim().is_empty() {
             continue;
         }
+        // 1) signature: no retained receipt was altered.
         let (action_id, step_id, outcome) = verify_line(line);
         match outcome {
             Outcome::Ok => {
@@ -218,13 +249,28 @@ fn main() {
                 fail_count += 1;
             }
         }
+
+        // 2) chain: a receipt that declares a prev_hash must match the SHA-256 of the preceding
+        //    line. prev_hash is inside the signed bytes, so it can't be stripped without failing the
+        //    signature check above. Unchained receipts (genesis, or pre-R20 logs) carry no prev_hash
+        //    → not chain-checked (backward compatible).
+        if let Ok(signed) = serde_json::from_str::<SignedReceipt>(line) {
+            match (&signed.receipt.prev_hash, &prev_line_hash) {
+                (Some(claimed), Some(actual)) if claimed != actual => {
+                    println!("CHAIN-BREAK {action_id} {step_id}  [prev_hash != previous line — a preceding receipt was deleted, reordered, or altered]");
+                    chain_breaks += 1;
+                }
+                (Some(_), None) => {
+                    println!("CHAIN-BREAK {action_id} {step_id}  [first line claims a predecessor — the head of the log was truncated]");
+                    chain_breaks += 1;
+                }
+                _ => {} // genesis, exact match, or legacy-unchained → no break
+            }
+        }
+        prev_line_hash = Some(sha256_hex(line.as_bytes()));
     }
 
-    println!("verified {ok_count}, failed {fail_count}");
-
-    if fail_count > 0 {
-        process::exit(1);
-    }
+    (ok_count, fail_count, chain_breaks)
 }
 
 // ---------------------------------------------------------------------------
@@ -271,6 +317,7 @@ mod tests {
             success: true,
             ts_ms: 1_700_000_000_000_u64,
             actor: None,
+            prev_hash: None,
         }
     }
 
@@ -282,6 +329,7 @@ mod tests {
             success: true,
             ts_ms: 1_700_000_000_500_u64,
             actor: Some(Actor { agent: "claude-desktop".to_string(), user: "alice".to_string() }),
+            prev_hash: None,
         }
     }
 
@@ -411,5 +459,40 @@ mod tests {
             matches!(outcome, Outcome::Fail(_)),
             "wrong public key must not verify"
         );
+    }
+
+    // ── hash chain (R20) ─────────────────────────────────────────────────────
+
+    /// Sign a receipt with an explicit `prev_hash` set first — mirrors the host's chaining.
+    fn sign_chained(key: &SigningKey, base: &Receipt, prev: Option<String>, step: &str) -> String {
+        let mut r = base.clone();
+        r.step_id = step.to_string();
+        r.prev_hash = prev;
+        serde_json::to_string(&sign_receipt(key, &r)).unwrap()
+    }
+
+    #[test]
+    fn complete_chain_verifies_and_deletion_is_caught() {
+        let key = SigningKey::from_bytes(&KEY_A);
+        let base = make_receipt();
+        // A 3-receipt chain: each prev_hash = SHA-256 of the previous LINE.
+        let l1 = sign_chained(&key, &base, None, "s1");
+        let l2 = sign_chained(&key, &base, Some(sha256_hex(l1.as_bytes())), "s2");
+        let l3 = sign_chained(&key, &base, Some(sha256_hex(l2.as_bytes())), "s3");
+
+        // Intact: every signature verifies and the chain is unbroken.
+        let intact = format!("{l1}\n{l2}\n{l3}\n");
+        assert_eq!(verify_log(&intact), (3, 0, 0));
+
+        // Delete the MIDDLE receipt: the survivors are unaltered (sigs still pass), but l3's
+        // prev_hash no longer matches l1 → the deletion is caught as a chain break.
+        let with_gap = format!("{l1}\n{l3}\n");
+        let (ok, fail, breaks) = verify_log(&with_gap);
+        assert_eq!((ok, fail), (2, 0), "remaining receipts still verify");
+        assert_eq!(breaks, 1, "whole-receipt deletion must break the chain");
+
+        // Truncate the HEAD: the new first line claims a predecessor that is gone.
+        let head_cut = format!("{l2}\n{l3}\n");
+        assert_eq!(verify_log(&head_cut).2, 1, "head truncation must break the chain");
     }
 }
