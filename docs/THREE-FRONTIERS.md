@@ -70,9 +70,11 @@ For a local app handling regulated data, the vision-based approach is a complian
 - **gate** a high-risk action for human approval; or
 - **prove** compliance — no audit trail, no policy enforcement.
 
-And the clock is real: the **EU AI Act's high-risk obligations take effect August 2, 2026**, with
-penalties up to **7% of worldwide annual turnover**. An agent touching regulated data legally must
-be permissioned and audited.
+And the clock is real (if a bit further out than this essay first said): the EU AI Act's **high-risk
+(Annex III) obligations were deferred to December 2, 2027** by the Digital Omnibus (agreed May 2026;
+Annex I embedded systems → Aug 2028), with non-compliance fines up to **€15M / 3% of worldwide
+turnover** (the 7% / €35M tier is reserved for *prohibited* practices). The requirement is unchanged:
+an agent touching regulated data legally must be permissioned and audited.
 
 ## The missing piece
 

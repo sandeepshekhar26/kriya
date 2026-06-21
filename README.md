@@ -242,8 +242,10 @@ Pick the inference backend with `AGENT_BACKEND` (`deterministic` default, or `cl
 
 ## Why this matters now
 
-- **EU AI Act** high-risk obligations take effect **August 2, 2026** — penalties up to 7% of
-  worldwide annual turnover. Agents touching real data need auditable, governed interfaces.
+- **EU AI Act** high-risk (Annex III) obligations were **deferred to December 2, 2027** by the
+  Digital Omnibus (agreed May 2026; Annex I embedded systems → Aug 2028) — but the requirement is
+  unchanged: agents touching regulated data need auditable, governed interfaces, with non-compliance
+  fines up to **€15M / 3%** of worldwide turnover (the 7% / €35M tier is for *prohibited* practices).
 - **Gartner** projects 40% of enterprise apps will embed AI agents by end of 2026 — and 40% of
   enterprises will demote or decommission autonomous agents by 2027 due to governance gaps.
 - The **NSA AI Security Center** (May 2026) warned that MCP's rapid adoption has outpaced its
