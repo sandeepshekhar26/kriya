@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 /// Identity of *who* took an action: the agent that proposed it and the human/operator
 /// on whose behalf it ran. Carried **inside** the signed receipt so attribution is
@@ -50,6 +51,14 @@ pub struct Receipt {
     /// the canonical serialization order of the original five fields is preserved.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub actor: Option<Actor>,
+    /// Hash of the previous receipt LINE in this audit log (R20). Chains receipts so whole-receipt
+    /// deletion / truncation / reorder is detectable — turning "no retained receipt was altered"
+    /// into "the log is complete." Absent on the genesis receipt (and on pre-R20 receipts), so an
+    /// unchained receipt signs **byte-identically** to before. Declared last so the canonical order
+    /// of the original fields + `actor` is preserved; `prev_hash` is part of the signed bytes, so
+    /// the chain pointer itself can't be rewritten without invalidating the signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_hash: Option<String>,
 }
 
 impl Receipt {
@@ -61,7 +70,7 @@ impl Receipt {
         success: bool,
         ts_ms: u128,
     ) -> Self {
-        Self { step_id, action_id, params, success, ts_ms, actor: None }
+        Self { step_id, action_id, params, success, ts_ms, actor: None, prev_hash: None }
     }
 
     /// Attach (or clear) the acting identity. Chainable on top of [`Receipt::new`].
@@ -83,6 +92,10 @@ pub struct Signer {
     key: SigningKey,
     public_hex: String,
     log_path: PathBuf,
+    /// Hash of the last receipt line written to `log_path` — the chain head (R20). Seeded from the
+    /// log's last line at construction so a new process continues the chain. Behind a `Mutex` so the
+    /// chain stays consistent if multiple run threads share one signer.
+    last_hash: Mutex<Option<String>>,
 }
 
 impl Signer {
@@ -96,7 +109,8 @@ impl Signer {
         let bytes: [u8; 32] = rand::random();
         let key = SigningKey::from_bytes(&bytes);
         let public_hex = hex::encode(key.verifying_key().to_bytes());
-        Self { key, public_hex, log_path }
+        let last_hash = Mutex::new(seed_last_hash(&log_path));
+        Self { key, public_hex, log_path, last_hash }
     }
 
     /// Mint a signer whose Ed25519 identity is **persisted** at `key_path` — loaded if present,
@@ -109,7 +123,8 @@ impl Signer {
         let seed = load_or_create_seed(key_path)?;
         let key = SigningKey::from_bytes(&seed);
         let public_hex = hex::encode(key.verifying_key().to_bytes());
-        Ok(Self { key, public_hex, log_path })
+        let last_hash = Mutex::new(seed_last_hash(&log_path));
+        Ok(Self { key, public_hex, log_path, last_hash })
     }
 
     pub fn public_key(&self) -> &str {
@@ -128,7 +143,12 @@ impl Signer {
         // just makes the guarantee explicit and robust if a dependency ever flips that feature. The
         // offline `tools/verify-receipts` applies the identical sort before re-deriving the bytes.
         receipt.params = canonical_value(&receipt.params);
-        // Canonical bytes = compact JSON of the unsigned (now key-sorted) receipt.
+        // Hash-chain (R20): link this receipt to the previous LINE so whole-receipt deletion or
+        // truncation is detectable. Hold the lock across the file write so the on-disk order always
+        // matches the chain order, even if multiple run threads share this signer.
+        let mut last = self.last_hash.lock().unwrap_or_else(|e| e.into_inner());
+        receipt.prev_hash = last.clone(); // None on the genesis receipt
+        // Canonical bytes = compact JSON of the unsigned (key-sorted, now chained) receipt.
         let msg = serde_json::to_vec(&receipt).unwrap_or_default();
         let signature = hex::encode(self.key.sign(&msg).to_bytes());
         let signed = SignedReceipt {
@@ -136,15 +156,16 @@ impl Signer {
             public_key: self.public_hex.clone(),
             signature,
         };
-        if let Ok(line) = serde_json::to_string(&signed) {
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&self.log_path)
-            {
-                let _ = writeln!(f, "{line}");
-            }
+        let line = serde_json::to_string(&signed).unwrap_or_default();
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.log_path)
+        {
+            let _ = writeln!(f, "{line}");
         }
+        // The hash of the exact line just written becomes the next receipt's `prev_hash`.
+        *last = Some(sha256_hex(line.as_bytes()));
         signed
     }
 }
@@ -190,6 +211,25 @@ fn restrict_perms(path: &Path) {
 }
 #[cfg(not(unix))]
 fn restrict_perms(_path: &Path) {}
+
+/// Lowercase-hex SHA-256 of `bytes`. The hash-chain links each receipt to the SHA-256 of the exact
+/// previous LINE on disk, so any whole-receipt deletion/truncation/reorder breaks the chain (R20).
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
+/// Seed the chain head from an existing log's last non-empty line, so a new host process CONTINUES
+/// the chain (its first receipt links to the last line already on disk) instead of starting a fresh
+/// chain that a verifier would read as a head-truncation. `None` for an absent/empty log — a genuine
+/// genesis.
+fn seed_last_hash(log_path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(log_path).ok()?;
+    let last = content.lines().rev().find(|l| !l.trim().is_empty())?;
+    Some(sha256_hex(last.as_bytes()))
+}
 
 /// Recursively sort object keys in a JSON value so its serialization is deterministic regardless of
 /// serde_json's `preserve_order` feature (R21). Applied to receipt `params` before signing so the
@@ -244,8 +284,11 @@ mod tests {
     }
 
     fn signer() -> Signer {
-        // Isolate the audit file per test process so concurrent tests don't fight over it.
-        Signer::with_log_path(std::env::temp_dir().join("kriya-audit-test.jsonl"))
+        // A UNIQUE log per call so each test's first record() is a genuine genesis (no chain seeding
+        // from a leftover shared file) and concurrent tests never fight over the audit file.
+        Signer::with_log_path(
+            std::env::temp_dir().join(format!("kriya-audit-test-{}.jsonl", uuid::Uuid::new_v4())),
+        )
     }
 
     #[test]
@@ -444,6 +487,56 @@ mod tests {
         let signed = s1.record(Receipt::new("s".into(), "a".into(), json!({}), true, 1));
         assert!(verifies(&signed), "durable-key receipt must verify");
         assert_eq!(std::fs::read_to_string(&key).unwrap().trim().len(), 64, "key persists as 64 hex");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn receipts_are_hash_chained() {
+        // R20: each receipt after the genesis carries prev_hash = SHA-256 of the previous LINE, so
+        // whole-receipt deletion/truncation/reorder is detectable. Chained receipts still verify
+        // (prev_hash is inside the signed bytes).
+        let dir = std::env::temp_dir().join(format!("kriya-r20b-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("audit.jsonl");
+        let s = Signer::with_log_path(log.clone());
+
+        let r1 = s.record(Receipt::new("s1".into(), "a".into(), json!({}), true, 1));
+        let r2 = s.record(Receipt::new("s2".into(), "b".into(), json!({}), true, 2));
+        let r3 = s.record(Receipt::new("s3".into(), "c".into(), json!({}), true, 3));
+
+        assert!(r1.receipt.prev_hash.is_none(), "genesis must have no prev_hash");
+        let lines: Vec<String> =
+            std::fs::read_to_string(&log).unwrap().lines().map(str::to_string).collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(r2.receipt.prev_hash.as_deref(), Some(sha256_hex(lines[0].as_bytes()).as_str()));
+        assert_eq!(r3.receipt.prev_hash.as_deref(), Some(sha256_hex(lines[1].as_bytes()).as_str()));
+        assert!(verifies(&r2) && verifies(&r3), "chained receipts must still verify");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_new_signer_continues_the_chain_on_an_existing_log() {
+        // Cross-restart: a second host process appending to the same log links its first receipt to
+        // the last line already on disk, so resuming a deployment doesn't read as a truncation.
+        let dir = std::env::temp_dir().join(format!("kriya-r20b-cont-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("audit.jsonl");
+
+        let s1 = Signer::with_log_path(log.clone());
+        let _ = s1.record(Receipt::new("s1".into(), "a".into(), json!({}), true, 1));
+        drop(s1);
+
+        let s2 = Signer::with_log_path(log.clone()); // a fresh "process" seeds from the existing log
+        let r2 = s2.record(Receipt::new("s2".into(), "b".into(), json!({}), true, 2));
+        let lines: Vec<String> =
+            std::fs::read_to_string(&log).unwrap().lines().map(str::to_string).collect();
+        assert_eq!(
+            r2.receipt.prev_hash.as_deref(),
+            Some(sha256_hex(lines[0].as_bytes()).as_str()),
+            "the continuation receipt must link to the last line of the prior run"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

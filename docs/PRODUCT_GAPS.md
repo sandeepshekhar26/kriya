@@ -113,7 +113,13 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
   ✅ **Comprehensive tamper tests (R11, `e2ae449`)**: rewriting any signed field (action_id /
   success / step_id / ts_ms / params / actor), fabricating an actor after signing, a forged
   signature, a substituted public key, or malformed hex all fail to verify (the spine of
-  [SECURITY.md](SECURITY.md)). Durable signing identity + hash-chaining the log is R20.
+  [SECURITY.md](SECURITY.md)).
+  ✅ **Durable identity + tamper-evident chaining (R20, `26f750c` + `2163b10`)**: a persisted host
+  key (`--signing-key`, stable across runs) **and** `prev_hash` hash-chaining, so whole-receipt
+  deletion/truncation/reorder is caught by `verify-receipts` (the on-device *complete-log* guarantee
+  a cloud audit sidecar can't produce). Residual: HSM/keychain key custody + external anchoring.
+  ✅ **Deterministic canonical bytes (R21, `b51370f`)**: explicit recursive `params` key-sort before
+  signing, mirrored in the verifier — reproducible regardless of serde_json `preserve_order`.
 - ✅ Policy linting — `Policy::warnings()` reports on `*` rules that allow
   everything, destructive-named patterns (delete/remove/destroy/drop/purge/wipe)
   without `require_approval`, missing explicit catch-all, and missing
@@ -213,9 +219,11 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
   policy gating delete/close behind human approval. The whole wedge proved in one runnable demo.
 
 ## 7. Product / business
-- ⬜ **Governance dashboard** (`R6`, **P1**, the paid surface) — cross-app/agent audit viewer,
-  in-app policy editor, approval routing, budget controls. Open-core monetization; builds on
-  the audit/budget/approval/policy work already shipped.
+- 🟡 **Governance dashboard** (`R6`, **P1**, the paid surface) — in progress in 🔒 private
+  `kriya-console`: cross-app/agent audit viewer, org policy editor, multi-approval routing built;
+  remaining is in-dashboard budget controls + per-user dashboards. Open-core monetization; builds on
+  the audit/budget/approval/policy primitives this repo ships. (D-011 keeps the build private; only
+  the public status marker was stale.)
 - ⬜ **Compliance-evidence export** (`R7`, **P2**) — audit log → SOC 2 / ISO 42001 / EU AI Act
   artifacts. Willingness-to-pay hook (EU AI Act enforcement opens Aug 2026).
 - ⬜ **Agent + user identity per action** (`R8`, **P2**).

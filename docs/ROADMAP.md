@@ -11,19 +11,27 @@ Legend: ⬜ not started · 🟡 in progress · ✅ done · ⭐ flagship
 
 ---
 
-## P0 — Critical path to the YC demo (the wedge; do in order)
+## P0 — Critical path to the YC demo — ✅ COMPLETE (R1 → R3 → R4 → R5 shipped)
 
-These four, in sequence, produce the flagship POS video that *is* the pitch. Nothing else
-matters until this path is walked.
+The wedge's critical path is walked: governed MCP mode → sidecar host → `wrapAction` bolt-on → the
+Actual Budget flagship. The one artifact still outstanding is the **video** — now tracked as
+`R5-video` (below) instead of hiding as prose inside done-R5.
 
 - ✅ **R1 · Governed MCP-server mode** — shipped (`d1e28e6`). See **Done** below.
 - ✅ **R3 · Sidecar host + Electron/Node binding** — shipped (`8b3a8c2`). See **Done** below.
 - ✅ **R4 · `wrapAction` + codemod** — shipped (`0afc8ca`). See **Done** below.
 - ✅ ⭐ **R5 · THE FLAGSHIP DEMO** — shipped (`24ed278`). See **Done** below. The wedge's
-  critical path (R1 → R3 → R4 → R5) is complete; what remains is the **video itself** + P1
+  critical path (R1 → R3 → R4 → R5) is complete; what remains is the **video** (R5-video) + P1
   (monetize/distribute) and P2 (compliance/polish).
+- ⬜ ⭐ **R5-video · Record the Actual Budget before/after governance video** — the YC-defining
+  artifact (non-code). A <2-min screen recording: an on-device agent driving Actual Budget through
+  kriya — routine actions run + are signed, money-moving ones blocked pending in-app approval, every
+  receipt verifiable offline. Named repeatedly (D-010, PRODUCT_GAPS, the 2026-06-21 roadmap
+  validation) as the single highest-leverage next artifact and the one-glance proof a cloud sidecar /
+  Copilot / Scout can't replicate (a no-cloud-API app governed **in-process**). Tracked here so it
+  stops hiding inside done-R5.
 
-## P0.5 — Cross-shell parity (harden the Electron/Node leg)
+## P0.5 — Cross-shell parity — ✅ COMPLETE (R14 / R15 / R16 shipped, `93c5a67`)
 
 > **Why a 0.5 tier (added 2026-06-16).** The thesis (D-009) rests on the in-process layer working
 > in Tauri **and** Electron **and** plain Node. Of the three transports, the **embedded sidecar
@@ -52,9 +60,11 @@ matters until this path is walked.
 
 > **Repo split (D-011 / [LICENSING.md](LICENSING.md)):** R6 → 🔒 private **`kriya-console`** (Proprietary/ARR). R2 = 🌐 public (done).
 
-- ⬜ **R6 · Governance dashboard (the paid surface).** Cross-app/agent audit viewer, in-app policy
-  editor, approval routing for multiple pending approvals, budget controls. Open-core
-  monetization; leans on the audit/budget/approval/policy work already shipped.
+- 🟡 **R6 · Governance dashboard (the paid surface)** — in progress in 🔒 private `kriya-console`:
+  the cross-app/agent audit viewer, org policy editor, and multi-approval routing are built; remaining
+  is in-dashboard budget controls + per-user dashboards. (The D-011 split keeps the build invisible to
+  this public repo — only this public status marker was stale at ⬜.) Open-core monetization; leans on
+  the audit/budget/approval/policy primitives this repo ships.
 - ✅ **R2 · Publish packages** — **done 2026-06-15** (planner ran it). All four npm packages are
   live (`kriya-core` 0.0.1, `kriya-sidecar` 0.0.1, `kriya-inspector` 0.3.0, `create-kriya-app`
   0.2.0) and the `kriya` crate is on crates.io (0.1.0); the scaffolder template already path-swapped
@@ -103,26 +113,17 @@ matters until this path is walked.
   it. The reliability half above is backend-agnostic and helps the on-device backends today.
 - ✅ **R11 · Audit-receipt tamper tests + finish the budget (api-calls/hr cap)** — shipped
   (`44637f5` + `e2ae449`). See **Done** below.
-- ⬜ **R20 · Durable host signing identity + tamper-evident log chaining** (🌐 public). Closes the two
-  honest limitations in [SECURITY.md](SECURITY.md): (1) the signing key is currently **ephemeral**
-  (`rand::random()` per host process, not persisted) — persist a host identity key (optionally
-  OS-keychain / hardware-backed) so the audit trust anchor is **stable across runs**, not per-session;
-  (2) receipts are independently signed, so **whole-receipt deletion/truncation isn't detectable** —
-  hash-chain each receipt to its predecessor (+ optional external anchoring) so a complete-log
-  guarantee is possible. Turns "no retained receipt was altered" into "the log is complete and the
-  signer is permanent" — the cross-month compliance story R7's evidence export leans on. Surfaced
-  while documenting the crypto in this session (2026-06-19).
-- ⬜ **R21 · Deterministic canonical receipt serialisation** (🌐 public). Today the signed canonical
-  bytes rely on `serde_json` emitting `params` object keys in sorted order — true only because the
-  `preserve_order` feature is **not** enabled in the current builds. A downstream dependency unifying
-  that feature would silently reorder keys and break cross-verifier reproducibility (the offline
-  `tools/verify-receipts` and the console TS verifier each re-derive the signed bytes independently;
-  see [SECURITY.md](SECURITY.md) §"The cryptography"). **Fix:** perform an *explicit recursive
-  key-sort* in `crates/kriya/src/audit.rs::record()` before signing, and apply the identical sort in
-  `tools/verify-receipts` (and the console verifier), so the canonical bytes are independent of any
-  consumer's `serde_json` feature flags. Low-effort, additive, no wire-format change. Hardens the
-  audit trail and the sufficiency of the patent's canonicalisation claim (claim 8). Surfaced during
-  the patent-draft revalidation (2026-06-20); pairs with R20 (audit hardening) and R11 (tamper tests).
+- ✅ **R20 · Durable host signing identity + tamper-evident log chaining** (🌐 public) — shipped
+  (`26f750c` + `2163b10`). See **Done** below. Closed both [SECURITY.md](SECURITY.md) limitations:
+  a persisted host key (`--signing-key`, stable across runs) **and** hash-chaining each receipt to its
+  predecessor (deletion/truncation/reorder now detectable). The roadmap-validation (2026-06-21) named
+  this the highest-leverage on-theme build — the AGT-differentiating half a free cloud audit sidecar
+  can't hand you (an in-process *complete-log* guarantee).
+- ✅ **R21 · Deterministic canonical receipt serialisation** (🌐 public) — shipped (`b51370f`). See
+  **Done** below. Explicit recursive key-sort of `params` before signing (in `audit.rs::record()`)
+  and the identical sort in `tools/verify-receipts`, so the canonical bytes are independent of any
+  consumer's `serde_json` `preserve_order` flag. Byte-identical today; hardens the audit trail + the
+  patent's canonicalisation claim.
 
 ## P3 — Ecosystem reach (after the paid surface is proven; pull forward with a design partner)
 
@@ -202,6 +203,26 @@ matters until this path is walked.
   retry-then-recover, always-fail → clean done); 88 crate tests, clippy clean. **Explicitly NOT
   built: the OpenAI cloud inference backend** — off the on-device wedge (D-009), demand-pulled/demoted
   (a cloud backend cuts against the thesis-critical on-device path). R10 stays 🟡, not ✅.
+- ✅ **R20 · Durable host signing identity + tamper-evident log chaining** — `26f750c` (durable
+  identity) + `2163b10` (hash-chaining). **(1)** `Signer::with_identity(key_path, log_path)` persists
+  the Ed25519 seed (`0600` hex, loaded-if-present, error-not-overwrite), exposed as `kriya-host
+  --signing-key` — a trust anchor stable across runs (proven: two host processes, one key →
+  byte-identical `public_key`). **(2)** each receipt carries `prev_hash` = SHA-256 of the previous
+  *line* (signed, `skip_if_none` so genesis/pre-R20 receipts are byte-identical); the `Signer` holds
+  the chain head, seeds it from the log's last line so a new process continues the chain, and holds
+  the write lock so on-disk order == chain order; `verify-receipts` re-checks the chain and flags
+  deletion/reorder/head-truncation (exit 1). Proven end-to-end: host signed a 3-receipt chain →
+  verifier passed → deleting the middle receipt → `CHAIN-BREAK`. 82 crate + 9 verifier tests; clippy
+  clean. The on-device *complete-log* guarantee a cloud audit sidecar (e.g. MS Agent Governance
+  Toolkit) structurally can't produce.
+- ✅ **R21 · Deterministic canonical receipt serialisation** — `b51370f`. Explicit recursive key-sort
+  of `params` before signing (`audit.rs::canonical_value`) + the identical sort in `tools/verify-receipts`,
+  so the signed bytes don't depend on any build's serde_json `preserve_order` feature. Byte-identical
+  today (cross-checked: Python binding drove the host → a sorted-params receipt the standalone
+  verifier validated). Hardens the audit trail + the patent's canonicalisation claim. 15 audit tests.
+- ✅ **Positioning essay in-repo** — `0c3cf24`. [docs/THREE-FRONTIERS.md](THREE-FRONTIERS.md): the
+  canonical "three frontiers of agent-meets-software" essay (web→WebMCP, cloud→MCP, desktop/local→
+  nothing) so the project's *why* is readable from a fresh clone and anchored to the wedge (D-009).
 - ✅ **R11 · Audit-receipt tamper tests + finish the budget (api-calls/hr cap)** — `44637f5`
   (budget) + `e2ae449` (tamper tests). **Budget battery complete:** a second, independent
   trailing-hour cap on inference/API calls (`budget.max_api_calls_per_hour`) bounds model *cost*,
