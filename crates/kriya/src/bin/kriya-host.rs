@@ -7,7 +7,7 @@
 //! `kriya::sidecar`; the `kriya-sidecar` npm package is the Node client.
 //!
 //! Usage:
-//!   kriya-host [--policy <policy.yaml>] [--script <script.json>] [--audit-log <path>]
+//!   kriya-host [--policy <policy.yaml>] [--script <script.json>] [--audit-log <path>] [--signing-key <path>]
 //!
 //!   --policy    YAML permission policy (default: safe built-in)
 //!   --script    a JSON array of decisions to replay deterministically (no LLM, no API key) —
@@ -15,6 +15,8 @@
 //!               selected from AGENT_BACKEND (claude-cli | ollama | anthropic), defaulting to
 //!               claude-cli. An explicit AGENT_BACKEND always wins over --script.
 //!   --audit-log path for the signed-receipt JSONL log (default: $TMPDIR/kriya-audit.jsonl)
+//!   --signing-key persist the Ed25519 host identity at this path (0600), loaded if present, so the
+//!               audit trust anchor is STABLE across runs (R20). Default: ephemeral per-process key.
 
 use std::path::{Path, PathBuf};
 use std::process::exit;
@@ -29,12 +31,13 @@ struct Args {
     policy: Option<PathBuf>,
     script: Option<PathBuf>,
     audit_log: Option<PathBuf>,
+    signing_key: Option<PathBuf>,
 }
 
 fn usage_and_exit(msg: &str) -> ! {
     eprintln!("kriya-host: {msg}");
     eprintln!(
-        "usage: kriya-host [--policy <policy.yaml>] [--script <script.json>] [--audit-log <path>]"
+        "usage: kriya-host [--policy <policy.yaml>] [--script <script.json>] [--audit-log <path>] [--signing-key <path>]"
     );
     exit(2);
 }
@@ -43,6 +46,7 @@ fn parse_args() -> Args {
     let mut policy = None;
     let mut script = None;
     let mut audit_log = None;
+    let mut signing_key = None;
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let mut take = |label: &str| -> String {
@@ -52,11 +56,12 @@ fn parse_args() -> Args {
             "--policy" => policy = Some(PathBuf::from(take("--policy"))),
             "--script" => script = Some(PathBuf::from(take("--script"))),
             "--audit-log" => audit_log = Some(PathBuf::from(take("--audit-log"))),
+            "--signing-key" => signing_key = Some(PathBuf::from(take("--signing-key"))),
             "-h" | "--help" => usage_and_exit("help"),
             other => usage_and_exit(&format!("unknown argument: {other}")),
         }
     }
-    Args { policy, script, audit_log }
+    Args { policy, script, audit_log, signing_key }
 }
 
 fn main() -> std::io::Result<()> {
@@ -66,9 +71,17 @@ fn main() -> std::io::Result<()> {
         Some(p) => Policy::load_or_default(p),
         None => Policy::default(),
     };
-    let signer = Arc::new(match &args.audit_log {
-        Some(p) => Signer::with_log_path(p.clone()),
-        None => Signer::new(),
+    // Resolve the audit-log path once; both the ephemeral and durable-identity signers append here.
+    let log_path = args
+        .audit_log
+        .clone()
+        .unwrap_or_else(|| std::env::temp_dir().join("kriya-audit.jsonl"));
+    let signer = Arc::new(match &args.signing_key {
+        // Durable host identity (R20): a stable public key across runs, persisted at this path.
+        Some(key) => Signer::with_identity(key, log_path)
+            .unwrap_or_else(|e| usage_and_exit(&format!("--signing-key: {e}"))),
+        // Default: an ephemeral per-process key (fine for demos/CI/single sessions).
+        None => Signer::with_log_path(log_path),
     });
 
     // Validate the script once up front so a typo fails loudly at startup, not mid-run.

@@ -6,7 +6,7 @@ use ed25519_dalek::{Signer as _, SigningKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Identity of *who* took an action: the agent that proposed it and the human/operator
 /// on whose behalf it ran. Carried **inside** the signed receipt so attribution is
@@ -99,6 +99,19 @@ impl Signer {
         Self { key, public_hex, log_path }
     }
 
+    /// Mint a signer whose Ed25519 identity is **persisted** at `key_path` — loaded if present,
+    /// else generated and written (0600 on Unix). Unlike [`Signer::new`] / [`Signer::with_log_path`]
+    /// (which mint an *ephemeral* per-process key), this gives a **stable trust anchor across runs**
+    /// (R20): the public key an auditor pins stays the same deployment-to-deployment, so the audit
+    /// trail is verifiable over months, not just within one session. Errors if the key file exists
+    /// but is unreadable/invalid — a signing identity is never silently overwritten.
+    pub fn with_identity(key_path: &Path, log_path: PathBuf) -> Result<Self, String> {
+        let seed = load_or_create_seed(key_path)?;
+        let key = SigningKey::from_bytes(&seed);
+        let public_hex = hex::encode(key.verifying_key().to_bytes());
+        Ok(Self { key, public_hex, log_path })
+    }
+
     pub fn public_key(&self) -> &str {
         &self.public_hex
     }
@@ -142,6 +155,41 @@ pub fn now_ms() -> u128 {
         .map(|d| d.as_millis())
         .unwrap_or(0)
 }
+
+/// Load a 32-byte Ed25519 seed from `path` (lowercase hex), or generate one and persist it there
+/// (creating parent dirs; restricted to 0600 on Unix). An existing-but-invalid key file is an
+/// error, never overwritten — losing a durable signing identity must be a deliberate act, not a
+/// side effect of a typo'd path (R20).
+fn load_or_create_seed(path: &Path) -> Result<[u8; 32], String> {
+    if path.exists() {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("reading signing key {}: {e}", path.display()))?;
+        let bytes = hex::decode(text.trim())
+            .map_err(|e| format!("signing key {} is not valid hex: {e}", path.display()))?;
+        return bytes
+            .try_into()
+            .map_err(|_| format!("signing key {} must be 32 bytes (64 hex chars)", path.display()));
+    }
+    let seed: [u8; 32] = rand::random();
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("creating key dir {}: {e}", parent.display()))?;
+        }
+    }
+    std::fs::write(path, hex::encode(seed))
+        .map_err(|e| format!("writing signing key {}: {e}", path.display()))?;
+    restrict_perms(path);
+    Ok(seed)
+}
+
+#[cfg(unix)]
+fn restrict_perms(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+}
+#[cfg(not(unix))]
+fn restrict_perms(_path: &Path) {}
 
 /// Recursively sort object keys in a JSON value so its serialization is deterministic regardless of
 /// serde_json's `preserve_order` feature (R21). Applied to receipt `params` before signing so the
@@ -378,5 +426,39 @@ mod tests {
         assert!(verifies(&signed), "canonicalized receipt must verify");
         let serialized = serde_json::to_string(&signed.receipt.params).unwrap();
         assert_eq!(serialized, r#"{"a":{"b":3,"y":2},"m":[{"p":2,"q":1}],"z":1}"#);
+    }
+
+    #[test]
+    fn durable_identity_is_stable_across_runs() {
+        // R20: a persisted key means the public identity an auditor pins stays the same run-to-run,
+        // unlike the ephemeral with_log_path key. Two signers loading the same key file match.
+        let dir = std::env::temp_dir().join(format!("kriya-r20a-{}", uuid::Uuid::new_v4()));
+        let key = dir.join("signing.key");
+        let log = dir.join("audit.jsonl");
+
+        let s1 = Signer::with_identity(&key, log.clone()).expect("mint identity");
+        let pk1 = s1.public_key().to_string();
+        let s2 = Signer::with_identity(&key, log.clone()).expect("reload identity");
+        assert_eq!(pk1, s2.public_key(), "persisted identity must be stable across runs");
+
+        let signed = s1.record(Receipt::new("s".into(), "a".into(), json!({}), true, 1));
+        assert!(verifies(&signed), "durable-key receipt must verify");
+        assert_eq!(std::fs::read_to_string(&key).unwrap().trim().len(), 64, "key persists as 64 hex");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn corrupt_key_file_is_an_error_not_overwritten() {
+        let dir = std::env::temp_dir().join(format!("kriya-r20a-bad-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = dir.join("signing.key");
+        std::fs::write(&key, "not-valid-hex").unwrap();
+        assert!(
+            Signer::with_identity(&key, dir.join("a.jsonl")).is_err(),
+            "an invalid key file must error, not be silently regenerated"
+        );
+        assert_eq!(std::fs::read_to_string(&key).unwrap(), "not-valid-hex", "key left untouched");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
