@@ -60,6 +60,7 @@ pub mod permissions;
 pub mod protocol;
 pub mod sidecar;
 
+pub use agent::inference::retry::{RetryExhausted, RetryPolicy};
 pub use agent::inference::{
     select_backend_with_default, Inference, NetworkProfile, StepContext, StepDecision, StepRecord,
 };
