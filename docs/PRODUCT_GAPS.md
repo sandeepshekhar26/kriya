@@ -220,10 +220,10 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
 
 ## 7. Product / business
 - 🟡 **Governance dashboard** (`R6`, **P1**, the paid surface) — in progress in 🔒 private
-  `kriya-console`: cross-app/agent audit viewer, org policy editor, multi-approval routing built;
-  remaining is in-dashboard budget controls + per-user dashboards. Open-core monetization; builds on
-  the audit/budget/approval/policy primitives this repo ships. (D-011 keeps the build private; only
-  the public status marker was stale.)
+  `kriya-console`: cross-app/agent audit viewer, org policy editor, multi-approval routing, live
+  budget controls, and per-user/agent + RBAC dashboards built; the remaining surface is hosted-tier
+  (SSO/OIDC sign-in). Open-core monetization; builds on the audit/budget/approval/policy primitives
+  this repo ships. (D-011 keeps the build private.)
 - ⬜ **Compliance-evidence export** (`R7`, **P2**) — audit log → SOC 2 / ISO 42001 / EU AI Act
   artifacts. Willingness-to-pay hook (EU AI Act enforcement opens Aug 2026).
 - ⬜ **Agent + user identity per action** (`R8`, **P2**).
