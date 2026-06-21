@@ -38,7 +38,8 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
 ## 2. Agent runtime (Rust host)
 - ✅ Step loop, swappable `Inference` trait, deterministic + claude-cli backends
 - 🟡 Real inference backends: Ollama (HTTP) + Anthropic API added behind the trait
-  (compile-verified; live runs pending a local model / API key). OpenAI still ⬜.
+  (compile-verified; live runs pending a local model / API key). **OpenAI cloud backend
+  deliberately deferred** (R10 split) — off the on-device wedge (D-009), demand-pulled/demoted.
   **The local/on-device path (ollama, claude-cli) is now thesis-critical** — regulated apps
   can't use cloud agents. ✅ **On-device guarantee shipped (R13, `64b340f`)**: backends declare a
   `NetworkProfile`, and a sealed policy (`on_device: true`) refuses an egressing backend +
@@ -62,7 +63,18 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
   prior run's unresolved approvals, re-checks policy, and **re-issues** (re-requests
   + re-dispatches) each held action instead of skipping it. note-app has a "Resume
   last task" button. 64 crate tests (incl. a seeded-crash resume test); clippy clean.
-- ⬜ Retry/backoff, graceful "this is too hard → escalate to frontier model" fallback
+- ✅ **Retry/backoff + graceful escalation (R10 reliability half, `feat/r10-reliability`).** A new
+  `inference::retry` unit wraps the host loop's `backend.next_step()` (was a bare `?`) in **bounded
+  retry with exponential backoff**, so a *transient* backend error (network blip, rate-limit, parse
+  hiccup) is retried instead of failing the whole run; retry count/backoff are configurable via an
+  optional `retry:` policy section (default 3 retries / 250ms→5s). Past the budget the host **escalates
+  by ending the run gracefully** — a descriptive `AgentDone` + error log, never a hang or panic (the
+  degrade-cleanly behavior a regulated workstation host needs). **Deterministic/scripted backends never
+  error → zero behavior change.** 8 new tests (5 retry-unit + 1 policy-parse + 2 end-to-end host);
+  88 crate tests, clippy clean. ⬜ **The OpenAI cloud inference backend was deliberately NOT built** —
+  it is off the on-device wedge (D-009) and explicitly demand-pulled/demoted; the reliability layer is
+  backend-agnostic and helps the on-device backends (Ollama, claude-cli) today. "Escalate to a frontier
+  model" remains a future, design-partner-gated extension on top of this clean-escalation seam.
 - ⬜ Multi-agent orchestration (concurrent agents per app)
 - ✅ Separate-process agent host (don't share the app's main thread) — **shipped as the R3
   sidecar host** (`8b3a8c2`). `run_task` is now transport-agnostic behind a `HostSink` trait;

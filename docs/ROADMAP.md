@@ -86,7 +86,21 @@ matters until this path is walked.
   `1a37038`). See **Done** below. Pending approvals are now persisted durably; a run interrupted
   mid-approval re-issues the held action on resume instead of dropping it, and note-app has a
   "Resume last task" button.
-- ⬜ **R10 · OpenAI inference backend + retry/backoff + frontier-escalation fallback.**
+- 🟡 **R10 · Reliability (retry/backoff + clean escalation) — shipped; OpenAI cloud backend deferred.**
+  A roadmap-validation split this item in two and built only the **on-thesis reliability half**.
+  ✅ **Shipped (`feat/r10-reliability`):** bounded retry/backoff around `backend.next_step()` in the
+  host loop (configurable `retry:` policy — `max_retries`/`initial_backoff_ms`/`max_backoff_ms`,
+  default 3 retries / 250ms→5s) so a *transient* backend error (network blip, rate-limit, parse
+  hiccup) is retried instead of failing the whole run; and a **"too-hard → escalate/abort cleanly"
+  fallback** — past the retry budget the host ends the run **gracefully** (a descriptive `AgentDone`
+  + error log), never hanging or panicking, the degrade-cleanly behavior a regulated workstation host
+  needs. Deterministic/scripted backends never error → zero behavior change. New `inference::retry`
+  unit (5 tests) + a `retry:` policy-parse test + two end-to-end host tests (retry-then-recover,
+  always-fail → clean done). 88 crate tests, clippy clean.
+  ⬜ **Deliberately NOT built — the OpenAI cloud inference backend.** It is **off the on-device wedge**
+  (D-009): a cloud backend cuts against the thesis-critical on-device inference path (Ollama,
+  claude-cli). **Explicitly demand-pulled/demoted** — build only if a concrete design partner needs
+  it. The reliability half above is backend-agnostic and helps the on-device backends today.
 - ✅ **R11 · Audit-receipt tamper tests + finish the budget (api-calls/hr cap)** — shipped
   (`44637f5` + `e2ae449`). See **Done** below.
 - ⬜ **R20 · Durable host signing identity + tamper-evident log chaining** (🌐 public). Closes the two
@@ -175,6 +189,19 @@ matters until this path is walked.
 
 ## Done (newest first)
 
+- 🟡 **R10 (reliability half) · Retry/backoff + clean escalation** — `feat/r10-reliability`. The
+  on-thesis half of R10 (a roadmap validation split the item): a new `inference::retry` unit wraps
+  the host loop's `backend.next_step()` (previously a bare `?`) in **bounded retry with exponential
+  backoff** — a *transient* failure (network blip, rate-limit, parse hiccup) is ridden out instead of
+  killing the run — and past the budget the host **escalates by ending the run gracefully** (a
+  descriptive `AgentDone` + error log; never a hang or panic — the degrade-cleanly behavior a
+  regulated workstation needs). Retry count/backoff are configurable via an optional `retry:` policy
+  section (default 3 retries / 250ms→5s). Backend-agnostic and helps the on-device backends (Ollama,
+  claude-cli) today. **Deterministic/scripted backends never error → zero behavior change** (all prior
+  host tests untouched). 8 new tests (5 retry-unit + 1 policy-parse + 2 end-to-end host:
+  retry-then-recover, always-fail → clean done); 88 crate tests, clippy clean. **Explicitly NOT
+  built: the OpenAI cloud inference backend** — off the on-device wedge (D-009), demand-pulled/demoted
+  (a cloud backend cuts against the thesis-critical on-device path). R10 stays 🟡, not ✅.
 - ✅ **R11 · Audit-receipt tamper tests + finish the budget (api-calls/hr cap)** — `44637f5`
   (budget) + `e2ae449` (tamper tests). **Budget battery complete:** a second, independent
   trailing-hour cap on inference/API calls (`budget.max_api_calls_per_hour`) bounds model *cost*,
