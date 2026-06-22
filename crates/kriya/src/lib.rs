@@ -64,5 +64,7 @@ pub use agent::inference::retry::{RetryExhausted, RetryPolicy};
 pub use agent::inference::{
     select_backend_with_default, Inference, NetworkProfile, StepContext, StepDecision, StepRecord,
 };
-pub use agent::{run_task, ApprovalMap, HostSink, PendingMap, StepAdvanceMap, TauriSink};
+pub use agent::{
+    run_task, ApprovalMap, GovernedApp, HostSink, PendingMap, SharedBudget, StepAdvanceMap, TauriSink,
+};
 pub use sidecar::{run_sidecar, SharedWriter, StdioSink};

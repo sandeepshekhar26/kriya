@@ -28,6 +28,19 @@ pub type ApprovalMap = Arc<Mutex<std::collections::HashMap<String, Sender<bool>>
 /// Shared registry of step-mode gates awaiting an advance/stop decision.
 pub type StepAdvanceMap = Arc<Mutex<std::collections::HashMap<String, Sender<bool>>>>;
 
+/// A rate budget shared across multiple agent runs in one app (multi-agent governance): the per-app
+/// caps are enforced over the *aggregate* of all agents, not per-agent. `run_task` gives each run
+/// its own; a [`GovernedApp`] shares one across every agent it runs.
+pub type SharedBudget = Arc<Mutex<BudgetTracker>>;
+
+/// Build a fresh shared budget from a policy's caps.
+fn new_budget(policy: &Policy) -> SharedBudget {
+    Arc::new(Mutex::new(
+        BudgetTracker::new(policy.max_actions_per_minute())
+            .with_api_calls_per_hour(policy.max_api_calls_per_hour()),
+    ))
+}
+
 const MAX_STEPS: u32 = 50;
 const RESULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long to wait for a human to approve a held action before treating it as denied.
@@ -235,7 +248,72 @@ pub fn run_task(
     // just without persistent recall/resume. Injected into the inner loop so tests can drive a
     // controlled store.
     let memory = AgentMemory::open(&std::env::temp_dir().join("kriya-memory.db")).ok();
-    run_task_with_memory(sink, pending, approvals, advances, policy, signer, backend, req, memory)
+    let budget = new_budget(&policy);
+    run_task_with_memory(sink, pending, approvals, advances, policy, signer, budget, backend, req, memory)
+}
+
+/// A governed app shared by multiple concurrent agents — **multi-agent governance**. The policy, the
+/// signing identity + audit log, and (the point) the **rate budget** are shared across every agent
+/// run, so N agents collectively can't exceed the app's caps. (`run_task` gives each run its *own*
+/// budget; a `GovernedApp` shares one.) The channel maps are shared too — steps are keyed by unique
+/// ids, so one transport routes every agent's results/approvals through the same maps. Spawn each
+/// `run` on its own thread to drive several agents at once against the one governed surface.
+pub struct GovernedApp {
+    policy: Arc<Policy>,
+    signer: Arc<Signer>,
+    budget: SharedBudget,
+    pending: PendingMap,
+    approvals: ApprovalMap,
+    advances: StepAdvanceMap,
+}
+
+impl GovernedApp {
+    /// Create a governed app with one shared budget derived from the policy's caps.
+    pub fn new(policy: Arc<Policy>, signer: Arc<Signer>) -> Self {
+        let budget = new_budget(&policy);
+        Self {
+            policy,
+            signer,
+            budget,
+            pending: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            approvals: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            advances: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        }
+    }
+
+    /// The shared channel maps, so a transport can route this app's results/approvals/steps back.
+    pub fn pending(&self) -> PendingMap {
+        self.pending.clone()
+    }
+    pub fn approvals(&self) -> ApprovalMap {
+        self.approvals.clone()
+    }
+    pub fn advances(&self) -> StepAdvanceMap {
+        self.advances.clone()
+    }
+
+    /// Run one agent against the shared governance. Safe to call concurrently for multiple agents —
+    /// they share the budget, policy, signer, and audit log.
+    pub fn run(
+        &self,
+        sink: Arc<dyn HostSink>,
+        backend: Box<dyn Inference>,
+        req: AgentStartRequest,
+    ) -> Result<AgentDone, String> {
+        let memory = AgentMemory::open(&std::env::temp_dir().join("kriya-memory.db")).ok();
+        run_task_with_memory(
+            sink,
+            self.pending.clone(),
+            self.approvals.clone(),
+            self.advances.clone(),
+            self.policy.clone(),
+            self.signer.clone(),
+            self.budget.clone(),
+            backend,
+            req,
+            memory,
+        )
+    }
 }
 
 /// The agent loop with an explicit memory store — the testable core. `run_task` opens the default
@@ -248,6 +326,7 @@ fn run_task_with_memory(
     advances: StepAdvanceMap,
     policy: Arc<Policy>,
     signer: Arc<Signer>,
+    budget: SharedBudget,
     mut backend: Box<dyn Inference>,
     req: AgentStartRequest,
     memory: Option<AgentMemory>,
@@ -345,8 +424,6 @@ fn run_task_with_memory(
     let mut state = req.state.clone();
     let mut history: Vec<StepRecord> = Vec::new();
     let mut steps: u32 = 0;
-    let mut budget = BudgetTracker::new(policy.max_actions_per_minute())
-        .with_api_calls_per_hour(policy.max_api_calls_per_hour());
     // How a *transient* backend error is retried before the host gives up on a step (R10).
     let retry_policy = policy.retry_policy();
     // The prior run we resumed from (if any), so we can re-issue its still-pending approvals (R9).
@@ -445,7 +522,7 @@ fn run_task_with_memory(
                     history.push(StepRecord { action_id: p.action_id, params: p.params, success: false });
                     continue;
                 }
-                if let Err(reason) = budget.check_and_record(now_ms()) {
+                if let Err(reason) = budget.lock().unwrap().check_and_record(now_ms()) {
                     let done = AgentDone { summary: format!("Stopped: {reason}."), steps };
                     log(sink, AgentLog::error(format!("{} blocked — {reason}", p.action_id)));
                     sink.emit_done(&done);
@@ -507,7 +584,7 @@ fn run_task_with_memory(
         // API-call budget (cost): cap how often we hit the model per hour, independent of the
         // per-minute action cap. Checked before each inference call so a loop can't run up
         // unbounded backend cost even when it dispatches few (or no) actions.
-        if let Err(reason) = budget.check_and_record_api_call(now_ms()) {
+        if let Err(reason) = budget.lock().unwrap().check_and_record_api_call(now_ms()) {
             let done = AgentDone { summary: format!("Stopped: {reason}."), steps };
             log(sink, AgentLog::error(reason.clone()));
             sink.emit_done(&done);
@@ -628,7 +705,7 @@ fn run_task_with_memory(
         }
 
         // Rate-limit gate: stop a runaway/looping agent before it acts.
-        if let Err(reason) = budget.check_and_record(now_ms()) {
+        if let Err(reason) = budget.lock().unwrap().check_and_record(now_ms()) {
             let done = AgentDone { summary: format!("Stopped: {reason}."), steps };
             log(
                 sink,
@@ -969,13 +1046,15 @@ retry:
         };
 
         let run_mem = AgentMemory::open(&db).unwrap();
+        let policy = Arc::new(Policy::default());
         run_task_with_memory(
             sink.clone(),
             pending,
             approvals,
             advances,
-            Arc::new(Policy::default()),
+            policy.clone(),
             Arc::new(Signer::with_log_path(dir.join("audit.jsonl"))),
+            new_budget(&policy),
             backend,
             req,
             Some(run_mem),
@@ -1341,6 +1420,75 @@ on_device: true
         let events = sink.events.lock().unwrap().clone();
         assert!(events.iter().any(|e| e.starts_with("done:")), "got: {events:?}");
         assert!(events.iter().all(|e| !e.starts_with("action:")), "got: {events:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn governed_app_shares_one_budget_across_agents() {
+        // Multi-agent governance: a 2-actions/minute cap belongs to the *app*, not each agent.
+        // Agent A burns the shared budget; agent B is throttled — proving the cap is enforced over
+        // the aggregate. (If each agent had its own budget, B would get its action through.)
+        let dir = std::env::temp_dir().join(format!("kriya-multiagent-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let policy_path = dir.join("policy.yaml");
+        std::fs::write(
+            &policy_path,
+            "rules:\n  - action: \"*\"\n    allow: true\nbudget:\n  max_actions_per_minute: 2\n",
+        )
+        .unwrap();
+        let policy = Arc::new(Policy::load_or_default(&policy_path));
+        let signer = Arc::new(Signer::with_log_path(dir.join("audit.jsonl")));
+        let app = GovernedApp::new(policy, signer);
+
+        // One sink/transport for the whole app — it shares the app's pending map.
+        let sink = Arc::new(RecordingSink {
+            events: Mutex::new(Vec::new()),
+            pending: app.pending(),
+            reply_state: json!({}),
+        });
+        let agent = |goal: &str, actions: Vec<&str>, id: &str| {
+            let mut steps: Vec<StepDecision> = actions
+                .into_iter()
+                .map(|a| StepDecision::Call {
+                    action_id: a.to_string(),
+                    params: json!({}),
+                    reasoning: String::new(),
+                })
+                .collect();
+            steps.push(StepDecision::Done { summary: goal.into() });
+            (
+                Box::new(ScriptedBackend::new(steps)) as Box<dyn Inference>,
+                AgentStartRequest {
+                    goal: goal.into(),
+                    state: json!({}),
+                    tools: Vec::new(),
+                    resume: false,
+                    step_mode: false,
+                    agent_id: Some(id.into()),
+                    user_id: None,
+                },
+            )
+        };
+
+        // Agent A consumes the full app budget (2 actions).
+        let (backend_a, req_a) = agent("agent a", vec!["create_a1", "create_a2"], "agent-a");
+        let done_a = app.run(sink.clone(), backend_a, req_a).expect("run a");
+        assert_eq!(done_a.steps, 2);
+
+        // Agent B shares the SAME budget — already exhausted this minute, so it's throttled at 0.
+        let (backend_b, req_b) = agent("agent b", vec!["create_b1"], "agent-b");
+        let done_b = app.run(sink.clone(), backend_b, req_b).expect("run b");
+        assert_eq!(done_b.steps, 0, "agent B should be throttled by the shared budget");
+        assert!(done_b.summary.contains("budget exceeded"), "summary: {}", done_b.summary);
+
+        let events = sink.events.lock().unwrap().clone();
+        assert!(events.contains(&"action:create_a1".to_string()), "got: {events:?}");
+        assert!(events.contains(&"action:create_a2".to_string()), "got: {events:?}");
+        assert!(
+            !events.contains(&"action:create_b1".to_string()),
+            "agent B's action must not dispatch — shared budget exhausted: {events:?}"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
