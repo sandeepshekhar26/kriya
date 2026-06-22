@@ -23,13 +23,12 @@ Actual Budget flagship. The one artifact still outstanding is the **video** — 
 - ✅ ⭐ **R5 · THE FLAGSHIP DEMO** — shipped (`24ed278`). See **Done** below. The wedge's
   critical path (R1 → R3 → R4 → R5) is complete; what remains is the **video** (R5-video) + P1
   (monetize/distribute) and P2 (compliance/polish).
-- ⬜ ⭐ **R5-video · Record the Actual Budget before/after governance video** — the YC-defining
-  artifact (non-code). A <2-min screen recording: an on-device agent driving Actual Budget through
-  kriya — routine actions run + are signed, money-moving ones blocked pending in-app approval, every
-  receipt verifiable offline. Named repeatedly (D-010, PRODUCT_GAPS, the 2026-06-21 roadmap
-  validation) as the single highest-leverage next artifact and the one-glance proof a cloud sidecar /
-  Copilot / Scout can't replicate (a no-cloud-API app governed **in-process**). Tracked here so it
-  stops hiding inside done-R5.
+- ✅ ⭐ **R5-video · Actual Budget before/after governance video** — **done**: recorded and published
+  on the site demo page → **[kriyanative.com/#demo](https://kriyanative.com/#demo)**. An on-device
+  agent driving Actual Budget through kriya — routine actions run + are signed, money-moving ones
+  blocked pending in-app approval, every receipt verifiable offline. The one-glance proof a cloud
+  sidecar / Copilot / Scout can't replicate (a no-cloud-API app governed **in-process**). P0 is now
+  fully complete (R1 → R3 → R4 → R5 + the video).
 
 ## P0.5 — Cross-shell parity — ✅ COMPLETE (R14 / R15 / R16 shipped, `93c5a67`)
 
@@ -175,9 +174,11 @@ Actual Budget flagship. The one artifact still outstanding is the **video** — 
 
 ## Launch (after the wedge + publish; gated on planner's go)
 
-- ⬜ **R12 · Launch.** Full plan in **[LAUNCH.md](LAUNCH.md)** — pre-launch checklist (GIF in
-  README, fresh-machine smoke, repo public, CI green), Show HN title + opening comment + objection
-  answers, Twitter thread, timing, distribution order.
+- 🟡 **R12 · Launch.** **YC application submitted** (the launch's first milestone — the
+  demo at [kriyanative.com/#demo](https://kriyanative.com/#demo) is live). Remaining in
+  **[LAUNCH.md](LAUNCH.md)**: the public Show HN / Twitter push (pre-launch checklist — GIF in README,
+  fresh-machine smoke, repo public, CI green — then title + opening comment + thread), on the
+  planner's timing.
 
 ## Explicitly deprioritized / not doing (per research)
 
