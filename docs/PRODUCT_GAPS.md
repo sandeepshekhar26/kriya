@@ -75,7 +75,14 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
   it is off the on-device wedge (D-009) and explicitly demand-pulled/demoted; the reliability layer is
   backend-agnostic and helps the on-device backends (Ollama, claude-cli) today. "Escalate to a frontier
   model" remains a future, design-partner-gated extension on top of this clean-escalation seam.
-- ⬜ Multi-agent orchestration (concurrent agents per app)
+- 🟡 Multi-agent orchestration (concurrent agents per app). ✅ **Shared-governance core shipped
+  (`6dbe7ec`)**: a `GovernedApp` shares one **budget** (and policy, signer, audit log, channel maps)
+  across every agent it runs, so the per-minute/api rate caps are enforced over the *aggregate*, not
+  per-agent — `run_task` stays single-agent (own budget), fully additive. The budget is now a
+  `SharedBudget` (`Arc<Mutex<BudgetTracker>>`); spawn each `GovernedApp::run` on its own thread for
+  concurrency (steps keyed by unique ids → shared maps route correctly). Tested: a 2-actions/min app
+  throttles a second agent once the first exhausts the shared budget. Still ⬜: a *scheduler*
+  (coordinating/prioritising agents) — governance first, orchestration logic later.
 - ✅ Separate-process agent host (don't share the app's main thread) — **shipped as the R3
   sidecar host** (`8b3a8c2`). `run_task` is now transport-agnostic behind a `HostSink` trait;
   the `kriya-host` binary runs the loop as a standalone process over stdio (NDJSON), with
