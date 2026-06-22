@@ -1,7 +1,7 @@
 [package]
 name = "kriya"
 version = "0.1.1"
-description = "Rust agent host for kriya desktop apps — protocol, signed audit, budget, persistent memory, permission policy, swappable inference backends. Pairs with kriya-core."
+description = "MCP for Desktop — Rust agent host for kriya desktop apps — protocol, signed audit, budget, persistent memory, permission policy, swappable inference backends. Pairs with kriya-core."
 license = "MIT"
 edition = "2021"
 rust-version = "1.77"

@@ -1,6 +1,6 @@
 # create-kriya-app
 
-Scaffold a new local-first agent app — built on [**kriya**](https://github.com/sandeepshekhar26/kriya),
+Scaffold a new local-first agent app — built on [**kriya**](https://github.com/sandeepshekhar26/kriya) (MCP for Desktop),
 the governed runtime that lets an AI agent safely drive a desktop app — in one command.
 
 ```bash

@@ -1,6 +1,6 @@
 # kriya-inspector
 
-Drop-in React inspector for [**kriya**](https://github.com/sandeepshekhar26/kriya) apps — watch an
+Drop-in React inspector for [**kriya**](https://github.com/sandeepshekhar26/kriya) (MCP for Desktop) apps — watch an
 agent drive your app, approve guarded actions, and replay past runs. Same look-and-feel across
 every app on the framework: every developer who picks up `kriya-core` gets the same
 debugging surface.

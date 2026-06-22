@@ -1,7 +1,7 @@
 {
   "name": "kriya-core",
   "version": "0.0.2",
-  "description": "Action registry + agent loop protocol for kriya desktop apps. Agents see your app's typed actions, not pixels.",
+  "description": "MCP for Desktop — action registry + agent loop protocol for kriya desktop apps. Agents see your app's typed actions, not pixels.",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",

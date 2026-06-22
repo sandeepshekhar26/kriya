@@ -1,4 +1,4 @@
-# kriya (Python)
+# kriya (Python) — MCP for Desktop
 
 > **The governed in-process action layer for Python apps.** Your app's capabilities become typed
 > **actions** an AI agent calls directly — through permission → human approval → budget → a signed

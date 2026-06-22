@@ -1,6 +1,6 @@
 # kriya-core
 
-The TypeScript SDK for [**kriya**](https://github.com/sandeepshekhar26/kriya) — the governed runtime
+The TypeScript SDK for [**kriya**](https://github.com/sandeepshekhar26/kriya) (MCP for Desktop) — the governed runtime
 that lets an AI agent safely drive a desktop app. Declare your app's affordances once as typed,
 permission-scoped **actions**; an agent calls them directly (over MCP), and the host gates every
 call. No vision, no screenshots, no DOM selectors.

@@ -1,6 +1,6 @@
 # kriya
 
-The Rust agent host behind [**kriya**](https://github.com/sandeepshekhar26/kriya) — the **governed
+The Rust agent host behind [**kriya**](https://github.com/sandeepshekhar26/kriya) (MCP for Desktop) — the **governed
 runtime** that lets an AI agent safely drive a desktop app. It turns a goal + a registry of typed
 actions into a permission-checked, budget-bounded, human-approvable, **cryptographically audited**
 sequence of action calls — and exposes that same governance to external agents over MCP.
