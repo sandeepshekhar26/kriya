@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="Kriya.Tests/Kriya.Tests.csproj" />
+  <Project Path="Kriya/Kriya.csproj" />
+</Solution>

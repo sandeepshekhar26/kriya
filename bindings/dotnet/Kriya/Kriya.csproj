@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- net8.0 = LTS, the regulated Windows-desktop ICP; net10.0 so it builds + tests on the
+         latest SDK here. Forward-compatible: net8 assemblies run on the net10 runtime. -->
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Kriya</AssemblyName>
+    <RootNamespace>Kriya</RootNamespace>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+
+    <!-- NuGet metadata (the planner runs the publish — D-004) -->
+    <PackageId>Kriya</PackageId>
+    <Version>0.0.1</Version>
+    <Authors>Sandeep Kumar</Authors>
+    <Description>The .NET binding of kriya — a governed in-process action layer for desktop apps. Register or wrap your app's real typed actions; an AI agent drives them through permission, human approval, budget, and a signed audit trail, on-device, over the kriya-host stdio protocol.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageTags>ai-agent;mcp;agent;governance;desktop;wpf;winforms;avalonia;kriya</PackageTags>
+    <RepositoryUrl>https://github.com/sandeepshekhar26/kriya</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/sandeepshekhar26/kriya</PackageProjectUrl>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Kriya.Tests" />
+  </ItemGroup>
+
+</Project>
