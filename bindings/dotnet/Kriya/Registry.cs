@@ -43,7 +43,7 @@ public sealed class Registry
         string id,
         string description,
         Handler handler,
-        IDictionary<string, ParameterSchema>? parameters = null,
+        Dictionary<string, ParameterSchema>? parameters = null,
         IEnumerable<string>? permissions = null,
         int version = 1)
     {
@@ -72,7 +72,7 @@ public sealed class Registry
         Func<object?[], object?> fn,
         string id,
         string description,
-        IDictionary<string, ParameterSchema>? parameters = null,
+        Dictionary<string, ParameterSchema>? parameters = null,
         IEnumerable<string>? permissions = null,
         int version = 1,
         Func<JsonObject, object?[]>? mapParams = null,
