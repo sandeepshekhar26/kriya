@@ -152,16 +152,21 @@ Actual Budget flagship. The one artifact still outstanding is the **video** — 
   ahead of R6/R7 this session as a deliberate "stay-ahead / breadth" build, not a design-partner
   trigger.* The near-term CAD demo (**JSCAD / Replicad**) is **JS/TS already** and needs none of this.
 
-- ⬜ **R18 · C#/.NET SDK binding** ⭐ (🌐 public, MIT) — *the #1 second binding after Python
-  ([D-012](DECISIONS.md))*. A `registerAction`/`wrapAction` mirror shipped on **NuGet** that speaks the
-  same stdio/NDJSON protocol to `kriya-host`, with a **WPF or WinForms** sample. Unlocks the largest
-  and highest-willingness-to-pay slab of the ICP: regulated/LOB **Windows desktop** (health, finance,
-  manufacturing HMIs, gov), plus the SolidWorks/Revit/Unity add-in world (also C#). The only existing
-  .NET desktop MCP path today is **accessibility-tree scraping**; **Windows 11's On-Device Agent
-  Registry is actively pushing every local app toward typed, signed, on-device MCP** — creating demand
-  while leaving the governance batteries (in-app approval, budget, signed audit, memory) for kriya to
-  own. Low-effort binding (clean NuGet + stdio child process, no FFI). **Pull forward the instant a
-  concrete .NET desktop design partner appears.**
+- 🟡 **R18 · C#/.NET SDK binding** ⭐ (🌐 public, MIT) — **binding shipped & verified** (`fa61b0a` +
+  `9380299`); the marquee third-party bolt-on is the remaining flagship piece. Built **without** a
+  design partner (planner's call, 2026-06-22) as the #1 second binding after Python
+  ([D-012](DECISIONS.md)). `bindings/dotnet/` is a faithful port of the verified Python binding —
+  `Registry` (RegisterAction/WrapAction, validation, composition, MCP/JSON-Schema), `Protocol`,
+  `Host` (spawn kriya-host over stdio, RunTask, RecentMemoryAsync); targets **net8.0** (LTS — the
+  regulated Windows-desktop ICP) + net10.0. **25 tests** incl. an integration test driving the real
+  `kriya-host` binary, plus a runnable console example (the macOS parallel of node-sidecar-host).
+  NuGet metadata staged (publish is the planner's, [D-004](DECISIONS.md)). **Still ⬜ — the
+  third-party bolt-on demo:** the 2026-06-22 target-research workflow's top pick (Mnemo, Avalonia)
+  was disqualified by its own adversarial-verify phase — it shipped an enabled-by-default in-process
+  **MCP server** + adopted an external agent permission framework *that day*, so it's no longer
+  Kriya-Prime. No clean high-stars + cross-platform + non-MCP target surfaced; the finance runner-up
+  **MyMoney.Net** (WPF, the .NET Actual-Budget parallel) is the strongest narrative target but is
+  Windows-only → do that bolt-on on Windows, or keep watching for a cross-platform one.
 - ⬜ **R19 · Java/Kotlin (JVM) SDK binding** (🌐 public, MIT) — one binding (Java, usable from
   Kotlin/Scala) on **Maven Central**, with a Swing or JavaFX sample. Captures the JVM half of
   regulated enterprise desktop (EU public sector, banks, hospitals, industrial control dashboards) —
@@ -192,6 +197,17 @@ Actual Budget flagship. The one artifact still outstanding is the **video** — 
 
 ## Done (newest first)
 
+- 🟡 **R18 (binding) · C#/.NET SDK binding** — `fa61b0a` (binding + 25 tests) + `9380299` (runnable
+  example). The .NET binding of kriya: `bindings/dotnet/` — `Registry` (RegisterAction/WrapAction,
+  validation, composition, MCP/JSON-Schema tool schemas), `Protocol` (camelCase NDJSON wire), `Host`
+  (spawn `kriya-host` over stdio, `RunTask`, `RecentMemoryAsync`), typed `P.*` parameter schemas.
+  A faithful C# port of the verified Python binding — a *second binding, not a new host*. net8.0
+  (LTS) + net10.0. Verified end-to-end: 25 tests (registry/validation/json-schema/host-framing) +
+  an integration test driving the **real** `kriya-host` (action → approval → memory recall), + a
+  runnable console example (the macOS parallel of `node-sidecar-host`) — proven live on macOS.
+  Built without a design partner (planner's call). Remaining flagship: the third-party bolt-on
+  (research disqualified Mnemo — went MCP-native; MyMoney.Net is the Windows finance fallback).
+  NuGet publish staged (planner, [D-004](DECISIONS.md)).
 - 🟡 **R10 (reliability half) · Retry/backoff + clean escalation** — `feat/r10-reliability`. The
   on-thesis half of R10 (a roadmap validation split the item): a new `inference::retry` unit wraps
   the host loop's `backend.next_step()` (previously a bare `?`) in **bounded retry with exponential

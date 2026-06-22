@@ -215,6 +215,14 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
   runnable example. The first non-JS language on the in-process layer — *a second binding, not a new
   host* — and the `bindings/` convention for **R18 (.NET)** / **R19 (JVM)** (decision [D-012]). Async
   handlers are the only follow-up (handlers run on the host reader thread today).
+- 🟡 **.NET SDK binding** (`R18`, **P3**, `fa61b0a` + `9380299`) — [`bindings/dotnet/`](../bindings/dotnet/):
+  the C# port (`Registry` RegisterAction/WrapAction + validation + composition + MCP/JSON-Schema;
+  `Host` spawn-kriya-host/RunTask/RecentMemoryAsync; `P.*` schemas), net8.0 (LTS, regulated
+  Windows-desktop ICP) + net10.0, NuGet metadata staged. 25 tests incl. a real-`kriya-host`
+  integration test + a runnable console example (macOS-verified). Built without a design partner.
+  Remaining: the third-party flagship bolt-on (target research disqualified Mnemo — it went
+  MCP-native; MyMoney.Net is the Windows finance fallback). A WPF/WinForms/Avalonia GUI sample is the
+  other follow-up.
 - ❌ Mobile (Flutter, SwiftUI, Jetpack Compose) — **deprioritized** (premature).
 - ❌ Web framework bindings (Vue/Svelte for web) — **not doing** (don't fight WebMCP).
 - 🟡 Reference apps beyond notes: **task manager ✅** (apps/task-manager — six
