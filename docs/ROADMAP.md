@@ -165,8 +165,12 @@ Actual Budget flagship. The one artifact still outstanding is the **video** — 
   was disqualified by its own adversarial-verify phase — it shipped an enabled-by-default in-process
   **MCP server** + adopted an external agent permission framework *that day*, so it's no longer
   Kriya-Prime. No clean high-stars + cross-platform + non-MCP target surfaced; the finance runner-up
-  **MyMoney.Net** (WPF, the .NET Actual-Budget parallel) is the strongest narrative target but is
-  Windows-only → do that bolt-on on Windows, or keep watching for a cross-platform one.
+  **MyMoney.Net** (WPF, the .NET Actual-Budget parallel) was chosen as the strongest narrative target.
+  The bolt-on is **staged at [`examples/mymoney-dotnet-bolt-on/`](../examples/mymoney-dotnet-bolt-on/)**
+  (`f904de8`) — drop-in `WrapAction` code (categorize/list free; delete/transfer/close → approval) +
+  `agent-policy.yaml`, source-only. WPF is Windows-only, so **build + record it on Windows** and
+  confirm the `⚠️ API` signatures against the checkout; the binding it builds on is verified
+  cross-platform.
 - ⬜ **R19 · Java/Kotlin (JVM) SDK binding** (🌐 public, MIT) — one binding (Java, usable from
   Kotlin/Scala) on **Maven Central**, with a Swing or JavaFX sample. Captures the JVM half of
   regulated enterprise desktop (EU public sector, banks, hospitals, industrial control dashboards) —
