@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "kriya"
 dynamic = ["version"]
-description = "The governed in-process action layer for Python apps — agents drive your app through typed, permissioned, audited actions, not pixels."
+description = "MCP for Desktop — the governed in-process action layer for Python apps — agents drive your app through typed, permissioned, audited actions, not pixels."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }

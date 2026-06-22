@@ -1,7 +1,7 @@
 {
   "name": "kriya-sidecar",
   "version": "0.0.2",
-  "description": "Host the kriya agent runtime from Electron or plain Node — spawn the kriya-host sidecar and drive governed agent runs over stdio.",
+  "description": "MCP for Desktop — host the kriya agent runtime from Electron or plain Node — spawn the kriya-host sidecar and drive governed agent runs over stdio.",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",

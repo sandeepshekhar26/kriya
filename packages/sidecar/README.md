@@ -1,6 +1,6 @@
 # kriya-sidecar
 
-Host the **kriya** agent runtime from **Electron or plain Node** — not just Tauri.
+Host the **kriya** (MCP for Desktop) agent runtime from **Electron or plain Node** — not just Tauri.
 
 This package spawns the `kriya-host` sidecar (the Rust agent host from
 [`crates/kriya`](../../crates/kriya)) and speaks its newline-delimited

@@ -1,4 +1,4 @@
-# kriya
+# kriya (MCP for Desktop)
 
 > **Build desktop apps that AI agents can understand and operate** — directly, through your app's
 > real typed actions, not by screenshotting the screen and guessing where to click.

@@ -1,7 +1,7 @@
 {
   "name": "kriya-inspector",
   "version": "0.3.0",
-  "description": "Drop-in React inspector for kriya desktop apps — step log, filters, JSONL export, past-runs replay, approval modal, step-mode gate.",
+  "description": "MCP for Desktop — drop-in React inspector for kriya desktop apps — step log, filters, JSONL export, past-runs replay, approval modal, step-mode gate.",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",

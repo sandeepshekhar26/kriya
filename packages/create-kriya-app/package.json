@@ -1,7 +1,7 @@
 {
   "name": "create-kriya-app",
   "version": "0.2.0",
-  "description": "Scaffold a new kriya desktop app (Tauri 2 + Rust agent host + React + kriya-core).",
+  "description": "MCP for Desktop — scaffold a new kriya desktop app (Tauri 2 + Rust agent host + React + kriya-core).",
   "license": "MIT",
   "type": "module",
   "bin": {
