@@ -1,0 +1,27 @@
+# Governance policy for the MyMoney.Net bolt-on — the same shape as the Actual Budget demo.
+# The host (kriya-host) enforces this; the agent can only *propose* actions.
+rules:
+  # Reads + low-stakes edits run freely (still budget-metered + signed).
+  - action: "list_*"
+    allow: true
+  - action: "categorize_transaction"
+    allow: true
+
+  # Destructive / money-moving — pause for an on-device human approval (the visceral beat).
+  - action: "delete_transaction"
+    allow: true
+    require_approval: true
+  - action: "transfer"
+    allow: true
+    require_approval: true
+  - action: "close_account"
+    allow: true
+    require_approval: true
+
+  # Deny-by-default: anything not listed above never reaches a handler.
+  - action: "*"
+    allow: false
+
+budget:
+  max_actions_per_minute: 30      # bursts against the app
+  max_api_calls_per_hour: 500     # model cost (inference calls), independent of the action cap
