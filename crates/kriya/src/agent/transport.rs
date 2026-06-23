@@ -28,16 +28,22 @@ pub trait HostSink: Send + Sync {
 /// A [`HostSink`] backed by a Tauri `AppHandle`. Emits each event on the same channel names
 /// the `kriya-core` SDK already listens for, so existing Tauri apps are unchanged
 /// apart from wrapping their handle in this.
+///
+/// Requires the `tauri-host` feature (on by default). A non-Tauri embedder builds with
+/// `default-features = false` and supplies its own [`HostSink`] (or just uses the MCP server).
+#[cfg(feature = "tauri-host")]
 pub struct TauriSink {
     app: tauri::AppHandle,
 }
 
+#[cfg(feature = "tauri-host")]
 impl TauriSink {
     pub fn new(app: tauri::AppHandle) -> Self {
         Self { app }
     }
 }
 
+#[cfg(feature = "tauri-host")]
 impl HostSink for TauriSink {
     fn emit_action(&self, req: &AgentActionRequest) {
         let _ = tauri::Emitter::emit(&self.app, crate::protocol::EVENT_ACTION, req);

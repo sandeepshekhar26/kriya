@@ -9,8 +9,13 @@
 //! application; the app passes its deterministic as the `default` to
 //! [`select_backend_with_default`].
 
+// The cloud/remote backends pull in the `ureq` HTTP/TLS client, so they sit behind the
+// `http-inference` feature (on by default). With it off, only the on-device backends
+// (deterministic/scripted + the local `claude` CLI) remain.
+#[cfg(feature = "http-inference")]
 pub mod anthropic;
 pub mod claude_cli;
+#[cfg(feature = "http-inference")]
 pub mod ollama;
 pub mod retry;
 pub mod scripted;
@@ -92,7 +97,9 @@ pub trait Inference: Send {
 pub fn select_backend_with_default(default: Box<dyn Inference>) -> Box<dyn Inference> {
     match std::env::var("AGENT_BACKEND").unwrap_or_default().as_str() {
         "claude-cli" | "claude" => Box::new(claude_cli::ClaudeCli::new()),
+        #[cfg(feature = "http-inference")]
         "ollama" => Box::new(ollama::Ollama::new()),
+        #[cfg(feature = "http-inference")]
         "anthropic" => Box::new(anthropic::Anthropic::new()),
         _ => default,
     }
@@ -105,6 +112,7 @@ pub fn select_backend_with_default(default: Box<dyn Inference>) -> Box<dyn Infer
 /// True if `url`'s host is a loopback address, so traffic to it never leaves the machine.
 /// Used by backends that talk to a configurable host (e.g. Ollama) to report an honest
 /// [`NetworkProfile`] — pointing the host at a remote box correctly downgrades the guarantee.
+#[cfg(feature = "http-inference")]
 pub(crate) fn is_loopback_url(url: &str) -> bool {
     let after_scheme = url.split("://").nth(1).unwrap_or(url);
     let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
@@ -263,6 +271,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "http-inference")]
     fn loopback_urls_are_recognized() {
         assert!(is_loopback_url("http://localhost:11434"));
         assert!(is_loopback_url("http://127.0.0.1:11434"));
@@ -281,6 +290,7 @@ mod tests {
         // Deterministic = no network; the cloud backends egress; the local `claude` CLI is
         // convenient but still reaches the cloud, so it is honestly Remote.
         assert_eq!(scripted::ScriptedPlanner::from_decisions(vec![]).network_profile(), NetworkProfile::None);
+        #[cfg(feature = "http-inference")]
         assert_eq!(anthropic::Anthropic::new().network_profile(), NetworkProfile::Remote);
         assert_eq!(claude_cli::ClaudeCli::new().network_profile(), NetworkProfile::Remote);
     }
