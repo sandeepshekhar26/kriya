@@ -37,6 +37,18 @@ http-inference = ["dep:ureq"]
 # new dependencies — the client is std-only (`std::process`, `std::io`) over the existing
 # serde/serde_json. Enables `mcp::client`, `mcp::proxy_executor`, `mcp::proxy_server`.
 mcp-client = []
+# Front 2 — the reach-in adapter (`mcp::reachin`): synthesize a governed MCP server from a running
+# app's OS accessibility tree, for apps with no MCP server and no API. Off by default so the
+# default build stays unchanged and pulls in NO macOS FFI deps. The accessibility-sys +
+# core-foundation crates are macOS-only (target-gated below), so on other platforms this feature
+# compiles only the platform-agnostic core (the AxBackend trait, tool synthesis, AxExecutor,
+# ReachInServer over an injected backend) — the real AX backend is `#[cfg(target_os = "macos")]`.
+reach-in = ["dep:accessibility-sys", "dep:core-foundation"]
+# Front 3 — the computer-use fallback (`mcp::computer_use`): drives a CLEARED tools/call as pixel
+# input via an external "computer-use driver" command, for apps Fronts 1 & 2 can't reach. Deferred /
+# design-partner-gated. Off by default; adds NO dependencies (the heavy CV pipeline lives in the
+# external driver, not in the governed core — this is just the thin ActionExecutor seam).
+computer-use = []
 
 [dependencies]
 tauri = { version = "2", features = [], optional = true }
@@ -50,3 +62,11 @@ sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
 ureq = { version = "2", features = ["json", "tls"], optional = true }
 rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Front 2 (reach-in) macOS-only FFI deps. Target-gated so non-macOS builds of the `reach-in`
+# feature never try to resolve them — `dep:` in the feature still works because Cargo treats an
+# optional dep under any target as feature-activatable; on a non-macOS host the dep is simply
+# absent and the `#[cfg(target_os = "macos")]` backend code is compiled out.
+[target.'cfg(target_os = "macos")'.dependencies]
+accessibility-sys = { version = "0.2", optional = true }
+core-foundation = { version = "0.10", optional = true }
