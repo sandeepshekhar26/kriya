@@ -27,6 +27,10 @@ crates/kriya/Cargo.lock
 docs/DECISIONS.md
 docs/strategy/
 
+# Patent drafts — MUST stay local. Public disclosure before filing destroys novelty
+# (absolute novelty in IN/EU) and starts the US grace clock. Never commit/push.
+docs/patents/
+
 # Demo recording plans (local-only)
 examples/actual-budget-bolt-on/DEMO.md
 examples/actual-budget-bolt-on/REAL-DEMO.md
@@ -38,3 +42,19 @@ examples/replicad-bolt-on/.mcp.json
 
 # CAD geometry exports (output, not source)
 *.stl
+
+# local clones of Kriya integration targets (analysis only, not tracked)
+.integration-targets/
+
+# Python bytecode (doc-tooling scripts)
+__pycache__/
+
+# Local Claude Code config (machine-specific settings)
+.claude/
+
+# Internal / strategic materials — kept local, NOT for the public repo (planner, 2026-06-24).
+brand/
+pitch/
+docs/whitepaper/
+docs/sessions/
+docs/research/

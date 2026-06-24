@@ -91,10 +91,26 @@ impl Default for Policy {
         // Allow writes/creates/edits; deletes need approval; everything else denied.
         Policy {
             rules: vec![
-                Rule { action: "create_*".into(), allow: true, require_approval: false },
-                Rule { action: "edit_*".into(), allow: true, require_approval: false },
-                Rule { action: "delete_*".into(), allow: true, require_approval: true },
-                Rule { action: "*".into(), allow: false, require_approval: false },
+                Rule {
+                    action: "create_*".into(),
+                    allow: true,
+                    require_approval: false,
+                },
+                Rule {
+                    action: "edit_*".into(),
+                    allow: true,
+                    require_approval: false,
+                },
+                Rule {
+                    action: "delete_*".into(),
+                    allow: true,
+                    require_approval: true,
+                },
+                Rule {
+                    action: "*".into(),
+                    allow: false,
+                    require_approval: false,
+                },
             ],
             budget: Budget::default(),
             retry: None,
@@ -125,7 +141,10 @@ impl Policy {
     /// The retry/backoff policy for transient inference failures (R10). Uses the sane default
     /// when no `retry:` section is configured.
     pub fn retry_policy(&self) -> RetryPolicy {
-        self.retry.as_ref().map(RetryConfig::to_policy).unwrap_or_default()
+        self.retry
+            .as_ref()
+            .map(RetryConfig::to_policy)
+            .unwrap_or_default()
     }
 
     /// Whether the on-device guarantee (R13) is in force for this policy.
@@ -201,6 +220,75 @@ fn is_destructive_name(pattern: &str) -> bool {
     KEYWORDS.iter().any(|k| p.contains(k))
 }
 
+/// Read-like action-name prefixes the zero-config gateway policy allows outright. Verb-first
+/// naming is the MCP convention (`get_account`, `list_transactions`), so a prefix match captures
+/// the realistic cases.
+pub const READ_PREFIXES: &[&str] = &[
+    "get_",
+    "list_",
+    "read_",
+    "fetch_",
+    "search_",
+    "query_",
+    "show_",
+    "describe_",
+];
+
+/// Destructive / side-effecting action-name prefixes the zero-config gateway policy gates behind
+/// human approval. Spend/transfer verbs are here too — a cleared agent can read freely but must be
+/// approved before it moves money, sends, or destroys.
+pub const DESTRUCTIVE_PREFIXES: &[&str] = &[
+    "delete", "remove", "destroy", "drop", "purge", "wipe", "close", "transfer", "send", "pay",
+    "archive",
+];
+
+/// The zero-config **default deny-by-default policy** the `kriya-gateway proxy` uses when no
+/// `--policy` file is given (D-016 / service-architecture §7): read-like names allow, destructive /
+/// spend names require human approval, everything else is denied — with a sane per-minute budget so
+/// a runaway agent is capped by the proxy. Built from the in-crate [`Rule`]/[`Budget`] structs so it
+/// reuses the exact [`Policy::check`] matching the in-process host enforces.
+///
+/// Matching note: rules are tried in order and use the existing `prefix*` glob, not substring — so
+/// `delete_transaction` is gated but a downstream that named the same capability `transaction_delete`
+/// would fall through to deny (the safe direction). Operators wanting substring rules pass `--policy`.
+pub fn default_proxy_policy() -> Policy {
+    let mut rules = Vec::new();
+    // Reads first (most permissive, but only for read-shaped names).
+    for p in READ_PREFIXES {
+        rules.push(Rule {
+            action: format!("{p}*"),
+            allow: true,
+            require_approval: false,
+        });
+    }
+    // Destructive / spend names: allowed only after explicit human approval.
+    for p in DESTRUCTIVE_PREFIXES {
+        rules.push(Rule {
+            action: format!("{p}*"),
+            allow: true,
+            require_approval: true,
+        });
+    }
+    // Everything else: deny by default (defense in depth — `check` also denies on no match).
+    rules.push(Rule {
+        action: "*".into(),
+        allow: false,
+        require_approval: false,
+    });
+
+    Policy {
+        rules,
+        // Cap a runaway agent: the proxy IS the handler from the budget's view, so this spans the
+        // whole session's downstream calls.
+        budget: Budget {
+            max_actions_per_minute: Some(60),
+            max_api_calls_per_hour: None,
+        },
+        retry: None,
+        on_device: false,
+    }
+}
+
 fn matches(pattern: &str, action_id: &str) -> bool {
     if pattern == "*" {
         return true;
@@ -240,7 +328,12 @@ budget:
 "#,
         );
         let warns = p.warnings();
-        assert!(warns.iter().any(|w| w.contains("catch-all") && w.contains("defeats")), "got: {warns:?}");
+        assert!(
+            warns
+                .iter()
+                .any(|w| w.contains("catch-all") && w.contains("defeats")),
+            "got: {warns:?}"
+        );
     }
 
     #[test]
@@ -261,7 +354,13 @@ budget:
 "#,
         );
         let warns = p.warnings();
-        assert_eq!(warns.iter().filter(|w| w.contains("destructive-sounding")).count(), 2);
+        assert_eq!(
+            warns
+                .iter()
+                .filter(|w| w.contains("destructive-sounding"))
+                .count(),
+            2
+        );
     }
 
     #[test]
@@ -274,8 +373,16 @@ rules:
 "#,
         );
         let warns = p.warnings();
-        assert!(warns.iter().any(|w| w.contains("no explicit catch-all")), "got: {warns:?}");
-        assert!(warns.iter().any(|w| w.contains("budget.max_actions_per_minute")), "got: {warns:?}");
+        assert!(
+            warns.iter().any(|w| w.contains("no explicit catch-all")),
+            "got: {warns:?}"
+        );
+        assert!(
+            warns
+                .iter()
+                .any(|w| w.contains("budget.max_actions_per_minute")),
+            "got: {warns:?}"
+        );
     }
 
     #[test]
@@ -357,7 +464,11 @@ retry:
         let rp = tuned.retry_policy();
         assert_eq!(rp.max_retries, 5);
         assert_eq!(rp.initial_backoff, Duration::from_millis(100));
-        assert_eq!(rp.max_backoff, Duration::from_secs(5), "unspecified field keeps the default");
+        assert_eq!(
+            rp.max_backoff,
+            Duration::from_secs(5),
+            "unspecified field keeps the default"
+        );
 
         // Fail-fast: explicit zero retries.
         let off = policy_from(
@@ -370,6 +481,29 @@ retry:
 "#,
         );
         assert_eq!(off.retry_policy().max_retries, 0);
+    }
+
+    #[test]
+    fn default_proxy_policy_reads_allow_destructive_approve_else_deny() {
+        let p = default_proxy_policy();
+        // Read-like names allow outright.
+        assert_eq!(p.check("get_account"), Decision::Allow);
+        assert_eq!(p.check("list_transactions"), Decision::Allow);
+        assert_eq!(p.check("search_notes"), Decision::Allow);
+        // Destructive / spend names require human approval.
+        assert_eq!(p.check("delete_transaction"), Decision::RequiresApproval);
+        assert_eq!(p.check("transfer_funds"), Decision::RequiresApproval);
+        assert_eq!(p.check("send_payment"), Decision::RequiresApproval);
+        assert_eq!(p.check("archive_account"), Decision::RequiresApproval);
+        // Anything unrecognized is denied (deny-by-default).
+        assert_eq!(p.check("frobnicate"), Decision::Deny);
+        assert_eq!(
+            p.check("create_note"),
+            Decision::Deny,
+            "even writes deny unless read-shaped"
+        );
+        // A budget cap is in force so a runaway agent is bounded.
+        assert_eq!(p.max_actions_per_minute(), Some(60));
     }
 
     #[test]

@@ -65,7 +65,12 @@ pub struct Response {
 
 impl Response {
     pub fn success(id: Value, result: Value) -> Self {
-        Self { jsonrpc: "2.0", id, result: Some(result), error: None }
+        Self {
+            jsonrpc: "2.0",
+            id,
+            result: Some(result),
+            error: None,
+        }
     }
 
     pub fn error(id: Value, code: i64, message: impl Into<String>) -> Self {
@@ -73,7 +78,11 @@ impl Response {
             jsonrpc: "2.0",
             id,
             result: None,
-            error: Some(RpcError { code, message: message.into(), data: None }),
+            error: Some(RpcError {
+                code,
+                message: message.into(),
+                data: None,
+            }),
         }
     }
 
@@ -107,7 +116,10 @@ impl InitializeResult {
             protocol_version: PROTOCOL_VERSION,
             // We expose tools and don't mutate the list mid-session.
             capabilities: json!({ "tools": { "listChanged": false } }),
-            server_info: ServerInfo { name: name.into(), version: version.into() },
+            server_info: ServerInfo {
+                name: name.into(),
+                version: version.into(),
+            },
         }
     }
 }
@@ -150,13 +162,19 @@ pub struct CallToolResult {
 impl CallToolResult {
     /// A successful tool call carrying a text block (typically the refreshed state JSON).
     pub fn ok(text: impl Into<String>) -> Self {
-        Self { content: vec![text_content(text)], is_error: false }
+        Self {
+            content: vec![text_content(text)],
+            is_error: false,
+        }
     }
 
     /// A failed tool call — handler error or a governance block — with an explanation the
     /// calling agent can read and reason about.
     pub fn err(text: impl Into<String>) -> Self {
-        Self { content: vec![text_content(text)], is_error: true }
+        Self {
+            content: vec![text_content(text)],
+            is_error: true,
+        }
     }
 }
 
@@ -196,9 +214,15 @@ mod tests {
     #[test]
     fn call_tool_result_omits_is_error_when_false() {
         let line = serde_json::to_string(&CallToolResult::ok("hi")).unwrap();
-        assert!(!line.contains("isError"), "clean result should omit isError: {line}");
+        assert!(
+            !line.contains("isError"),
+            "clean result should omit isError: {line}"
+        );
         let line = serde_json::to_string(&CallToolResult::err("blocked")).unwrap();
-        assert!(line.contains("\"isError\":true"), "error result must flag isError: {line}");
+        assert!(
+            line.contains("\"isError\":true"),
+            "error result must flag isError: {line}"
+        );
     }
 
     #[test]

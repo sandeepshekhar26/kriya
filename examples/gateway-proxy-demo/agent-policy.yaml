@@ -1,0 +1,39 @@
+# Governance policy for the kriya-gateway proxy in front of the mock MCP server.
+#
+# This is an EXPLICIT example so you can see exactly how to govern a server you
+# didn't write. If you omit `--policy` entirely, kriya-gateway falls back to a
+# deny-by-default default (reads allow; destructive verbs like delete/transfer
+# require approval; everything else is denied). This file just makes that posture
+# visible and editable.
+#
+# The gateway enforces this on every tools/call BEFORE it reaches the downstream
+# server. The agent can only *propose* a call — the gateway (which owns the policy
+# and the signing key) decides whether it ever touches the real server.
+rules:
+  # Read-only — safe to let the agent do unattended.
+  - action: "list_notes"
+    allow: true
+  - action: "get_note"
+    allow: true
+
+  # Routine write — creating a note is everyday agent work.
+  - action: "create_note"
+    allow: true
+
+  # Destructive — require a human's go-ahead, every time. With --approval gui this
+  # raises the approval modal; with --approval deny (the non-interactive demo) the
+  # call is blocked outright and the downstream server never sees it.
+  - action: "delete_note"
+    allow: true
+    require_approval: true
+
+  # Everything else: denied (deny-by-default). An agent cannot invoke any tool the
+  # downstream server might expose that isn't listed above.
+  - action: "*"
+    allow: false
+
+budget:
+  # A looping agent can't hammer the downstream server: at most 30 calls per
+  # rolling minute. The gateway is the handler from the budget's point of view, so
+  # this cap spans the whole session, not one tool.
+  max_actions_per_minute: 30

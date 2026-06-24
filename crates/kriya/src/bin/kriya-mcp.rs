@@ -29,12 +29,12 @@ use std::process::exit;
 use std::sync::Arc;
 
 use kriya::audit::{Actor, Signer};
+#[cfg(target_os = "macos")]
+use kriya::mcp::GuiApproval;
 use kriya::mcp::{
     ActionExecutor, ActionOutcome, ApprovalGate, AutoApprove, DenyApproval, FnExecutor, Governor,
     PersistentProcessExecutor, ProcessExecutor, Server, TtyApproval,
 };
-#[cfg(target_os = "macos")]
-use kriya::mcp::GuiApproval;
 use kriya::permissions::Policy;
 use kriya::protocol::ToolSchema;
 
@@ -77,7 +77,8 @@ fn parse_args() -> Args {
     while let Some(flag) = it.next() {
         // Each flag takes one value; a missing value is a usage error.
         let mut take = |label: &str| -> String {
-            it.next().unwrap_or_else(|| usage_and_exit(&format!("{label} needs a value")))
+            it.next()
+                .unwrap_or_else(|| usage_and_exit(&format!("{label} needs a value")))
         };
         match flag.as_str() {
             "--tools" => tools = Some(PathBuf::from(take("--tools"))),
@@ -97,7 +98,17 @@ fn parse_args() -> Args {
     let Some(tools) = tools else {
         usage_and_exit("--tools <schemas.json> is required");
     };
-    Args { tools, policy, exec, approval, name, persistent, actor, user, audit_log }
+    Args {
+        tools,
+        policy,
+        exec,
+        approval,
+        name,
+        persistent,
+        actor,
+        user,
+        audit_log,
+    }
 }
 
 /// Build the receipt actor (R8) from the binary's identity flags. Returns `None` when
@@ -115,8 +126,9 @@ fn build_actor(agent: Option<String>, user: Option<String>) -> Option<Actor> {
 fn load_tools(path: &PathBuf) -> Vec<ToolSchema> {
     let text = std::fs::read_to_string(path)
         .unwrap_or_else(|e| usage_and_exit(&format!("cannot read --tools file {path:?}: {e}")));
-    serde_json::from_str(&text)
-        .unwrap_or_else(|e| usage_and_exit(&format!("--tools file is not a tool-schema array: {e}")))
+    serde_json::from_str(&text).unwrap_or_else(|e| {
+        usage_and_exit(&format!("--tools file is not a tool-schema array: {e}"))
+    })
 }
 
 fn build_approval(kind: &str) -> Box<dyn ApprovalGate> {
@@ -144,7 +156,9 @@ fn build_executor(exec: Option<String>, persistent: bool) -> Box<dyn ActionExecu
         Some(cmd) => Box::new(ProcessExecutor::new(&cmd)),
         // Discovery-only: tools/list works, but any call fails with a clear message.
         None => Box::new(FnExecutor(|_id: &str, _p: &serde_json::Value| {
-            ActionOutcome::failed("kriya-mcp started without --exec — discovery only, cannot run actions")
+            ActionOutcome::failed(
+                "kriya-mcp started without --exec — discovery only, cannot run actions",
+            )
         })),
     }
 }

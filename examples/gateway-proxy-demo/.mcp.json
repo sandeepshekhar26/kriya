@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "notes-governed": {
+      "command": "/Volumes/WORKSSD/software_for_agents/experiment1/apps/note-app/src-tauri/target/debug/kriya-gateway",
+      "args": [
+        "proxy",
+        "--approval", "gui",
+        "--policy", "/Volumes/WORKSSD/software_for_agents/experiment1/examples/gateway-proxy-demo/agent-policy.yaml",
+        "--audit-log", "/Volumes/WORKSSD/software_for_agents/experiment1/examples/gateway-proxy-demo/kriya-audit.jsonl",
+        "--",
+        "node", "/Volumes/WORKSSD/software_for_agents/experiment1/examples/gateway-proxy-demo/mock-mcp-server.js"
+      ]
+    }
+  }
+}

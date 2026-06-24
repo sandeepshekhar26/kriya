@@ -17,7 +17,11 @@ struct SlidingWindow {
 
 impl SlidingWindow {
     fn new(max: Option<u32>, window_ms: u128) -> Self {
-        Self { max, window_ms, times: Vec::new() }
+        Self {
+            max,
+            window_ms,
+            times: Vec::new(),
+        }
     }
 
     /// Record an event at `now_ms`, or return `Err(max)` if it would exceed the cap. With no
@@ -27,7 +31,8 @@ impl SlidingWindow {
             return Ok(());
         };
         // Drop timestamps outside the trailing window.
-        self.times.retain(|t| now_ms.saturating_sub(*t) < self.window_ms);
+        self.times
+            .retain(|t| now_ms.saturating_sub(*t) < self.window_ms);
         if self.times.len() as u32 >= max {
             return Err(max);
         }
@@ -132,7 +137,7 @@ mod tests {
         let mut b = BudgetTracker::new(Some(1)).with_api_calls_per_hour(Some(2));
         assert!(b.check_and_record(0).is_ok()); // action 1/1
         assert!(b.check_and_record(1).is_err()); // action 2 over the per-minute cap
-        // The api-call window is untouched by the action attempts above.
+                                                 // The api-call window is untouched by the action attempts above.
         assert!(b.check_and_record_api_call(0).is_ok()); // api 1/2
         assert!(b.check_and_record_api_call(1).is_ok()); // api 2/2
         assert!(b.check_and_record_api_call(2).is_err()); // api 3 over the per-hour cap
