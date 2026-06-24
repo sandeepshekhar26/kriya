@@ -63,7 +63,9 @@ impl Inference for ScriptedPlanner {
             .steps
             .get(self.cursor)
             .cloned()
-            .unwrap_or(StepDecision::Done { summary: "script complete".into() });
+            .unwrap_or(StepDecision::Done {
+                summary: "script complete".into(),
+            });
         self.cursor += 1;
         Ok(decision)
     }
@@ -112,13 +114,18 @@ mod tests {
 
         let mut p = ScriptedPlanner::from_file(&path).unwrap();
         match p.next_step(&ctx()).unwrap() {
-            StepDecision::Call { action_id, params, .. } => {
+            StepDecision::Call {
+                action_id, params, ..
+            } => {
                 assert_eq!(action_id, "create_note");
                 assert_eq!(params["title"], "Demo");
             }
             other => panic!("expected Call, got {other:?}"),
         }
-        assert!(matches!(p.next_step(&ctx()).unwrap(), StepDecision::Done { .. }));
+        assert!(matches!(
+            p.next_step(&ctx()).unwrap(),
+            StepDecision::Done { .. }
+        ));
         let _ = std::fs::remove_file(&path);
     }
 }

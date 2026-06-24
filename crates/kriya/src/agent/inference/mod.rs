@@ -45,8 +45,14 @@ pub struct StepContext<'a> {
 /// The backend's decision for one turn of the loop.
 #[derive(Debug, Clone)]
 pub enum StepDecision {
-    Call { action_id: String, params: Value, reasoning: String },
-    Done { summary: String },
+    Call {
+        action_id: String,
+        params: Value,
+        reasoning: String,
+    },
+    Done {
+        summary: String,
+    },
 }
 
 /// Where a backend's inference happens, network-wise (R13). This is what lets the host
@@ -118,9 +124,16 @@ pub(crate) fn is_loopback_url(url: &str) -> bool {
     let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
     // Strip a trailing :port (but keep IPv6 bracketed hosts intact).
     let host = if authority.starts_with('[') {
-        authority.split(']').next().unwrap_or(authority).trim_start_matches('[')
+        authority
+            .split(']')
+            .next()
+            .unwrap_or(authority)
+            .trim_start_matches('[')
     } else {
-        authority.rsplit_once(':').map(|(h, _)| h).unwrap_or(authority)
+        authority
+            .rsplit_once(':')
+            .map(|(h, _)| h)
+            .unwrap_or(authority)
     };
     host == "localhost" || host == "::1" || host.starts_with("127.")
 }
@@ -157,12 +170,20 @@ pub(crate) fn build_prompt(ctx: &StepContext) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let history = if history.is_empty() { "(none yet)".to_string() } else { history };
+    let history = if history.is_empty() {
+        "(none yet)".to_string()
+    } else {
+        history
+    };
 
     let memory = if ctx.recent_memory.is_empty() {
         "(no prior runs)".to_string()
     } else {
-        ctx.recent_memory.iter().map(|m| format!("- {m}")).collect::<Vec<_>>().join("\n")
+        ctx.recent_memory
+            .iter()
+            .map(|m| format!("- {m}"))
+            .collect::<Vec<_>>()
+            .join("\n")
     };
 
     format!(
@@ -237,7 +258,11 @@ pub(crate) fn parse_decision(json_str: &str) -> Result<StepDecision, String> {
     let decision: Value = serde_json::from_str(json_str)
         .map_err(|e| format!("invalid JSON from LLM ({e}): {json_str}"))?;
 
-    if decision.get("done").and_then(Value::as_bool).unwrap_or(false) {
+    if decision
+        .get("done")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
         return Ok(StepDecision::Done {
             summary: decision
                 .get("summary")
@@ -253,10 +278,17 @@ pub(crate) fn parse_decision(json_str: &str) -> Result<StepDecision, String> {
         .ok_or_else(|| format!("decision missing \"action\": {decision}"))?
         .to_string();
     let params = decision.get("params").cloned().unwrap_or(Value::Null);
-    let reasoning =
-        decision.get("reasoning").and_then(Value::as_str).unwrap_or("").to_string();
+    let reasoning = decision
+        .get("reasoning")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
 
-    Ok(StepDecision::Call { action_id, params, reasoning })
+    Ok(StepDecision::Call {
+        action_id,
+        params,
+        reasoning,
+    })
 }
 
 #[cfg(test)]
@@ -289,9 +321,18 @@ mod tests {
     fn backends_declare_honest_network_profiles() {
         // Deterministic = no network; the cloud backends egress; the local `claude` CLI is
         // convenient but still reaches the cloud, so it is honestly Remote.
-        assert_eq!(scripted::ScriptedPlanner::from_decisions(vec![]).network_profile(), NetworkProfile::None);
+        assert_eq!(
+            scripted::ScriptedPlanner::from_decisions(vec![]).network_profile(),
+            NetworkProfile::None
+        );
         #[cfg(feature = "http-inference")]
-        assert_eq!(anthropic::Anthropic::new().network_profile(), NetworkProfile::Remote);
-        assert_eq!(claude_cli::ClaudeCli::new().network_profile(), NetworkProfile::Remote);
+        assert_eq!(
+            anthropic::Anthropic::new().network_profile(),
+            NetworkProfile::Remote
+        );
+        assert_eq!(
+            claude_cli::ClaudeCli::new().network_profile(),
+            NetworkProfile::Remote
+        );
     }
 }

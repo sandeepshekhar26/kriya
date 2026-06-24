@@ -28,7 +28,10 @@ pub struct Actor {
 
 impl Actor {
     pub fn new(agent: impl Into<String>, user: impl Into<String>) -> Self {
-        Self { agent: agent.into(), user: user.into() }
+        Self {
+            agent: agent.into(),
+            user: user.into(),
+        }
     }
 }
 
@@ -70,7 +73,15 @@ impl Receipt {
         success: bool,
         ts_ms: u128,
     ) -> Self {
-        Self { step_id, action_id, params, success, ts_ms, actor: None, prev_hash: None }
+        Self {
+            step_id,
+            action_id,
+            params,
+            success,
+            ts_ms,
+            actor: None,
+            prev_hash: None,
+        }
     }
 
     /// Attach (or clear) the acting identity. Chainable on top of [`Receipt::new`].
@@ -98,6 +109,12 @@ pub struct Signer {
     last_hash: Mutex<Option<String>>,
 }
 
+impl Default for Signer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Signer {
     pub fn new() -> Self {
         Self::with_log_path(std::env::temp_dir().join("kriya-audit.jsonl"))
@@ -110,7 +127,12 @@ impl Signer {
         let key = SigningKey::from_bytes(&bytes);
         let public_hex = hex::encode(key.verifying_key().to_bytes());
         let last_hash = Mutex::new(seed_last_hash(&log_path));
-        Self { key, public_hex, log_path, last_hash }
+        Self {
+            key,
+            public_hex,
+            log_path,
+            last_hash,
+        }
     }
 
     /// Mint a signer whose Ed25519 identity is **persisted** at `key_path` — loaded if present,
@@ -124,7 +146,12 @@ impl Signer {
         let key = SigningKey::from_bytes(&seed);
         let public_hex = hex::encode(key.verifying_key().to_bytes());
         let last_hash = Mutex::new(seed_last_hash(&log_path));
-        Ok(Self { key, public_hex, log_path, last_hash })
+        Ok(Self {
+            key,
+            public_hex,
+            log_path,
+            last_hash,
+        })
     }
 
     pub fn public_key(&self) -> &str {
@@ -148,7 +175,7 @@ impl Signer {
         // matches the chain order, even if multiple run threads share this signer.
         let mut last = self.last_hash.lock().unwrap_or_else(|e| e.into_inner());
         receipt.prev_hash = last.clone(); // None on the genesis receipt
-        // Canonical bytes = compact JSON of the unsigned (key-sorted, now chained) receipt.
+                                          // Canonical bytes = compact JSON of the unsigned (key-sorted, now chained) receipt.
         let msg = serde_json::to_vec(&receipt).unwrap_or_default();
         let signature = hex::encode(self.key.sign(&msg).to_bytes());
         let signed = SignedReceipt {
@@ -187,9 +214,12 @@ fn load_or_create_seed(path: &Path) -> Result<[u8; 32], String> {
             .map_err(|e| format!("reading signing key {}: {e}", path.display()))?;
         let bytes = hex::decode(text.trim())
             .map_err(|e| format!("signing key {} is not valid hex: {e}", path.display()))?;
-        return bytes
-            .try_into()
-            .map_err(|_| format!("signing key {} must be 32 bytes (64 hex chars)", path.display()));
+        return bytes.try_into().map_err(|_| {
+            format!(
+                "signing key {} must be 32 bytes (64 hex chars)",
+                path.display()
+            )
+        });
     }
     let seed: [u8; 32] = rand::random();
     if let Some(parent) = path.parent() {
@@ -318,7 +348,10 @@ mod tests {
             )
             .with_actor(Some(Actor::new("claude-desktop", "alice"))),
         );
-        assert_eq!(signed.receipt.actor, Some(Actor::new("claude-desktop", "alice")));
+        assert_eq!(
+            signed.receipt.actor,
+            Some(Actor::new("claude-desktop", "alice"))
+        );
         assert!(verifies(&signed), "actor-bearing receipt must verify");
     }
 
@@ -328,8 +361,14 @@ mod tests {
         // existing verifiers (and the cross-checked real receipts) keep validating.
         let r = Receipt::new("s".into(), "a".into(), json!({}), true, 1);
         let json = serde_json::to_string(&r).unwrap();
-        assert_eq!(json, r#"{"step_id":"s","action_id":"a","params":{},"success":true,"ts_ms":1}"#);
-        assert!(!json.contains("actor"), "absent actor must not appear in the signed bytes");
+        assert_eq!(
+            json,
+            r#"{"step_id":"s","action_id":"a","params":{},"success":true,"ts_ms":1}"#
+        );
+        assert!(
+            !json.contains("actor"),
+            "absent actor must not appear in the signed bytes"
+        );
     }
 
     #[test]
@@ -347,13 +386,22 @@ mod tests {
     fn tampering_the_actor_breaks_the_signature() {
         let s = signer();
         let mut signed = s.record(
-            Receipt::new("step-3".into(), "delete_transaction".into(), json!({}), true, 7)
-                .with_actor(Some(Actor::new("claude-desktop", "alice"))),
+            Receipt::new(
+                "step-3".into(),
+                "delete_transaction".into(),
+                json!({}),
+                true,
+                7,
+            )
+            .with_actor(Some(Actor::new("claude-desktop", "alice"))),
         );
         assert!(verifies(&signed), "control: untampered must verify");
         // Forge a different operator after signing — the attribution is signed, so this fails.
         signed.receipt.actor = Some(Actor::new("claude-desktop", "mallory"));
-        assert!(!verifies(&signed), "swapping the acting user must invalidate the receipt");
+        assert!(
+            !verifies(&signed),
+            "swapping the acting user must invalidate the receipt"
+        );
     }
 
     #[test]
@@ -367,7 +415,10 @@ mod tests {
             9,
         ));
         signed.receipt.params = json!({ "amount": 1_000_000 });
-        assert!(!verifies(&signed), "tampered params must invalidate the receipt");
+        assert!(
+            !verifies(&signed),
+            "tampered params must invalidate the receipt"
+        );
     }
 
     /// A fresh, untampered signed receipt to mutate in the tamper tests below.
@@ -388,28 +439,40 @@ mod tests {
     fn tampering_the_action_id_breaks_the_signature() {
         let (_s, mut signed) = baseline();
         signed.receipt.action_id = "list_transactions".into(); // disguise a delete as a read
-        assert!(!verifies(&signed), "rewriting which action ran must invalidate the receipt");
+        assert!(
+            !verifies(&signed),
+            "rewriting which action ran must invalidate the receipt"
+        );
     }
 
     #[test]
     fn tampering_the_success_flag_breaks_the_signature() {
         let (_s, mut signed) = baseline();
         signed.receipt.success = false; // claim a successful action failed (or vice versa)
-        assert!(!verifies(&signed), "flipping the outcome must invalidate the receipt");
+        assert!(
+            !verifies(&signed),
+            "flipping the outcome must invalidate the receipt"
+        );
     }
 
     #[test]
     fn tampering_the_step_id_breaks_the_signature() {
         let (_s, mut signed) = baseline();
         signed.receipt.step_id = "step-other".into();
-        assert!(!verifies(&signed), "rewriting the step id must invalidate the receipt");
+        assert!(
+            !verifies(&signed),
+            "rewriting the step id must invalidate the receipt"
+        );
     }
 
     #[test]
     fn tampering_the_timestamp_breaks_the_signature() {
         let (_s, mut signed) = baseline();
         signed.receipt.ts_ms = 0; // backdate the action
-        assert!(!verifies(&signed), "rewriting when it happened must invalidate the receipt");
+        assert!(
+            !verifies(&signed),
+            "rewriting when it happened must invalidate the receipt"
+        );
     }
 
     #[test]
@@ -419,7 +482,10 @@ mod tests {
         let (_s, mut signed) = baseline();
         assert!(signed.receipt.actor.is_none());
         signed.receipt.actor = Some(Actor::new("forged-agent", "mallory"));
-        assert!(!verifies(&signed), "fabricating attribution after signing must fail");
+        assert!(
+            !verifies(&signed),
+            "fabricating attribution after signing must fail"
+        );
     }
 
     #[test]
@@ -439,7 +505,10 @@ mod tests {
         // so claiming a different signer produced it must fail (no key-substitution attack).
         let other = signer();
         signed.public_key = other.public_key().to_string();
-        assert!(!verifies(&signed), "a receipt must not verify against the wrong public key");
+        assert!(
+            !verifies(&signed),
+            "a receipt must not verify against the wrong public key"
+        );
     }
 
     #[test]
@@ -447,10 +516,16 @@ mod tests {
         let (_s, mut signed) = baseline();
         let good_sig = signed.signature.clone();
         signed.signature = "not-hex".into();
-        assert!(!verifies(&signed), "non-hex signature must be rejected, not panic");
+        assert!(
+            !verifies(&signed),
+            "non-hex signature must be rejected, not panic"
+        );
         signed.signature = good_sig;
         signed.public_key = "deadbeef".into(); // valid hex but wrong length (not 32 bytes)
-        assert!(!verifies(&signed), "wrong-length public key must be rejected, not panic");
+        assert!(
+            !verifies(&signed),
+            "wrong-length public key must be rejected, not panic"
+        );
     }
 
     #[test]
@@ -468,7 +543,10 @@ mod tests {
         ));
         assert!(verifies(&signed), "canonicalized receipt must verify");
         let serialized = serde_json::to_string(&signed.receipt.params).unwrap();
-        assert_eq!(serialized, r#"{"a":{"b":3,"y":2},"m":[{"p":2,"q":1}],"z":1}"#);
+        assert_eq!(
+            serialized,
+            r#"{"a":{"b":3,"y":2},"m":[{"p":2,"q":1}],"z":1}"#
+        );
     }
 
     #[test]
@@ -482,11 +560,19 @@ mod tests {
         let s1 = Signer::with_identity(&key, log.clone()).expect("mint identity");
         let pk1 = s1.public_key().to_string();
         let s2 = Signer::with_identity(&key, log.clone()).expect("reload identity");
-        assert_eq!(pk1, s2.public_key(), "persisted identity must be stable across runs");
+        assert_eq!(
+            pk1,
+            s2.public_key(),
+            "persisted identity must be stable across runs"
+        );
 
         let signed = s1.record(Receipt::new("s".into(), "a".into(), json!({}), true, 1));
         assert!(verifies(&signed), "durable-key receipt must verify");
-        assert_eq!(std::fs::read_to_string(&key).unwrap().trim().len(), 64, "key persists as 64 hex");
+        assert_eq!(
+            std::fs::read_to_string(&key).unwrap().trim().len(),
+            64,
+            "key persists as 64 hex"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -505,13 +591,28 @@ mod tests {
         let r2 = s.record(Receipt::new("s2".into(), "b".into(), json!({}), true, 2));
         let r3 = s.record(Receipt::new("s3".into(), "c".into(), json!({}), true, 3));
 
-        assert!(r1.receipt.prev_hash.is_none(), "genesis must have no prev_hash");
-        let lines: Vec<String> =
-            std::fs::read_to_string(&log).unwrap().lines().map(str::to_string).collect();
+        assert!(
+            r1.receipt.prev_hash.is_none(),
+            "genesis must have no prev_hash"
+        );
+        let lines: Vec<String> = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
         assert_eq!(lines.len(), 3);
-        assert_eq!(r2.receipt.prev_hash.as_deref(), Some(sha256_hex(lines[0].as_bytes()).as_str()));
-        assert_eq!(r3.receipt.prev_hash.as_deref(), Some(sha256_hex(lines[1].as_bytes()).as_str()));
-        assert!(verifies(&r2) && verifies(&r3), "chained receipts must still verify");
+        assert_eq!(
+            r2.receipt.prev_hash.as_deref(),
+            Some(sha256_hex(lines[0].as_bytes()).as_str())
+        );
+        assert_eq!(
+            r3.receipt.prev_hash.as_deref(),
+            Some(sha256_hex(lines[1].as_bytes()).as_str())
+        );
+        assert!(
+            verifies(&r2) && verifies(&r3),
+            "chained receipts must still verify"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -530,8 +631,11 @@ mod tests {
 
         let s2 = Signer::with_log_path(log.clone()); // a fresh "process" seeds from the existing log
         let r2 = s2.record(Receipt::new("s2".into(), "b".into(), json!({}), true, 2));
-        let lines: Vec<String> =
-            std::fs::read_to_string(&log).unwrap().lines().map(str::to_string).collect();
+        let lines: Vec<String> = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
         assert_eq!(
             r2.receipt.prev_hash.as_deref(),
             Some(sha256_hex(lines[0].as_bytes()).as_str()),
@@ -551,7 +655,11 @@ mod tests {
             Signer::with_identity(&key, dir.join("a.jsonl")).is_err(),
             "an invalid key file must error, not be silently regenerated"
         );
-        assert_eq!(std::fs::read_to_string(&key).unwrap(), "not-valid-hex", "key left untouched");
+        assert_eq!(
+            std::fs::read_to_string(&key).unwrap(),
+            "not-valid-hex",
+            "key left untouched"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

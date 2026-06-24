@@ -11,6 +11,76 @@ Legend: ⬜ not started · 🟡 in progress · ✅ done · ⭐ flagship
 
 ---
 
+## PG — The governance-gateway pivot (D-016) — 🟡 THE CURRENT FRONT DOOR
+
+> **Why this tier (added 2026-06-24, decision [D-016](DECISIONS.md); full build doc:
+> [SERVICE-ARCHITECTURE.md](SERVICE-ARCHITECTURE.md)).** MCP-stdio commoditized the *transport*, not
+> the *enforcement* — native MCP has **no enforced governance** (approval is SHOULD-not-MUST and
+> client-side; auth is OPTIONAL and excludes stdio). So a **zero-change governance proxy** that wraps
+> any existing MCP server, **shipped as a downloadable product** (not a library), is the new adoption
+> front door; the `wrapAction` library is repositioned as enterprise depth. This is **build-over, not
+> rewrite**: `Governor::dispatch()` is already transport-agnostic behind the `ActionExecutor` trait —
+> each front is a new executor + a tool-discovery source; the core (policy/approval/budget/signed
+> audit/attestation) is reused unchanged. Critical path: **R22 → R23 → R24** (ship the product), then
+> R25 (Front 2), R26 (Front 3, deferred).
+
+> **✅ Shipped & verified (`feat/gateway-front1`, 2026-06-24): R22 + R23 + the R24 core.** The
+> `kriya-gateway proxy` binary wraps any stdio MCP server with **zero changes**, governing every
+> `tools/call` through the unchanged `Governor`. Proven end-to-end against a mock MCP server
+> (`examples/gateway-proxy-demo/`, runnable via `run.sh`): a read (`list_notes`) is forwarded +
+> **signed**, a destructive call (`delete_note`) is **blocked at the approval gate, never forwarded,
+> never signed**, and the receipt **verifies offline** (`verify-receipts`: verified 1, failed 0).
+> Build-over confirmed: **+112 tests (mcp-client) / 96 (default) pass, clippy + fmt clean**, no new
+> deps, default build untouched. The new `mcp-client` feature is off-by-default so the library stays
+> lean. R24 *remaining* (installers/config/attestation) is itemized below.
+
+- ✅ **R22 · Upstream MCP client + `McpProxyExecutor` (Front-1 engine).** Build the missing half:
+  kriya is MCP-*server*-only today (seam audit confirmed zero client code). `mcp/client.rs`
+  (`McpClient`: spawn downstream server as a subprocess — the proven `PersistentProcessExecutor`
+  spawn pattern — with id-correlated `initialize`/`tools/list`/`tools/call` over its stdio, reusing
+  `jsonrpc.rs` types as-is) + `mcp/proxy_executor.rs` (`McpProxyExecutor: ActionExecutor` that
+  forwards a cleared call to the downstream and maps `CallToolResult → ActionOutcome`). New
+  off-by-default `mcp-client` feature (lean lib, mirrors `tauri-host`/`http-inference`). The
+  `Governor`/`ApprovalGate`/`Signer`/`Budget`/`Policy` are reused unchanged.
+- ✅ **R23 · Front-1 transparent proxy serve loop.** Make kriya govern *in front of* any MCP server
+  with zero target changes. The four seam-audit fixes (current `Server` blocks all of these):
+  (1) forward `notifications/initialized` + notifications **both ways**; (2) **pass through unknown
+  methods** (`resources/*`, `prompts/*`, server-initiated `sampling/*`/`elicitation/*`) verbatim;
+  (3) **dynamic `tools/list`** cached from the downstream (not a static file); (4) **policy-filter
+  `tools/list`** so denied tools never appear. Ship a **passthrough conformance test** (the D-016
+  open question) before any "wraps any MCP server" claim. MVP = synchronous request/response;
+  full-lifecycle = two reader threads + `Mutex<Governor>` for server-initiated traffic.
+- 🟡 **R24 · ⭐ The shippable `kriya-gateway` product.** **Done:** the `proxy` subcommand
+  (zero-config), the **default deny-by-default policy generator** (reads allow / destructive→approval
+  / else deny), policy warnings, path validation before `Signer`, the `--policy/--approval/--actor/
+  --user/--audit-log/--signing-key/--name` flags, and the runnable `examples/gateway-proxy-demo/`.
+  **Remaining:** `.kriya.yaml` config-file discovery, on-startup on-device attestation receipt (R13),
+  cross-platform GUI approval (Windows/Linux; macOS Gui + Tty done), and signed installers
+  (dmg/Homebrew, msi/winget) with a pinned public key. Original full scope: Turn the dev-facing
+  `kriya-mcp --tools … --policy … --exec …` into a zero-config download a non-author drops into a
+  client's MCP config: `{"command":"kriya-gateway","args":["proxy","--","node","server.js"]}`. One
+  binary, subcommands (`proxy` = Front 1; `serve` = the existing bolt-on; `reach-in` = Front 2 later).
+  Build: zero-config **default policy generator** (reads allow / `delete_*|remove_*|destroy_*` →
+  approval / else deny), **`.kriya.yaml` config** discovery, **cross-platform approval** (Tty
+  everywhere + macOS Gui; validate audit-log/signing-key paths before `Signer` so a bad path is a
+  clean error not a crash), **on-startup on-device attestation** (R13 receipt when `--signing-key`
+  set), **warn on policy/tool mismatch**, and **signed installers** (macOS `.dmg`/Homebrew + codesign;
+  Windows `.msi`/winget + Authenticode; Linux self-contained) with a pinned public key for offline
+  receipt verification. Keep it **local-only, per-host, no credential aggregation** (the answer to
+  "MCP gateways are a bad idea").
+- ⬜ **R25 · Front-2 reach-in adapter (no-MCP / no-API apps).** Synthesize a governed MCP server
+  **from the OS accessibility tree** instead of falling back to pixels: a schema generator over the
+  tree + `AxExecutor: ActionExecutor` (macOS `AXUIElement` `AXUIElementCopyActionNames`/`AXPress`
+  first; Windows UIA `Invoke`/`Value` second). Same `Governor` above it. **Gate on coverage:** the
+  "control any macOS app" claim was research-refuted (degrades on Electron/Qt/custom-drawn UIs, needs
+  a permission grant, blocks sandboxing) — **measure the coverage ratio on 5 real ICP apps before
+  committing this to a pitch.** The hardest-to-copy part of the moat if coverage holds.
+- ⬜ **R26 · Front-3 computer-use fallback (deferred / design-partner-gated).**
+  `ComputerUseExecutor: ActionExecutor` mapping a cleared call to pixel actions, only where Fronts
+  1–2 cannot reach. Same `Governor`. Documented for completeness; not on the near-term path.
+
+---
+
 ## P0 — Critical path to the YC demo — ✅ COMPLETE (R1 → R3 → R4 → R5 shipped)
 
 The wedge's critical path is walked: governed MCP mode → sidecar host → `wrapAction` bolt-on → the

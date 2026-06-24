@@ -18,6 +18,14 @@
 > (web/transport) and §6 (mobile/web bindings) stay deliberately deprioritized. Live priority
 > order: [ROADMAP.md](ROADMAP.md).
 
+> **⚠️ Pivot (2026-06-24, decision [D-016](DECISIONS.md); build doc
+> [SERVICE-ARCHITECTURE.md](SERVICE-ARCHITECTURE.md)).** The current front door is now a
+> **standalone governance-gateway product** (a zero-change stdio proxy that wraps any existing MCP
+> server with policy + approval + signed audit), **not the `wrapAction` library** — because MCP-stdio
+> being free makes a library a hard sell, while native MCP has *no enforced governance*. Architecture
+> = **one transport-agnostic core + three reach fronts** (build-over, not rewrite). New gap state in
+> **§8**; the new critical path is **R22 → R23 → R24** (ship the product) → R25/R26 (Fronts 2/3).
+
 Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
 
 ## 1. Core SDK (`kriya-core`)
@@ -191,6 +199,16 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
   the dependency-free bolt-on. Thin `kriya-mcp` binary (`--tools` / `--policy` / `--exec` /
   `--approval`, the last now `deny|tty|gui|auto` — see §3 for the `gui` native-dialog gate). 21
   unit tests + verified end to end. Turns kriya from a rewrite into a bolt-on.
+- ✅ **Rust authoring SDK — `Registry`/`wrap_action`** (crate **0.1.3**, [D-014](DECISIONS.md)) —
+  the Rust counterpart to kriya-core's `wrapAction`, which the crate was missing (it was
+  host/governor only, forcing Rust/Tauri apps to hand-write tool schemas + a dispatch `match`).
+  `wrap` an existing method once → the registry **generates the MCP tool schemas** *and*
+  **dispatches** (impls `ActionExecutor`), with schema-driven required-param validation. Lives in
+  the lean core, so consumers link it `default-features = false` (no Tauri runtime, no HTTP client —
+  enabled by 0.1.2's optional `tauri-host`/`http-inference` flags). 95 crate + 4 registry tests.
+  First user: the **Spent** bolt-on — `exec.rs` is now a declarative list of `wrap(...)` over the
+  exact `Database` methods, `tools.json` is generated (`spent --dump-tools`), and the external
+  `kriya-mcp` governor drives `spent --exec`.
 - ✅ **Sidecar host + Electron/Node binding** (`R3`, **P0 — critical path**, `8b3a8c2`) — the
   agent loop is decoupled from Tauri behind a `HostSink` trait (`TauriSink` is one impl). The
   `kriya-host` binary runs `kriya` as a standalone process over stdio (NDJSON
@@ -243,6 +261,39 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
   artifacts. Willingness-to-pay hook (EU AI Act enforcement opens Aug 2026).
 - ⬜ **Agent + user identity per action** (`R8`, **P2**).
 - ⬜ Hosted agent cloud / integrations marketplace — later phases.
+
+## 8. The governance gateway — core + three reach fronts (D-016)
+
+> The [D-016](DECISIONS.md) pivot: ship governance as a **product** wrapping any existing MCP server
+> with zero target changes. Build doc + diagrams: [SERVICE-ARCHITECTURE.md](SERVICE-ARCHITECTURE.md).
+> **Build-over, not rewrite** — the `Governor` is already transport-agnostic behind the
+> `ActionExecutor` trait; each front is a new executor + a tool-discovery source.
+
+- ✅ **The reusable core seam** — `Governor::dispatch()` (policy → approval → budget → execute →
+  audit) is transport-agnostic with zero IO; `ActionExecutor` / `ApprovalGate` are injected traits;
+  `Signer` (R20 hash-chain, R8 actor, R13 attestation) / `BudgetTracker` / `Policy` reuse unchanged.
+  Confirmed by the 2026-06-24 seam audit. **Nothing to build here — this is the moat that doesn't move.**
+- ✅ **MCP _client_ (the missing half)** — shipped (`feat/gateway-front1`): `mcp/client.rs` (`McpClient`,
+  generic testable `Transport`, std-only, no new deps). kriya was **MCP-server-only**; Front 1
+  needs `McpClient` to spawn a downstream server and speak `initialize`/`tools/list`/`tools/call` to
+  it. New `mcp/client.rs` + the `mcp-client` feature flag (off by default). **(R22)**
+- ✅ **Front 1 — `McpProxyExecutor` + transparent proxy loop** — shipped: `proxy_executor.rs` +
+  `proxy_server.rs` with all four fixes (notifications forwarded both ways, unknown methods passed
+  through, dynamic `tools/list` from downstream, policy-filtered discovery). 16 feature-gated tests
+  (transport framing/id-correlation, executor mapping, routing/filtering). Proven end-to-end against a
+  mock MCP server. ⬜ remaining: a full passthrough **conformance test** + the two-reader-thread
+  full-lifecycle mode for downstream-initiated sampling/elicitation (MVP is synchronous). **(R22/R23)**
+- 🟡 **Shippable `kriya-gateway` product** — ✅ zero-config `kriya-gateway proxy -- <cmd>`, default
+  deny-by-default policy generator, policy warnings, path validation, the full flag set, runnable
+  demo. ⬜ remaining: `.kriya.yaml` config discovery, on-startup on-device attestation, cross-platform
+  GUI approval (Windows/Linux), signed installers (dmg/Homebrew, msi/winget) + pinned public key.
+  Repositions `wrapAction` as enterprise depth. **(R24)**
+- ⬜ **Front 2 — reach-in adapter (no-MCP/no-API apps)** — synthesize a governed MCP server from the OS
+  accessibility tree + `AxExecutor` (macOS `AXUIElement` first, Windows UIA second). **Coverage-gated:**
+  the "any macOS app" claim was research-refuted (degrades on Electron/Qt/custom-drawn UIs, needs a
+  permission grant) — measure coverage on 5 real ICP apps first. **(R25)**
+- ⬜ **Front 3 — computer-use fallback** — `ComputerUseExecutor` for apps Fronts 1–2 can't reach.
+  Deferred / design-partner-gated. **(R26)**
 
 ## Near-term focus
 

@@ -22,6 +22,10 @@ use super::approval::ApprovalGate;
 use super::executor::{ActionExecutor, ActionOutcome};
 
 /// The result of routing one `tools/call` through the gates.
+// `Executed` carries a full `SignedReceipt` (R20 hash-chain + R8 actor pushed it past the lint's
+// size threshold). Boxing it would ripple to every `DispatchOutcome` match site repo-wide for no
+// real gain — the value is short-lived, one per call.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum DispatchOutcome {
     /// Policy denied the action outright. Never executed, never signed.
@@ -32,7 +36,10 @@ pub enum DispatchOutcome {
     BudgetExceeded(String),
     /// The action cleared every gate and ran. Carries the handler outcome and the signed
     /// receipt appended to the audit log.
-    Executed { outcome: ActionOutcome, receipt: SignedReceipt },
+    Executed {
+        outcome: ActionOutcome,
+        receipt: SignedReceipt,
+    },
 }
 
 /// Wires the gates around a pluggable [`ActionExecutor`] + [`ApprovalGate`]. Holds the
@@ -57,7 +64,14 @@ impl Governor {
         executor: Box<dyn ActionExecutor>,
     ) -> Self {
         let budget = BudgetTracker::new(policy.max_actions_per_minute());
-        Self { policy, signer, budget, approval, executor, actor: None }
+        Self {
+            policy,
+            signer,
+            budget,
+            approval,
+            executor,
+            actor: None,
+        }
     }
 
     /// Attribute every receipt this governor signs to `actor` (R8). Chainable on `new`.
@@ -156,8 +170,15 @@ mod tests {
             counting_executor(ran.clone()),
         );
         // `wire_money` matches no allow rule → deny by default.
-        assert!(matches!(g.dispatch("wire_money", &json!({})), DispatchOutcome::Denied));
-        assert_eq!(ran.load(Ordering::SeqCst), 0, "denied action must not execute");
+        assert!(matches!(
+            g.dispatch("wire_money", &json!({})),
+            DispatchOutcome::Denied
+        ));
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            0,
+            "denied action must not execute"
+        );
     }
 
     #[test]
@@ -170,8 +191,15 @@ mod tests {
             counting_executor(ran.clone()),
         );
         // delete_* requires approval; DenyApproval refuses it.
-        assert!(matches!(g.dispatch("delete_note", &json!({"id": 1})), DispatchOutcome::NotApproved));
-        assert_eq!(ran.load(Ordering::SeqCst), 0, "unapproved action must not execute");
+        assert!(matches!(
+            g.dispatch("delete_note", &json!({"id": 1})),
+            DispatchOutcome::NotApproved
+        ));
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            0,
+            "unapproved action must not execute"
+        );
     }
 
     #[test]
@@ -211,8 +239,14 @@ budget:
             Box::new(DenyApproval),
             counting_executor(ran.clone()),
         );
-        assert!(matches!(g.dispatch("create_note", &json!({})), DispatchOutcome::Executed { .. }));
-        assert!(matches!(g.dispatch("create_note", &json!({})), DispatchOutcome::Executed { .. }));
+        assert!(matches!(
+            g.dispatch("create_note", &json!({})),
+            DispatchOutcome::Executed { .. }
+        ));
+        assert!(matches!(
+            g.dispatch("create_note", &json!({})),
+            DispatchOutcome::Executed { .. }
+        ));
         // third within the minute trips the budget — and must not reach the executor.
         assert!(matches!(
             g.dispatch("create_note", &json!({})),
@@ -263,7 +297,9 @@ budget:
             Arc::new(Policy::default()),
             signer(),
             Box::new(DenyApproval),
-            Box::new(FnExecutor(|_id: &str, _p: &Value| ActionOutcome::failed("boom"))),
+            Box::new(FnExecutor(|_id: &str, _p: &Value| {
+                ActionOutcome::failed("boom")
+            })),
         );
         match g.dispatch("create_note", &json!({})) {
             DispatchOutcome::Executed { outcome, receipt } => {

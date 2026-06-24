@@ -19,11 +19,19 @@ pub struct ActionOutcome {
 
 impl ActionOutcome {
     pub fn ok(data: Value) -> Self {
-        Self { success: true, data, error: None }
+        Self {
+            success: true,
+            data,
+            error: None,
+        }
     }
 
     pub fn failed(error: impl Into<String>) -> Self {
-        Self { success: false, data: Value::Null, error: Some(error.into()) }
+        Self {
+            success: false,
+            data: Value::Null,
+            error: Some(error.into()),
+        }
     }
 }
 
@@ -108,7 +116,8 @@ impl ActionExecutor for ProcessExecutor {
     fn execute(&mut self, action_id: &str, params: &Value) -> ActionOutcome {
         // Any plumbing failure becomes a failed outcome the agent can read — never a panic
         // that would take down the whole MCP session.
-        self.run(action_id, params).unwrap_or_else(ActionOutcome::failed)
+        self.run(action_id, params)
+            .unwrap_or_else(ActionOutcome::failed)
     }
 }
 
@@ -121,9 +130,14 @@ fn request_line(action_id: &str, params: &Value) -> String {
 fn parse_reply(line: &str) -> Result<ActionOutcome, String> {
     let reply: Value =
         serde_json::from_str(line).map_err(|e| format!("handler response was not JSON: {e}"))?;
-    let success = reply.get("success").and_then(Value::as_bool).unwrap_or(false);
+    let success = reply
+        .get("success")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     if success {
-        Ok(ActionOutcome::ok(reply.get("data").cloned().unwrap_or(Value::Null)))
+        Ok(ActionOutcome::ok(
+            reply.get("data").cloned().unwrap_or(Value::Null),
+        ))
     } else {
         let err = reply
             .get("error")
@@ -160,7 +174,11 @@ impl PersistentProcessExecutor {
         let mut parts = command.split_whitespace().map(String::from);
         let program = parts.next().unwrap_or_default();
         let args = parts.collect();
-        Self { program, args, proc: None }
+        Self {
+            program,
+            args,
+            proc: None,
+        }
     }
 
     fn ensure(&mut self) -> Result<&mut Handles, String> {
@@ -175,7 +193,11 @@ impl PersistentProcessExecutor {
                 .map_err(|e| format!("failed to spawn '{}': {e}", self.program))?;
             let stdin = child.stdin.take().ok_or("child stdin unavailable")?;
             let stdout = child.stdout.take().ok_or("child stdout unavailable")?;
-            self.proc = Some(Handles { child, stdin, stdout: std::io::BufReader::new(stdout) });
+            self.proc = Some(Handles {
+                child,
+                stdin,
+                stdout: std::io::BufReader::new(stdout),
+            });
         }
         Ok(self.proc.as_mut().expect("just set"))
     }
@@ -206,12 +228,16 @@ fn exchange<W: std::io::Write, R: std::io::BufRead>(
 ) -> Result<ActionOutcome, String> {
     writeln!(stdin, "{}", request_line(action_id, params))
         .map_err(|e| format!("write to handler failed: {e}"))?;
-    stdin.flush().map_err(|e| format!("flush to handler failed: {e}"))?;
+    stdin
+        .flush()
+        .map_err(|e| format!("flush to handler failed: {e}"))?;
 
     let mut line = String::new();
     loop {
         line.clear();
-        let n = stdout.read_line(&mut line).map_err(|e| format!("read from handler failed: {e}"))?;
+        let n = stdout
+            .read_line(&mut line)
+            .map_err(|e| format!("read from handler failed: {e}"))?;
         if n == 0 {
             return Err("handler closed its output before replying".into());
         }
@@ -223,7 +249,8 @@ fn exchange<W: std::io::Write, R: std::io::BufRead>(
 
 impl ActionExecutor for PersistentProcessExecutor {
     fn execute(&mut self, action_id: &str, params: &Value) -> ActionOutcome {
-        self.run(action_id, params).unwrap_or_else(ActionOutcome::failed)
+        self.run(action_id, params)
+            .unwrap_or_else(ActionOutcome::failed)
     }
 }
 

@@ -13,9 +13,17 @@ pub struct ClaudeCli {
     binary: String,
 }
 
+impl Default for ClaudeCli {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ClaudeCli {
     pub fn new() -> Self {
-        Self { binary: std::env::var("CLAUDE_BIN").unwrap_or_else(|_| "claude".to_string()) }
+        Self {
+            binary: std::env::var("CLAUDE_BIN").unwrap_or_else(|_| "claude".to_string()),
+        }
     }
 }
 

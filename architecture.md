@@ -11,6 +11,13 @@ deliberately small so the pattern is legible.
 > [D-002](docs/DECISIONS.md). (2) Most items in the old *"deliberately leaves out"* list have since
 > shipped. For current feature state see [docs/PRODUCT_GAPS.md](docs/PRODUCT_GAPS.md); for what's
 > next and the strategic direction see [docs/ROADMAP.md](docs/ROADMAP.md) and [CLAUDE.md](CLAUDE.md).
+>
+> **Note (added 2026-06-24, [D-016](docs/DECISIONS.md)):** this file explains the *bolt-on / in-process
+> pattern*. The forward-looking **service architecture** — one governance core + three reach fronts
+> (a zero-change stdio **proxy** in front of any MCP server, an OS-accessibility **reach-in** for
+> no-API apps, computer-use fallback), shipped as a standalone **`kriya-gateway` product** — lives in
+> **[docs/SERVICE-ARCHITECTURE.md](docs/SERVICE-ARCHITECTURE.md)** with tech + sequence diagrams and
+> the build-over plan. The MCP-server mode below (`kriya-mcp`) is the seam the proxy front extends.
 
 ## The core idea
 
