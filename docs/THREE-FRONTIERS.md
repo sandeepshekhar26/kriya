@@ -7,13 +7,24 @@
 > By Sandeep Kumar, June 2026. Kept here so the project's *why* is readable from a fresh clone and
 > stays anchored to the wedge ([D-009](DECISIONS.md), [strategy/](strategy/)). If the two ever
 > diverge, the published article is canonical for prose; [D-009](DECISIONS.md) is canonical for the bet.
+>
+> **Correction (2026-06-24, [D-015](DECISIONS.md)):** this in-repo copy has been corrected ahead of
+> the Medium version. The original framed tier 3 as "desktop has no tooling standard / stuck with
+> screenshots." That undersells **MCP-stdio**, the original local-first transport — desktop apps
+> *can* expose typed tools today. The honest, defensible gap on tier 3 is **governance, not
+> tooling**. The published article still carries the old framing and should be updated to match.
 
-> *Web apps are getting WebMCP. Cloud APIs have MCP. Desktop apps with no API? They're still stuck
-> with screenshots. That gap matters more than you think.*
+> *Web apps got WebMCP. Cloud APIs got MCP over HTTP. Desktop apps got MCP over stdio — the
+> original, local-first transport. So all three can already expose typed tools to an agent. What a
+> desktop app with private data still can't do is **govern** the agent that drives it. That gap
+> matters more than you think.*
 
-By mid-2026, AI agents' interaction with software is splitting into three distinct tiers — each with
-a different standard emerging, or none at all. This is a map of where the lines are drawn, and why
-the third tier is the one that matters for the apps that handle the most sensitive data.
+By mid-2026, AI agents' interaction with software is splitting into three distinct tiers. For
+*tooling* — how an agent calls an app's functions — a standard has emerged on all three (and on
+desktop it's older than most people remember). For *governance* — permissioning, approving,
+budgeting, and auditing what the agent then does — only two tiers have a natural owner, and the
+third, which handles the most sensitive data, has none on-device. This is a map of where those
+lines are drawn, and why the governance gap on the third tier is the one that matters.
 
 ## The three surfaces
 
@@ -24,17 +35,23 @@ W3C standard that entered a Chrome origin trial in June 2026. Instead of an agen
 and guessing what buttons do, the web developer declares structured tools — JavaScript functions
 and HTML forms with machine-readable descriptions the agent reads directly.
 
-**2. Cloud APIs (SaaS) → MCP.** The **Model Context Protocol**, now stewarded by the Linux
-Foundation, wraps backend APIs as agent-callable tools. Adoption is real and large: ~97M monthly SDK
-downloads, 86,000+ GitHub stars, 9,600+ servers in the registry, and 41% of surveyed organizations
-reporting production use (Stacklok).
+**2. Cloud APIs (SaaS) → MCP over HTTP/SSE.** The **Model Context Protocol**, now stewarded by the
+Linux Foundation, wraps backend APIs as agent-callable tools. Adoption is real and large: ~97M
+monthly SDK downloads, 86,000+ GitHub stars, 9,600+ servers in the registry, and 41% of surveyed
+organizations reporting production use (Stacklok). But "MCP = cloud" is a common slip: MCP defines
+**two transports**, and the remote HTTP/SSE one is the *newer* of the pair.
 
-**3. Desktop & local apps → ❌ nothing.** Apps with **in-process handlers** — no REST endpoint,
-local data, private or regulated information: personal finance, POS, CRM clients, regulated
-workstations. Today an agent can only reach these by **screenshotting the screen and guessing where
-to click.**
+**3. Desktop & local apps → MCP over stdio (the transport people forget).** MCP's *original*
+transport is **stdio**: the agent's client spawns the tool server as a local subprocess and talks to
+it over standard in/out. It was designed for exactly this case — and it is how Claude Desktop and
+Cursor already launch local MCP servers today. So an app with **in-process handlers** — no REST
+endpoint, local/private or regulated data: personal finance, POS, CRM clients, regulated
+workstations — **can** ship an stdio MCP server and expose real typed tools to an agent, no
+screenshots involved. **Screenshotting the screen and guessing where to click is the fallback for an
+app nobody has instrumented — not the ceiling for desktop apps.** So the honest gap on this tier
+isn't *tooling*. It's *governance* — and that's the rest of this piece.
 
-## Why the gap matters: the cost of "seeing"
+## Why typed actions beat screenshots — on every tier
 
 Typed actions vs. vision is not a gentle tradeoff. A **Reflex benchmark (May 2026)** ran both
 approaches on identical tasks with Claude Sonnet: the vision agent burned **~551,000 input tokens
@@ -44,7 +61,9 @@ seconds)**. That's roughly **45× more tokens and 50× slower** for the same res
 It's a single vendor-published benchmark with high variance — but the *direction* (vision costs
 dramatically more in tokens, time, and accuracy than typed actions) is uncontested across the
 literature; conservative personal estimates still land at 10–20×. Typed actions are cheaper
-*because* the model reasons over meaning, not pixels.
+*because* the model reasons over meaning, not pixels. This is the whole reason a desktop app should
+expose stdio MCP tools rather than leave the agent squinting at the screen — and the reason
+screenshots are the floor, not the frontier.
 
 ## The governance problem none of the three tiers has solved
 
@@ -86,8 +105,10 @@ governance *cannot* live in the cloud: it has to live where the data and the use
 ## kriya
 
 That's the layer I'm building: **kriya** — an open-source (MIT) framework (Rust agent host +
-TypeScript SDK + React inspector). Each action runs through **permission → human approval → budget →
-a signed audit log**, on-device, while speaking **MCP** outward so any agent can drive it.
+TypeScript SDK + React inspector). It speaks **MCP** outward over the same **stdio** transport an
+agent already knows — so the typed-tool half is nothing exotic. The part a raw stdio server leaves
+out is the governance: with kriya each action runs through **permission → human approval → budget →
+a signed audit log**, on-device, before it touches your data.
 
 The proof: kriya was bolted onto **Actual Budget** — a local finance app with *no HTTP API* — in
 **~37 lines**. The agent auto-categorizes transactions (each signed), but **cannot delete or move
@@ -99,11 +120,20 @@ money without in-app approval**; unlisted actions are refused; a per-minute budg
 - **MCP** — massive, but governance-immature; core enterprise features not shipped.
 - **Desktop** — one GA product (Microsoft Copilot Studio), still vision-based; the typed-action,
   governed approach is early.
+- **The on-device-governance contest is real and growing.** Don't oversell "nobody's here":
+  endpoint and platform players are converging on the laptop — Maxim AI's **Bifrost Edge**,
+  **CrowdStrike** ("the endpoint as the epicenter for AI security"), **Microsoft Defender**'s local
+  AI-agent coverage, and Microsoft's open-source **Agent Governance Toolkit**. But each governs from
+  *outside* the app: at the OS/endpoint layer or as a cloud sidecar. None reaches *inside* a no-API
+  app's own process to gate the app's real, typed handlers with an in-app approval the user sees in
+  *that* app. That seam — the sole gatekeeper between the agent and a resource with no other door —
+  is the part still unoccupied.
 - **kriya** — alpha, no production users; the pattern works, APIs may still change.
 
-The structural truth doesn't change: **local apps with private data cannot be governed from the
-outside.** Governance has to live on-device, where the data and the users are. Right now, almost
-nobody is building that layer. That's the frontier kriya is for.
+The structural truth doesn't change: **a local app whose data has no other door cannot be governed
+from the outside.** When the app is the only path to the resource, the host inside it is the only
+place an "the agent cannot bypass this" guarantee can actually hold — so governance has to live
+on-device, where the data and the users are. That's the frontier kriya is for.
 
 ---
 

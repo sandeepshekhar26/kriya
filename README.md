@@ -5,8 +5,11 @@
 
 ## The three frontiers of "agent meets software"
 
-AI agents need to operate software. That interaction is splitting into three tiers — two have
-emerging standards, one has nothing:
+AI agents need to operate software. That interaction is splitting into three tiers. For *tooling*
+— how an agent calls an app's functions — all three now have a standard (on desktop it's **MCP's
+original stdio transport**, how Claude Desktop and Cursor already spawn local servers). For
+*governance* — permissioning and auditing what the agent then does — only two tiers have an owner;
+the third, which holds the most sensitive data, has none on-device:
 
 ```
                         ┌─────────────────────────────────────────────────────┐
@@ -14,13 +17,13 @@ emerging standards, one has nothing:
                         ├─────────────┬─────────────────┬─────────────────────┤
                         │  Web apps   │   Cloud APIs    │  Desktop / local    │
                         │             │                 │  apps               │
-  Standard              │  WebMCP     │   MCP           │  ❌ None            │
-                        │  (W3C trial)│   (Linux Fdn)   │                     │
-  Agent interface       │  Declared   │   REST / tool   │  Screenshots +      │
-                        │  tools in   │   schemas       │  pixel-clicking     │
+  Standard              │  WebMCP     │   MCP / HTTP    │  MCP / stdio        │
+                        │  (W3C trial)│   (Linux Fdn)   │  (local subproc.)   │
+  Agent interface       │  Declared   │   REST / tool   │  Typed tools via    │
+                        │  tools in   │   schemas       │  stdio MCP*         │
                         │  the page   │                 │                     │
-  Governance            │  Browser    │   Gateway-level  │  ❌ None —          │
-                        │  sandbox    │   (immature)    │  can't permission,  │
+  Governance            │  Browser    │   Gateway-level │  ❌ None on-device  │
+                        │  sandbox    │   (crowded)     │  — can't permission,│
                         │             │                 │  audit, or gate     │
   Who's building it     │  Google,    │   Anthropic,    │  ← kriya is here    │
                         │  browser    │   OpenAI,       │                     │
@@ -28,9 +31,14 @@ emerging standards, one has nothing:
                         └─────────────┴─────────────────┴─────────────────────┘
 ```
 
+<sub>*Screenshots + pixel-clicking is the fallback for an app nobody has instrumented — not the
+ceiling. The desktop gap isn't tooling (stdio MCP already does typed tools); it's on-device
+governance.</sub>
+
 **The gap:** a local app with no API and private data — a POS terminal, a finance tool, a
-healthcare workstation — can't be governed from the outside. Governance must live where the data
-and the human are: **inside the app, on the device.** That's the frontier kriya builds for.
+healthcare workstation — can't be governed from the *outside* (no other door means no external
+chokepoint to enforce at). Governance must live where the data and the human are: **inside the app,
+on the device.** That's the frontier kriya builds for.
 ([Full article →](https://medium.com/@sandeepshekhar26/the-three-frontiers-of-agent-meets-software-and-the-one-nobodys-building-for-a7cafda13715))
 
 ---
