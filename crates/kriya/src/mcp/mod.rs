@@ -32,6 +32,18 @@ pub mod proxy_executor;
 #[cfg(feature = "mcp-client")]
 pub mod proxy_server;
 
+// Front 2 — the reach-in adapter (service-architecture §5). Off-by-default `reach-in` feature so the
+// default build pulls in no macOS AX FFI. The platform-agnostic core (AxBackend trait, tool
+// synthesis, AxExecutor, ReachInServer) compiles on any OS for unit testing; the real AX backend
+// (`reachin::macos`) is gated `#[cfg(target_os = "macos")]` inside the module.
+#[cfg(feature = "reach-in")]
+pub mod reachin;
+
+// Front 3 — the computer-use fallback (service-architecture §6). Off-by-default `computer-use`
+// feature; deferred / design-partner-gated. The thin governed seam only (no CV deps).
+#[cfg(feature = "computer-use")]
+pub mod computer_use;
+
 #[cfg(target_os = "macos")]
 pub use approval::GuiApproval;
 pub use approval::{ApprovalGate, AutoApprove, DenyApproval, TtyApproval};
@@ -47,3 +59,16 @@ pub use client::McpClient;
 pub use proxy_executor::McpProxyExecutor;
 #[cfg(feature = "mcp-client")]
 pub use proxy_server::ProxyServer;
+
+// Front 2 public surface: the trait + node type, the synthesis entry points, the executor, and the
+// serve loop. The macOS backend is re-exported only on macOS.
+#[cfg(feature = "reach-in")]
+pub use reachin::executor::AxExecutor;
+#[cfg(all(feature = "reach-in", target_os = "macos"))]
+pub use reachin::macos::MacAxBackend;
+#[cfg(feature = "reach-in")]
+pub use reachin::{AxBackend, AxNode, ReachInServer};
+
+// Front 3 public surface.
+#[cfg(feature = "computer-use")]
+pub use computer_use::ComputerUseExecutor;

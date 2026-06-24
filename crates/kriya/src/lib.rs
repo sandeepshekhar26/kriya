@@ -74,3 +74,10 @@ pub use agent::{
     run_task, ApprovalMap, GovernedApp, HostSink, PendingMap, SharedBudget, StepAdvanceMap,
 };
 pub use sidecar::{run_sidecar, SharedWriter, StdioSink};
+
+// Front 2 (reach-in) public surface, behind the off-by-default `reach-in` feature. The gateway bin
+// constructs a `ReachInServer` to start Front 2; `MacAxBackend` is the macOS backend it runs over.
+#[cfg(all(feature = "reach-in", target_os = "macos"))]
+pub use mcp::reachin::macos::MacAxBackend;
+#[cfg(feature = "reach-in")]
+pub use mcp::reachin::{executor::AxExecutor, AxBackend, AxNode, ReachInServer};
