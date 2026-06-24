@@ -90,12 +90,18 @@ impl AgentMemory {
         // Backwards-compatible migration: stores opened before the run_id/goal addition
         // still work; new rows carry the metadata. Old rows get empty strings on read.
         if !column_exists(&conn, "episodes", "run_id")? {
-            conn.execute("ALTER TABLE episodes ADD COLUMN run_id TEXT NOT NULL DEFAULT ''", [])
-                .map_err(|e| e.to_string())?;
+            conn.execute(
+                "ALTER TABLE episodes ADD COLUMN run_id TEXT NOT NULL DEFAULT ''",
+                [],
+            )
+            .map_err(|e| e.to_string())?;
         }
         if !column_exists(&conn, "episodes", "goal")? {
-            conn.execute("ALTER TABLE episodes ADD COLUMN goal TEXT NOT NULL DEFAULT ''", [])
-                .map_err(|e| e.to_string())?;
+            conn.execute(
+                "ALTER TABLE episodes ADD COLUMN goal TEXT NOT NULL DEFAULT ''",
+                [],
+            )
+            .map_err(|e| e.to_string())?;
         }
 
         // Index that makes resume lookup (by goal) fast even with thousands of episodes.
@@ -192,7 +198,8 @@ impl AgentMemory {
                 })
             })
             .map_err(|e| e.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
     }
 
     /// The most recent run that targeted `goal`, if any, with its completed action steps
@@ -212,7 +219,9 @@ impl AgentMemory {
             )
             .ok();
 
-        let Some(run_id) = last_run_id else { return Ok(None) };
+        let Some(run_id) = last_run_id else {
+            return Ok(None);
+        };
 
         let mut stmt = self
             .conn
@@ -234,7 +243,11 @@ impl AgentMemory {
         for row in rows {
             let (action_id, params_str, success) = row.map_err(|e| e.to_string())?;
             let params: Value = serde_json::from_str(&params_str).unwrap_or(Value::Null);
-            completed.push(CompletedStep { action_id, params, success });
+            completed.push(CompletedStep {
+                action_id,
+                params,
+                success,
+            });
         }
 
         Ok(Some(ResumableRun {
@@ -263,7 +276,15 @@ impl AgentMemory {
                 "INSERT INTO pending_approvals
                    (run_id, goal, step_id, action_id, params, reasoning, ts_ms, resolved)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
-                params![run_id, goal, step_id, action_id, params.to_string(), reasoning, ts_ms as i64],
+                params![
+                    run_id,
+                    goal,
+                    step_id,
+                    action_id,
+                    params.to_string(),
+                    reasoning,
+                    ts_ms as i64
+                ],
             )
             .map_err(|e| e.to_string())?;
         Ok(())
@@ -282,7 +303,10 @@ impl AgentMemory {
     }
 
     /// The still-unresolved held actions for a run, oldest first — what resume re-issues.
-    pub fn unresolved_pending_approvals(&self, run_id: &str) -> Result<Vec<PendingApproval>, String> {
+    pub fn unresolved_pending_approvals(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<PendingApproval>, String> {
         let mut stmt = self
             .conn
             .prepare(
@@ -303,7 +327,12 @@ impl AgentMemory {
         for row in rows {
             let (step_id, action_id, params_str, reasoning) = row.map_err(|e| e.to_string())?;
             let params: Value = serde_json::from_str(&params_str).unwrap_or(Value::Null);
-            out.push(PendingApproval { step_id, action_id, params, reasoning });
+            out.push(PendingApproval {
+                step_id,
+                action_id,
+                params,
+                reasoning,
+            });
         }
         Ok(out)
     }
@@ -330,15 +359,45 @@ mod tests {
     use serde_json::json;
 
     fn rec(m: &AgentMemory, ts: u128, run: &str, goal: &str, action: &str, ok: bool) {
-        m.record(ts, run, goal, action, &json!({ "id": "x" }), ok, "because", "sig").unwrap();
+        m.record(
+            ts,
+            run,
+            goal,
+            action,
+            &json!({ "id": "x" }),
+            ok,
+            "because",
+            "sig",
+        )
+        .unwrap();
     }
 
     #[test]
     fn records_and_counts_across_calls() {
         let m = AgentMemory::open_in_memory().unwrap();
         assert_eq!(m.count().unwrap(), 0);
-        m.record(1, "r1", "g1", "edit_note", &json!({ "id": "n1" }), true, "because", "sig1").unwrap();
-        m.record(2, "r1", "g1", "delete_note", &json!({ "id": "n2" }), false, "denied", "sig2").unwrap();
+        m.record(
+            1,
+            "r1",
+            "g1",
+            "edit_note",
+            &json!({ "id": "n1" }),
+            true,
+            "because",
+            "sig1",
+        )
+        .unwrap();
+        m.record(
+            2,
+            "r1",
+            "g1",
+            "delete_note",
+            &json!({ "id": "n2" }),
+            false,
+            "denied",
+            "sig2",
+        )
+        .unwrap();
         assert_eq!(m.count().unwrap(), 2);
     }
 
@@ -390,7 +449,8 @@ mod tests {
     fn recent_respects_limit() {
         let m = AgentMemory::open_in_memory().unwrap();
         for i in 0..5 {
-            m.record(i, "r", "g", "edit_note", &json!({}), true, "", "s").unwrap();
+            m.record(i, "r", "g", "edit_note", &json!({}), true, "", "s")
+                .unwrap();
         }
         assert_eq!(m.recent(3).unwrap().len(), 3);
     }
@@ -398,10 +458,26 @@ mod tests {
     #[test]
     fn pending_approval_round_trip_and_resolve() {
         let m = AgentMemory::open_in_memory().unwrap();
-        m.record_pending_approval("r1", "g1", "s1", "delete_note", &json!({ "id": "n1" }), "cleanup", 10)
-            .unwrap();
-        m.record_pending_approval("r1", "g1", "s2", "close_account", &json!({ "id": "a1" }), "user asked", 11)
-            .unwrap();
+        m.record_pending_approval(
+            "r1",
+            "g1",
+            "s1",
+            "delete_note",
+            &json!({ "id": "n1" }),
+            "cleanup",
+            10,
+        )
+        .unwrap();
+        m.record_pending_approval(
+            "r1",
+            "g1",
+            "s2",
+            "close_account",
+            &json!({ "id": "a1" }),
+            "user asked",
+            11,
+        )
+        .unwrap();
 
         let pend = m.unresolved_pending_approvals("r1").unwrap();
         assert_eq!(pend.len(), 2);
@@ -420,8 +496,10 @@ mod tests {
     #[test]
     fn unresolved_pending_approvals_are_scoped_to_their_run() {
         let m = AgentMemory::open_in_memory().unwrap();
-        m.record_pending_approval("run_a", "g", "sa", "delete_note", &json!({}), "x", 1).unwrap();
-        m.record_pending_approval("run_b", "g", "sb", "delete_note", &json!({}), "x", 2).unwrap();
+        m.record_pending_approval("run_a", "g", "sa", "delete_note", &json!({}), "x", 1)
+            .unwrap();
+        m.record_pending_approval("run_b", "g", "sb", "delete_note", &json!({}), "x", 2)
+            .unwrap();
         assert_eq!(m.unresolved_pending_approvals("run_a").unwrap().len(), 1);
         assert_eq!(m.unresolved_pending_approvals("run_b").unwrap().len(), 1);
         assert_eq!(m.unresolved_pending_approvals("run_c").unwrap().len(), 0);

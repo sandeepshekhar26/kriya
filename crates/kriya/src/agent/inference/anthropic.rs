@@ -27,8 +27,7 @@ impl Anthropic {
     pub fn new() -> Self {
         Self {
             api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
-            model: std::env::var("ANTHROPIC_MODEL")
-                .unwrap_or_else(|_| DEFAULT_MODEL.to_string()),
+            model: std::env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string()),
         }
     }
 }
@@ -44,10 +43,9 @@ impl Inference for Anthropic {
     }
 
     fn next_step(&mut self, ctx: &StepContext) -> Result<StepDecision, String> {
-        let api_key = self
-            .api_key
-            .as_deref()
-            .ok_or_else(|| "ANTHROPIC_API_KEY is not set; cannot use anthropic backend".to_string())?;
+        let api_key = self.api_key.as_deref().ok_or_else(|| {
+            "ANTHROPIC_API_KEY is not set; cannot use anthropic backend".to_string()
+        })?;
 
         let prompt = build_prompt(ctx);
 
@@ -73,9 +71,7 @@ impl Inference for Anthropic {
             .and_then(|c| c.get(0))
             .and_then(|c| c.get("text"))
             .and_then(Value::as_str)
-            .ok_or_else(|| {
-                format!("anthropic response missing content[0].text: {response}")
-            })?;
+            .ok_or_else(|| format!("anthropic response missing content[0].text: {response}"))?;
 
         let json_str = extract_json(raw)
             .ok_or_else(|| format!("no JSON object found in anthropic response: {raw}"))?;

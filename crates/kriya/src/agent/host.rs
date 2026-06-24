@@ -234,6 +234,9 @@ fn dispatch_and_record(
 
 /// Run the agent loop, sending events through `sink` (Tauri, sidecar, or test recorder).
 /// Results flow back through the shared channel maps, whatever the transport.
+// Transport, the three channel maps, policy, signer, backend, and the request are independent host
+// collaborators; bundling them into a struct purely to satisfy the lint would obscure, not clarify.
+#[allow(clippy::too_many_arguments)]
 pub fn run_task(
     sink: Arc<dyn HostSink>,
     pending: PendingMap,
@@ -249,7 +252,9 @@ pub fn run_task(
     // controlled store.
     let memory = AgentMemory::open(&std::env::temp_dir().join("kriya-memory.db")).ok();
     let budget = new_budget(&policy);
-    run_task_with_memory(sink, pending, approvals, advances, policy, signer, budget, backend, req, memory)
+    run_task_with_memory(
+        sink, pending, approvals, advances, policy, signer, budget, backend, req, memory,
+    )
 }
 
 /// A governed app shared by multiple concurrent agents — **multi-agent governance**. The policy, the
@@ -338,7 +343,11 @@ fn run_task_with_memory(
 
     // Who is acting (R8). Resolved once per run and stamped into every signed receipt,
     // so the audit trail attributes each action to an agent + operator, tamper-evidently.
-    let actor = resolve_actor(req.agent_id.as_deref(), req.user_id.as_deref(), backend.name());
+    let actor = resolve_actor(
+        req.agent_id.as_deref(),
+        req.user_id.as_deref(),
+        backend.name(),
+    );
 
     // On-device guarantee (R13). If the policy seals this run, the inference backend must
     // not egress to a remote service. Enforce before any step runs, and sign an attestation
@@ -403,7 +412,10 @@ fn run_task_with_memory(
         .as_ref()
         .and_then(|m| {
             if let Ok(n) = m.count() {
-                log(sink, AgentLog::info(format!("memory: {n} past episodes on record")));
+                log(
+                    sink,
+                    AgentLog::info(format!("memory: {n} past episodes on record")),
+                );
             }
             m.recent(8).ok()
         })
@@ -456,9 +468,7 @@ fn run_task_with_memory(
                 Ok(None) => {
                     log(
                         sink,
-                        AgentLog::info(format!(
-                            "resume requested but no prior run found for this goal — starting fresh"
-                        )),
+                        AgentLog::info("resume requested but no prior run found for this goal — starting fresh".to_string()),
                     );
                 }
                 Err(err) => {
@@ -481,7 +491,9 @@ fn run_task_with_memory(
     // backend-driven loop, so the resumed run finishes the business the crash left hanging.
     if let Some(prior_run_id) = &resume_run_id {
         if let Some(m) = &memory {
-            let pendings = m.unresolved_pending_approvals(prior_run_id).unwrap_or_default();
+            let pendings = m
+                .unresolved_pending_approvals(prior_run_id)
+                .unwrap_or_default();
             if !pendings.is_empty() {
                 log(
                     sink,
@@ -508,23 +520,41 @@ fn run_task_with_memory(
                         false
                     }
                     Decision::Allow => true,
-                    Decision::RequiresApproval => {
-                        request_approval(sink, &approvals, &step_id, &p.action_id, &p.params, &p.reasoning)
-                    }
+                    Decision::RequiresApproval => request_approval(
+                        sink,
+                        &approvals,
+                        &step_id,
+                        &p.action_id,
+                        &p.params,
+                        &p.reasoning,
+                    ),
                 };
                 // Resolve the *original* pending row so a second resume doesn't re-issue it again.
                 let _ = m.resolve_pending_approval(&p.step_id);
                 if !proceed {
                     log(
                         sink,
-                        AgentLog::warn(format!("{} not approved on resume — skipped.", p.action_id)),
+                        AgentLog::warn(format!(
+                            "{} not approved on resume — skipped.",
+                            p.action_id
+                        )),
                     );
-                    history.push(StepRecord { action_id: p.action_id, params: p.params, success: false });
+                    history.push(StepRecord {
+                        action_id: p.action_id,
+                        params: p.params,
+                        success: false,
+                    });
                     continue;
                 }
                 if let Err(reason) = budget.lock().unwrap().check_and_record(now_ms()) {
-                    let done = AgentDone { summary: format!("Stopped: {reason}."), steps };
-                    log(sink, AgentLog::error(format!("{} blocked — {reason}", p.action_id)));
+                    let done = AgentDone {
+                        summary: format!("Stopped: {reason}."),
+                        steps,
+                    };
+                    log(
+                        sink,
+                        AgentLog::error(format!("{} blocked — {reason}", p.action_id)),
+                    );
                     sink.emit_done(&done);
                     return Ok(done);
                 }
@@ -556,7 +586,10 @@ fn run_task_with_memory(
 
     loop {
         if steps >= MAX_STEPS {
-            let done = AgentDone { summary: "Stopped: reached step limit.".into(), steps };
+            let done = AgentDone {
+                summary: "Stopped: reached step limit.".into(),
+                steps,
+            };
             sink.emit_done(&done);
             return Ok(done);
         }
@@ -575,7 +608,10 @@ fn run_task_with_memory(
                     summary: "Stopped by developer (step-mode).".into(),
                     steps,
                 };
-                log(sink, AgentLog::info("step-mode: stop requested".to_string()));
+                log(
+                    sink,
+                    AgentLog::info("step-mode: stop requested".to_string()),
+                );
                 sink.emit_done(&done);
                 return Ok(done);
             }
@@ -585,7 +621,10 @@ fn run_task_with_memory(
         // per-minute action cap. Checked before each inference call so a loop can't run up
         // unbounded backend cost even when it dispatches few (or no) actions.
         if let Err(reason) = budget.lock().unwrap().check_and_record_api_call(now_ms()) {
-            let done = AgentDone { summary: format!("Stopped: {reason}."), steps };
+            let done = AgentDone {
+                summary: format!("Stopped: {reason}."),
+                steps,
+            };
             log(sink, AgentLog::error(reason.clone()));
             sink.emit_done(&done);
             return Ok(done);
@@ -612,8 +651,13 @@ fn run_task_with_memory(
                     )),
                 );
             };
-            match next_step_with_retry(backend.as_mut(), &ctx, &retry_policy, on_retry, std::thread::sleep)
-            {
+            match next_step_with_retry(
+                backend.as_mut(),
+                &ctx,
+                &retry_policy,
+                on_retry,
+                std::thread::sleep,
+            ) {
                 Ok(d) => d,
                 // The backend kept failing past the retry budget — it cannot make progress on a
                 // flaky/unreachable model. Escalate by ending the run *gracefully*: a descriptive
@@ -641,7 +685,11 @@ fn run_task_with_memory(
                 sink.emit_done(&done);
                 return Ok(done);
             }
-            StepDecision::Call { action_id, params, reasoning } => (action_id, params, reasoning),
+            StepDecision::Call {
+                action_id,
+                params,
+                reasoning,
+            } => (action_id, params, reasoning),
         };
 
         // One id correlates this step across the approval request, the action request, and
@@ -655,17 +703,17 @@ fn run_task_with_memory(
                 // Persist the held action so a crash mid-approval can re-issue it on resume (R9).
                 if let Some(m) = &memory {
                     let _ = m.record_pending_approval(
-                        &run_id, &req.goal, &step_id, &action_id, &params, &reasoning, now_ms(),
+                        &run_id,
+                        &req.goal,
+                        &step_id,
+                        &action_id,
+                        &params,
+                        &reasoning,
+                        now_ms(),
                     );
                 }
-                let approved = request_approval(
-                    sink,
-                    &approvals,
-                    &step_id,
-                    &action_id,
-                    &params,
-                    &reasoning,
-                );
+                let approved =
+                    request_approval(sink, &approvals, &step_id, &action_id, &params, &reasoning);
                 // The human decided (approve/deny/timeout) within this run → resolved; only a
                 // process death mid-wait leaves it unresolved for resume to pick up.
                 if let Some(m) = &memory {
@@ -681,7 +729,11 @@ fn run_task_with_memory(
                             detail: None,
                         },
                     );
-                    history.push(StepRecord { action_id, params, success: false });
+                    history.push(StepRecord {
+                        action_id,
+                        params,
+                        success: false,
+                    });
                     continue;
                 }
                 log(
@@ -699,14 +751,21 @@ fn run_task_with_memory(
                     sink,
                     AgentLog::warn(format!("{action_id} denied by policy.")),
                 );
-                history.push(StepRecord { action_id, params, success: false });
+                history.push(StepRecord {
+                    action_id,
+                    params,
+                    success: false,
+                });
                 continue;
             }
         }
 
         // Rate-limit gate: stop a runaway/looping agent before it acts.
         if let Err(reason) = budget.lock().unwrap().check_and_record(now_ms()) {
-            let done = AgentDone { summary: format!("Stopped: {reason}."), steps };
+            let done = AgentDone {
+                summary: format!("Stopped: {reason}."),
+                steps,
+            };
             log(
                 sink,
                 AgentLog {
@@ -750,7 +809,7 @@ fn run_task_with_memory(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{ToolSchema, AgentActionResult};
+    use crate::protocol::{AgentActionResult, ToolSchema};
     use crate::NetworkProfile;
     use serde_json::{json, Value};
     use std::collections::HashMap;
@@ -766,7 +825,10 @@ mod tests {
 
     impl ScriptedBackend {
         fn new(steps: Vec<StepDecision>) -> Self {
-            Self { steps: steps.into_iter(), profile: NetworkProfile::None }
+            Self {
+                steps: steps.into_iter(),
+                profile: NetworkProfile::None,
+            }
         }
         fn with_profile(mut self, profile: NetworkProfile) -> Self {
             self.profile = profile;
@@ -782,10 +844,9 @@ mod tests {
             self.profile
         }
         fn next_step(&mut self, _ctx: &StepContext) -> Result<StepDecision, String> {
-            Ok(self
-                .steps
-                .next()
-                .unwrap_or(StepDecision::Done { summary: "script exhausted".into() }))
+            Ok(self.steps.next().unwrap_or(StepDecision::Done {
+                summary: "script exhausted".into(),
+            }))
         }
     }
 
@@ -800,7 +861,11 @@ mod tests {
 
     impl FlakyScriptedBackend {
         fn new(fail_n: u32, steps: Vec<StepDecision>) -> Self {
-            Self { fail_n, calls: 0, steps: steps.into_iter() }
+            Self {
+                fail_n,
+                calls: 0,
+                steps: steps.into_iter(),
+            }
         }
     }
 
@@ -816,10 +881,9 @@ mod tests {
             if self.calls <= self.fail_n {
                 return Err(format!("transient backend failure #{}", self.calls));
             }
-            Ok(self
-                .steps
-                .next()
-                .unwrap_or(StepDecision::Done { summary: "script exhausted".into() }))
+            Ok(self.steps.next().unwrap_or(StepDecision::Done {
+                summary: "script exhausted".into(),
+            }))
         }
     }
 
@@ -854,7 +918,10 @@ retry:
 
     impl HostSink for RecordingSink {
         fn emit_action(&self, req: &AgentActionRequest) {
-            self.events.lock().unwrap().push(format!("action:{}", req.action_id));
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("action:{}", req.action_id));
             if let Some(tx) = self.pending.lock().unwrap().remove(&req.step_id) {
                 let _ = tx.send(AgentActionResult {
                     step_id: req.step_id.clone(),
@@ -866,13 +933,19 @@ retry:
             }
         }
         fn emit_approval(&self, req: &AgentApprovalRequest) {
-            self.events.lock().unwrap().push(format!("approval:{}", req.action_id));
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("approval:{}", req.action_id));
         }
         fn emit_await_step(&self, _ev: &AgentAwaitStep) {
             self.events.lock().unwrap().push("await_step".into());
         }
         fn emit_done(&self, done: &AgentDone) {
-            self.events.lock().unwrap().push(format!("done:{}", done.steps));
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("done:{}", done.steps));
         }
         fn emit_log(&self, _entry: &AgentLog) {}
     }
@@ -889,7 +962,10 @@ retry:
 
     impl HostSink for ReissueSink {
         fn emit_action(&self, req: &AgentActionRequest) {
-            self.events.lock().unwrap().push(format!("action:{}", req.action_id));
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("action:{}", req.action_id));
             if let Some(tx) = self.pending.lock().unwrap().remove(&req.step_id) {
                 let _ = tx.send(AgentActionResult {
                     step_id: req.step_id.clone(),
@@ -901,14 +977,20 @@ retry:
             }
         }
         fn emit_approval(&self, req: &AgentApprovalRequest) {
-            self.events.lock().unwrap().push(format!("approval:{}", req.action_id));
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("approval:{}", req.action_id));
             if let Some(tx) = self.approvals.lock().unwrap().remove(&req.step_id) {
                 let _ = tx.send(true); // grant on the spot
             }
         }
         fn emit_await_step(&self, _ev: &AgentAwaitStep) {}
         fn emit_done(&self, done: &AgentDone) {
-            self.events.lock().unwrap().push(format!("done:{}", done.steps));
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("done:{}", done.steps));
         }
         fn emit_log(&self, _entry: &AgentLog) {}
     }
@@ -936,7 +1018,9 @@ retry:
                 params: json!({"title": "hi"}),
                 reasoning: "first".into(),
             },
-            StepDecision::Done { summary: "all done".into() },
+            StepDecision::Done {
+                summary: "all done".into(),
+            },
         ]));
 
         let req = AgentStartRequest {
@@ -963,7 +1047,10 @@ retry:
 
         assert_eq!(done.steps, 1);
         let events = sink.events.lock().unwrap().clone();
-        assert_eq!(events, vec!["action:create_note".to_string(), "done:1".to_string()]);
+        assert_eq!(
+            events,
+            vec!["action:create_note".to_string(), "done:1".to_string()]
+        );
     }
 
     #[test]
@@ -981,7 +1068,9 @@ retry:
                 params: json!({}),
                 reasoning: "nope".into(),
             },
-            StepDecision::Done { summary: "stop".into() },
+            StepDecision::Done {
+                summary: "stop".into(),
+            },
         ]));
         let req = AgentStartRequest {
             goal: "should be blocked".into(),
@@ -1005,7 +1094,10 @@ retry:
         .expect("run_task");
         // No action event was emitted — the denied action never reached the sink/app.
         let events = sink.events.lock().unwrap().clone();
-        assert!(events.iter().all(|e| !e.starts_with("action:")), "got: {events:?}");
+        assert!(
+            events.iter().all(|e| !e.starts_with("action:")),
+            "got: {events:?}"
+        );
     }
 
     #[test]
@@ -1018,10 +1110,27 @@ retry:
 
         // Seed the crashed prior run "R": one completed step + one unresolved pending approval.
         let seed = AgentMemory::open(&db).unwrap();
-        seed.record(1, "R", "tidy", "create_note", &json!({ "title": "keep" }), true, "seed", "sig")
-            .unwrap();
-        seed.record_pending_approval("R", "tidy", "old-step", "delete_note", &json!({ "id": 1 }), "cleanup", 2)
-            .unwrap();
+        seed.record(
+            1,
+            "R",
+            "tidy",
+            "create_note",
+            &json!({ "title": "keep" }),
+            true,
+            "seed",
+            "sig",
+        )
+        .unwrap();
+        seed.record_pending_approval(
+            "R",
+            "tidy",
+            "old-step",
+            "delete_note",
+            &json!({ "id": 1 }),
+            "cleanup",
+            2,
+        )
+        .unwrap();
         assert_eq!(seed.unresolved_pending_approvals("R").unwrap().len(), 1);
 
         let (pending, approvals, advances) = maps();
@@ -1063,8 +1172,14 @@ retry:
 
         // The held delete_note was re-issued on resume: approval re-requested, then dispatched.
         let events = sink.events.lock().unwrap().clone();
-        assert!(events.contains(&"approval:delete_note".to_string()), "got: {events:?}");
-        assert!(events.contains(&"action:delete_note".to_string()), "got: {events:?}");
+        assert!(
+            events.contains(&"approval:delete_note".to_string()),
+            "got: {events:?}"
+        );
+        assert!(
+            events.contains(&"action:delete_note".to_string()),
+            "got: {events:?}"
+        );
 
         // And it's now resolved, so a second resume would not re-issue it again.
         assert_eq!(seed.unresolved_pending_approvals("R").unwrap().len(), 0);
@@ -1106,7 +1221,9 @@ retry:
                 params: json!({ "title": "b" }),
                 reasoning: "2".into(),
             },
-            StepDecision::Done { summary: "done".into() },
+            StepDecision::Done {
+                summary: "done".into(),
+            },
         ]));
         let req = AgentStartRequest {
             goal: "make notes".into(),
@@ -1137,7 +1254,11 @@ retry:
             1,
             "got: {events:?}"
         );
-        assert!(done.summary.contains("api calls/hour"), "summary: {}", done.summary);
+        assert!(
+            done.summary.contains("api calls/hour"),
+            "summary: {}",
+            done.summary
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1168,7 +1289,9 @@ retry:
                 params: json!({"title": "hi"}),
                 reasoning: "first".into(),
             },
-            StepDecision::Done { summary: "done".into() },
+            StepDecision::Done {
+                summary: "done".into(),
+            },
         ]));
         let req = AgentStartRequest {
             goal: "make a note".into(),
@@ -1181,12 +1304,22 @@ retry:
         };
 
         // Isolated audit log so we can read back exactly the receipt this run wrote.
-        let log = std::env::temp_dir().join(format!("kriya-host-actor-{}.jsonl", uuid::Uuid::new_v4()));
+        let log =
+            std::env::temp_dir().join(format!("kriya-host-actor-{}.jsonl", uuid::Uuid::new_v4()));
         let _ = std::fs::remove_file(&log);
         let signer = Arc::new(Signer::with_log_path(log.clone()));
 
-        run_task(sink, pending, approvals, advances, Arc::new(Policy::default()), signer, backend, req)
-            .expect("run_task");
+        run_task(
+            sink,
+            pending,
+            approvals,
+            advances,
+            Arc::new(Policy::default()),
+            signer,
+            backend,
+            req,
+        )
+        .expect("run_task");
 
         let body = std::fs::read_to_string(&log).expect("audit log written");
         let line = body.lines().next().expect("one receipt line");
@@ -1228,7 +1361,9 @@ on_device: true
                 params: json!({"title": "x"}),
                 reasoning: "go".into(),
             },
-            StepDecision::Done { summary: "done".into() },
+            StepDecision::Done {
+                summary: "done".into(),
+            },
         ]));
         let req = AgentStartRequest {
             goal: "sealed run".into(),
@@ -1239,7 +1374,8 @@ on_device: true
             agent_id: None,
             user_id: None,
         };
-        let log = std::env::temp_dir().join(format!("kriya-ondevice-ok-{}.jsonl", uuid::Uuid::new_v4()));
+        let log =
+            std::env::temp_dir().join(format!("kriya-ondevice-ok-{}.jsonl", uuid::Uuid::new_v4()));
         let _ = std::fs::remove_file(&log);
         let signer = Arc::new(Signer::with_log_path(log.clone()));
 
@@ -1259,14 +1395,21 @@ on_device: true
         // First line is the signed on-device attestation; the action receipt follows.
         let body = std::fs::read_to_string(&log).expect("audit log written");
         let lines: Vec<&str> = body.lines().collect();
-        assert_eq!(lines.len(), 2, "attestation + one action receipt, got: {lines:?}");
+        assert_eq!(
+            lines.len(),
+            2,
+            "attestation + one action receipt, got: {lines:?}"
+        );
         let attest: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(attest["action_id"], "kriya.attestation.on_device");
         assert_eq!(attest["params"]["egress"], false);
         assert_eq!(attest["params"]["network_profile"], "no-network");
         // And the action actually dispatched.
         let events = sink.events.lock().unwrap().clone();
-        assert!(events.iter().any(|e| e == "action:create_note"), "got: {events:?}");
+        assert!(
+            events.iter().any(|e| e == "action:create_note"),
+            "got: {events:?}"
+        );
         let _ = std::fs::remove_file(&log);
     }
 
@@ -1315,7 +1458,10 @@ on_device: true
         );
         // The egressing backend never got to dispatch an action.
         let events = sink.events.lock().unwrap().clone();
-        assert!(events.iter().all(|e| !e.starts_with("action:")), "got: {events:?}");
+        assert!(
+            events.iter().all(|e| !e.starts_with("action:")),
+            "got: {events:?}"
+        );
     }
 
     #[test]
@@ -1337,7 +1483,9 @@ on_device: true
                     params: json!({ "title": "survived a blip" }),
                     reasoning: "first".into(),
                 },
-                StepDecision::Done { summary: "all done".into() },
+                StepDecision::Done {
+                    summary: "all done".into(),
+                },
             ],
         ));
         let req = AgentStartRequest {
@@ -1367,7 +1515,10 @@ on_device: true
         // The run recovered and completed: the action dispatched after the retries.
         assert_eq!(done.steps, 1, "summary: {}", done.summary);
         let events = sink.events.lock().unwrap().clone();
-        assert_eq!(events, vec!["action:create_note".to_string(), "done:1".to_string()]);
+        assert_eq!(
+            events,
+            vec!["action:create_note".to_string(), "done:1".to_string()]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1418,8 +1569,14 @@ on_device: true
         );
         // It ended via the done channel and never dispatched an action.
         let events = sink.events.lock().unwrap().clone();
-        assert!(events.iter().any(|e| e.starts_with("done:")), "got: {events:?}");
-        assert!(events.iter().all(|e| !e.starts_with("action:")), "got: {events:?}");
+        assert!(
+            events.iter().any(|e| e.starts_with("done:")),
+            "got: {events:?}"
+        );
+        assert!(
+            events.iter().all(|e| !e.starts_with("action:")),
+            "got: {events:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1455,7 +1612,9 @@ on_device: true
                     reasoning: String::new(),
                 })
                 .collect();
-            steps.push(StepDecision::Done { summary: goal.into() });
+            steps.push(StepDecision::Done {
+                summary: goal.into(),
+            });
             (
                 Box::new(ScriptedBackend::new(steps)) as Box<dyn Inference>,
                 AgentStartRequest {
@@ -1478,12 +1637,25 @@ on_device: true
         // Agent B shares the SAME budget — already exhausted this minute, so it's throttled at 0.
         let (backend_b, req_b) = agent("agent b", vec!["create_b1"], "agent-b");
         let done_b = app.run(sink.clone(), backend_b, req_b).expect("run b");
-        assert_eq!(done_b.steps, 0, "agent B should be throttled by the shared budget");
-        assert!(done_b.summary.contains("budget exceeded"), "summary: {}", done_b.summary);
+        assert_eq!(
+            done_b.steps, 0,
+            "agent B should be throttled by the shared budget"
+        );
+        assert!(
+            done_b.summary.contains("budget exceeded"),
+            "summary: {}",
+            done_b.summary
+        );
 
         let events = sink.events.lock().unwrap().clone();
-        assert!(events.contains(&"action:create_a1".to_string()), "got: {events:?}");
-        assert!(events.contains(&"action:create_a2".to_string()), "got: {events:?}");
+        assert!(
+            events.contains(&"action:create_a1".to_string()),
+            "got: {events:?}"
+        );
+        assert!(
+            events.contains(&"action:create_a2".to_string()),
+            "got: {events:?}"
+        );
         assert!(
             !events.contains(&"action:create_b1".to_string()),
             "agent B's action must not dispatch — shared budget exhausted: {events:?}"

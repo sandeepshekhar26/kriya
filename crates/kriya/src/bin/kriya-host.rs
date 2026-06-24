@@ -50,7 +50,8 @@ fn parse_args() -> Args {
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let mut take = |label: &str| -> String {
-            it.next().unwrap_or_else(|| usage_and_exit(&format!("{label} needs a value")))
+            it.next()
+                .unwrap_or_else(|| usage_and_exit(&format!("{label} needs a value")))
         };
         match flag.as_str() {
             "--policy" => policy = Some(PathBuf::from(take("--policy"))),
@@ -61,7 +62,12 @@ fn parse_args() -> Args {
             other => usage_and_exit(&format!("unknown argument: {other}")),
         }
     }
-    Args { policy, script, audit_log, signing_key }
+    Args {
+        policy,
+        script,
+        audit_log,
+        signing_key,
+    }
 }
 
 fn main() -> std::io::Result<()> {
@@ -87,7 +93,7 @@ fn main() -> std::io::Result<()> {
     // Validate the script once up front so a typo fails loudly at startup, not mid-run.
     if let Some(path) = &args.script {
         if let Err(e) = ScriptedPlanner::from_file(path) {
-            usage_and_exit(&format!("{e}"));
+            usage_and_exit(&e.to_string());
         }
     }
 

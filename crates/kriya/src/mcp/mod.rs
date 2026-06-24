@@ -23,11 +23,27 @@ pub mod governor;
 pub mod jsonrpc;
 pub mod server;
 
-pub use approval::{ApprovalGate, AutoApprove, DenyApproval, TtyApproval};
+// Front 1 — the stdio governance proxy (D-016). Off-by-default `mcp-client` feature so the library
+// stays lean for in-process embedders that never proxy a downstream server.
+#[cfg(feature = "mcp-client")]
+pub mod client;
+#[cfg(feature = "mcp-client")]
+pub mod proxy_executor;
+#[cfg(feature = "mcp-client")]
+pub mod proxy_server;
+
 #[cfg(target_os = "macos")]
 pub use approval::GuiApproval;
+pub use approval::{ApprovalGate, AutoApprove, DenyApproval, TtyApproval};
 pub use executor::{
     ActionExecutor, ActionOutcome, FnExecutor, PersistentProcessExecutor, ProcessExecutor,
 };
 pub use governor::{DispatchOutcome, Governor};
 pub use server::Server;
+
+#[cfg(feature = "mcp-client")]
+pub use client::McpClient;
+#[cfg(feature = "mcp-client")]
+pub use proxy_executor::McpProxyExecutor;
+#[cfg(feature = "mcp-client")]
+pub use proxy_server::ProxyServer;

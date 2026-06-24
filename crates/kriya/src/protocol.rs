@@ -142,13 +142,28 @@ pub struct AgentLog {
 
 impl AgentLog {
     pub fn info(message: impl Into<String>) -> Self {
-        Self { step_id: None, level: "info".into(), message: message.into(), detail: None }
+        Self {
+            step_id: None,
+            level: "info".into(),
+            message: message.into(),
+            detail: None,
+        }
     }
     pub fn warn(message: impl Into<String>) -> Self {
-        Self { step_id: None, level: "warn".into(), message: message.into(), detail: None }
+        Self {
+            step_id: None,
+            level: "warn".into(),
+            message: message.into(),
+            detail: None,
+        }
     }
     pub fn error(message: impl Into<String>) -> Self {
-        Self { step_id: None, level: "error".into(), message: message.into(), detail: None }
+        Self {
+            step_id: None,
+            level: "error".into(),
+            message: message.into(),
+            detail: None,
+        }
     }
 }
 
