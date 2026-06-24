@@ -285,15 +285,20 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
   full-lifecycle mode for downstream-initiated sampling/elicitation (MVP is synchronous). **(R22/R23)**
 - 🟡 **Shippable `kriya-gateway` product** — ✅ zero-config `kriya-gateway proxy -- <cmd>`, default
   deny-by-default policy generator, policy warnings, path validation, the full flag set, runnable
-  demo. ⬜ remaining: `.kriya.yaml` config discovery, on-startup on-device attestation, cross-platform
-  GUI approval (Windows/Linux), signed installers (dmg/Homebrew, msi/winget) + pinned public key.
-  Repositions `wrapAction` as enterprise depth. **(R24)**
-- ⬜ **Front 2 — reach-in adapter (no-MCP/no-API apps)** — synthesize a governed MCP server from the OS
-  accessibility tree + `AxExecutor` (macOS `AXUIElement` first, Windows UIA second). **Coverage-gated:**
-  the "any macOS app" claim was research-refuted (degrades on Electron/Qt/custom-drawn UIs, needs a
-  permission grant) — measure coverage on 5 real ICP apps first. **(R25)**
-- ⬜ **Front 3 — computer-use fallback** — `ComputerUseExecutor` for apps Fronts 1–2 can't reach.
-  Deferred / design-partner-gated. **(R26)**
+  demo, **`.kriya.yaml` config discovery** (`--config`/auto, CLI > config > default), and the
+  **on-startup on-device attestation** receipt (R13; genesis log line under a pinned key). ⬜
+  remaining: cross-platform GUI approval (Windows/Linux), signed installers (dmg/Homebrew,
+  msi/winget) + pinned public key. Repositions `wrapAction` as enterprise depth. **(R24)**
+- ✅ **Front 2 — reach-in adapter (no-MCP/no-API apps)** — shipped (macOS): `mcp::reachin`
+  (`AxBackend` trait + `MacAxBackend` FFI, AX-tree tool synthesis, `AxExecutor`, `ReachInServer`,
+  same `Governor`), exposed as `kriya-gateway reach-in --app <App>`. 23 fake-backend unit tests + 1
+  ignored real-AX test. **Coverage-gated** (macOS-only, needs Accessibility permission, degrades on
+  Electron/Qt/web UIs — "any macOS app" was research-refuted). ⬜ Windows UIA + the 5-ICP-app
+  coverage measurement. **(R25)**
+- 🟡 **Front 3 — computer-use fallback** — scaffold shipped: `ComputerUseExecutor` (off-by-default
+  `computer-use` feature) — the thin governed seam delegating to an external driver (reuses
+  `ProcessExecutor`), inert when unconfigured. ⬜ an actual driver — deferred / design-partner-gated.
+  **(R26)**
 
 ## Near-term focus
 
