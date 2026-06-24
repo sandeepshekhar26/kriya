@@ -52,11 +52,12 @@ Legend: ⬜ not started · 🟡 in progress · ✅ done · ⭐ flagship
   full-lifecycle = two reader threads + `Mutex<Governor>` for server-initiated traffic.
 - 🟡 **R24 · ⭐ The shippable `kriya-gateway` product.** **Done:** the `proxy` subcommand
   (zero-config), the **default deny-by-default policy generator** (reads allow / destructive→approval
-  / else deny), policy warnings, path validation before `Signer`, the `--policy/--approval/--actor/
-  --user/--audit-log/--signing-key/--name` flags, and the runnable `examples/gateway-proxy-demo/`.
-  **Remaining:** `.kriya.yaml` config-file discovery, on-startup on-device attestation receipt (R13),
-  cross-platform GUI approval (Windows/Linux; macOS Gui + Tty done), and signed installers
-  (dmg/Homebrew, msi/winget) with a pinned public key. Original full scope: Turn the dev-facing
+  / else deny), policy warnings, path validation before `Signer`, the full flag set, the runnable
+  `examples/gateway-proxy-demo/`, **`.kriya.yaml` config-file discovery** (`--config`/auto-discover;
+  CLI > config > default), and the **on-startup on-device attestation receipt** (R13 mechanism;
+  written as the genesis log line under a pinned `--signing-key`, skipped + noted for ephemeral keys).
+  **Remaining:** cross-platform GUI approval (Windows/Linux; macOS Gui + Tty done), and signed
+  installers (dmg/Homebrew, msi/winget) with a pinned public key. Original full scope: Turn the dev-facing
   `kriya-mcp --tools … --policy … --exec …` into a zero-config download a non-author drops into a
   client's MCP config: `{"command":"kriya-gateway","args":["proxy","--","node","server.js"]}`. One
   binary, subcommands (`proxy` = Front 1; `serve` = the existing bolt-on; `reach-in` = Front 2 later).
@@ -68,16 +69,22 @@ Legend: ⬜ not started · 🟡 in progress · ✅ done · ⭐ flagship
   Windows `.msi`/winget + Authenticode; Linux self-contained) with a pinned public key for offline
   receipt verification. Keep it **local-only, per-host, no credential aggregation** (the answer to
   "MCP gateways are a bad idea").
-- ⬜ **R25 · Front-2 reach-in adapter (no-MCP / no-API apps).** Synthesize a governed MCP server
-  **from the OS accessibility tree** instead of falling back to pixels: a schema generator over the
-  tree + `AxExecutor: ActionExecutor` (macOS `AXUIElement` `AXUIElementCopyActionNames`/`AXPress`
-  first; Windows UIA `Invoke`/`Value` second). Same `Governor` above it. **Gate on coverage:** the
-  "control any macOS app" claim was research-refuted (degrades on Electron/Qt/custom-drawn UIs, needs
-  a permission grant, blocks sandboxing) — **measure the coverage ratio on 5 real ICP apps before
-  committing this to a pitch.** The hardest-to-copy part of the moat if coverage holds.
-- ⬜ **R26 · Front-3 computer-use fallback (deferred / design-partner-gated).**
-  `ComputerUseExecutor: ActionExecutor` mapping a cleared call to pixel actions, only where Fronts
-  1–2 cannot reach. Same `Governor`. Documented for completeness; not on the near-term path.
+- ✅ **R25 · Front-2 reach-in adapter (no-MCP / no-API apps)** — shipped (macOS). `mcp::reachin`
+  (off-by-default `reach-in` feature): an `AxBackend` trait (testability seam) with a `MacAxBackend`
+  FFI impl (`accessibility-sys` + `core-foundation`, `AXUIElementCopyActionNames`/`AXUIElementPerformAction`,
+  `AXIsProcessTrusted` gate), pure tool **synthesis** from the AX tree, `AxExecutor: ActionExecutor`,
+  and `ReachInServer` (same `Governor` gates as the proxy; policy-filtered `tools/list`). Exposed as
+  `kriya-gateway reach-in --app "<App>"`. **23 unit tests via a fake backend** (no permission needed)
+  + 1 ignored real-AX test; verified the subcommand runs to the TCC gate. **Honest scope:** macOS
+  only, needs user-granted Accessibility permission, degrades on Electron/Qt/custom-drawn UIs — the
+  "any macOS app" claim was research-refuted. **Still ⬜:** Windows UIA backend; the **coverage-ratio
+  measurement on 5 real ICP apps** before this goes in a pitch.
+- 🟡 **R26 · Front-3 computer-use fallback (deferred / design-partner-gated)** — scaffold shipped.
+  `mcp::computer_use::ComputerUseExecutor` (off-by-default `computer-use` feature): the thin governed
+  seam — same `Governor` above it — that delegates a cleared call to an external "computer-use driver"
+  command (reuses `ProcessExecutor`); inert + readable-failure when unconfigured (steers to Fronts
+  1/2). The heavy CV/vision pipeline deliberately lives in the external driver, not the governed core.
+  **Still ⬜ (deferred):** an actual driver/integration — only when a design partner needs it.
 
 ---
 
