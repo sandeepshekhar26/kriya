@@ -15,7 +15,6 @@
 //!     permissions::Policy,
 //!     protocol::{AgentActionResult, AgentApprovalResponse, AgentStartRequest},
 //!     run_task, select_backend_with_default, ApprovalMap, HostSink, PendingMap, StepAdvanceMap,
-//!     TauriSink,
 //! };
 //!
 //! # struct AppState {
@@ -32,7 +31,9 @@
 //! #         Ok(kriya::StepDecision::Done { summary: "ok".into() })
 //! #     }
 //! # }
+//! # #[cfg(feature = "tauri-host")]
 //! # fn wire(app: tauri::AppHandle, state: AppState, req: AgentStartRequest) {
+//! # use kriya::TauriSink;
 //! let backend = select_backend_with_default(Box::new(MyDeterministic::default()));
 //! // Wrap the Tauri handle in a HostSink; a sidecar/Electron host passes a stdio sink instead.
 //! let sink: Arc<dyn HostSink> = Arc::new(TauriSink::new(app));
@@ -58,7 +59,10 @@ pub mod mcp;
 pub mod memory;
 pub mod permissions;
 pub mod protocol;
+pub mod registry;
 pub mod sidecar;
+
+pub use registry::{json_result, Action, Param, ParamType, Params, Registry};
 
 pub use agent::inference::retry::{RetryExhausted, RetryPolicy};
 pub use agent::inference::{

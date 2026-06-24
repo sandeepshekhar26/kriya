@@ -4,8 +4,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// MCP-compatible tool schema, as emitted by the SDK's `getToolSchemas()`.
-#[derive(Debug, Clone, Deserialize)]
+/// MCP-compatible tool schema, as emitted by the SDK's `getToolSchemas()` (TS) or
+/// [`crate::Registry::tool_schemas`] (Rust). `Serialize` so the Rust authoring SDK can emit
+/// `tools.json`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolSchema {
     pub name: String,
