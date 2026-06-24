@@ -158,7 +158,10 @@ where
                             message: e.clone(),
                             detail: None,
                         });
-                        err_sink.emit_done(&AgentDone { summary: format!("Failed: {e}"), steps: 0 });
+                        err_sink.emit_done(&AgentDone {
+                            summary: format!("Failed: {e}"),
+                            steps: 0,
+                        });
                     }
                 }));
             }
@@ -276,9 +279,11 @@ mod tests {
             out,
             Arc::new(Policy::default()),
             Arc::new(Signer::new()),
-            || Box::new(ScriptedPlanner::from_decisions(vec![StepDecision::Done {
-                summary: "nothing to do".into(),
-            }])),
+            || {
+                Box::new(ScriptedPlanner::from_decisions(vec![StepDecision::Done {
+                    summary: "nothing to do".into(),
+                }]))
+            },
         )
         .unwrap();
 
@@ -308,7 +313,10 @@ mod tests {
         let v: Value = serde_json::from_str(line.trim()).unwrap();
         assert_eq!(v["type"], "memory");
         assert_eq!(v["data"]["requestId"], "q1"); // echoed for correlation
-        assert!(v["data"]["episodes"].is_array(), "episodes present even when empty");
+        assert!(
+            v["data"]["episodes"].is_array(),
+            "episodes present even when empty"
+        );
     }
 
     #[test]
@@ -323,6 +331,10 @@ mod tests {
             || Box::new(ScriptedPlanner::from_decisions(vec![])),
         )
         .unwrap();
-        assert!(text(&buf).contains("bad inbound message"), "got: {}", text(&buf));
+        assert!(
+            text(&buf).contains("bad inbound message"),
+            "got: {}",
+            text(&buf)
+        );
     }
 }

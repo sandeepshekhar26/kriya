@@ -47,7 +47,10 @@ impl RetryPolicy {
     /// A policy that never retries — one attempt, fail fast. Useful for tests and for callers
     /// that want the old bare-`?` behavior back.
     pub fn no_retry() -> Self {
-        Self { max_retries: 0, ..Self::default() }
+        Self {
+            max_retries: 0,
+            ..Self::default()
+        }
     }
 
     /// The backoff to wait *before* the given retry attempt (1-based: retry #1 waits
@@ -101,7 +104,10 @@ pub fn next_step_with_retry(
             }
         }
     }
-    Err(RetryExhausted { attempts: policy.max_retries + 1, last_error })
+    Err(RetryExhausted {
+        attempts: policy.max_retries + 1,
+        last_error,
+    })
 }
 
 /// Reported to `on_retry` before each backoff wait, so the host can log a transient failure
@@ -169,13 +175,21 @@ mod tests {
             if self.calls <= self.fail_n {
                 Err(format!("transient blip #{}", self.calls))
             } else {
-                Ok(StepDecision::Done { summary: "recovered".into() })
+                Ok(StepDecision::Done {
+                    summary: "recovered".into(),
+                })
             }
         }
     }
 
     fn ctx<'a>() -> StepContext<'a> {
-        StepContext { goal: "", state: &Value::Null, tools: &[], history: &[], recent_memory: &[] }
+        StepContext {
+            goal: "",
+            state: &Value::Null,
+            tools: &[],
+            history: &[],
+            recent_memory: &[],
+        }
     }
 
     #[test]
@@ -193,7 +207,11 @@ mod tests {
         );
         assert!(matches!(out, Ok(StepDecision::Done { .. })));
         assert_eq!(backend.calls, 1, "no retries on a clean backend");
-        assert_eq!(slept.get(), 0, "no backoff waits when the first attempt succeeds");
+        assert_eq!(
+            slept.get(),
+            0,
+            "no backoff waits when the first attempt succeeds"
+        );
         assert_eq!(retried.get(), 0, "on_retry never fires on the success path");
     }
 
@@ -210,9 +228,16 @@ mod tests {
             |_| retried.set(retried.get() + 1),
             |_| slept.set(slept.get() + 1),
         );
-        assert!(matches!(out, Ok(StepDecision::Done { .. })), "should recover, got {out:?}");
+        assert!(
+            matches!(out, Ok(StepDecision::Done { .. })),
+            "should recover, got {out:?}"
+        );
         assert_eq!(backend.calls, 3, "two failures + one success");
-        assert_eq!(slept.get(), 2, "one backoff per failed attempt before the success");
+        assert_eq!(
+            slept.get(),
+            2,
+            "one backoff per failed attempt before the success"
+        );
         assert_eq!(retried.get(), 2);
     }
 
@@ -220,12 +245,18 @@ mod tests {
     fn exhausts_and_reports_the_last_error_when_always_failing() {
         // Always fails → exhaustion after initial + max_retries attempts, carrying the last error.
         let mut backend = FlakyBackend::new(u32::MAX);
-        let policy = RetryPolicy { max_retries: 3, ..RetryPolicy::default() };
+        let policy = RetryPolicy {
+            max_retries: 3,
+            ..RetryPolicy::default()
+        };
         let out = next_step_with_retry(&mut backend, &ctx(), &policy, |_| {}, |_| {});
         let err = out.expect_err("always-failing backend must exhaust");
         assert_eq!(err.attempts, 4, "1 initial + 3 retries");
         assert_eq!(backend.calls, 4);
-        assert!(err.last_error.contains("transient blip #4"), "carries last error: {err:?}");
+        assert!(
+            err.last_error.contains("transient blip #4"),
+            "carries last error: {err:?}"
+        );
     }
 
     #[test]
@@ -260,6 +291,9 @@ mod tests {
         assert_eq!(policy.backoff_for_retry(4), Duration::from_millis(800));
         assert_eq!(policy.backoff_for_retry(9), Duration::from_millis(800));
         // A very large retry index must not overflow — it stays at the cap.
-        assert_eq!(policy.backoff_for_retry(u32::MAX), Duration::from_millis(800));
+        assert_eq!(
+            policy.backoff_for_retry(u32::MAX),
+            Duration::from_millis(800)
+        );
     }
 }

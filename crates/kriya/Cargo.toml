@@ -14,6 +14,15 @@ categories = ["api-bindings", "gui"]
 name = "kriya"
 crate-type = ["rlib"]
 
+# The product binary (Front 1 stdio governance proxy). Declared explicitly with
+# `required-features` so it is built ONLY when `mcp-client` is on — the default build never
+# tries to compile it (it references feature-gated modules). `kriya-mcp`/`kriya-host` stay
+# auto-discovered from src/bin and unaffected.
+[[bin]]
+name = "kriya-gateway"
+path = "src/bin/kriya-gateway.rs"
+required-features = ["mcp-client"]
+
 [features]
 # Full host by default — existing Tauri apps and the cloud LLM backends keep working unchanged.
 default = ["tauri-host", "http-inference"]
@@ -23,6 +32,11 @@ tauri-host = ["dep:tauri"]
 # Remote/cloud LLM inference backends (Anthropic, Ollama) over HTTP. Turn OFF to drop the
 # `ureq` HTTP/TLS client; the deterministic, scripted, and claude-cli backends remain.
 http-inference = ["dep:ureq"]
+# MCP *client* + the stdio governance proxy (Front 1) and the `kriya-gateway` product binary.
+# Off by default so the library stays lean for in-process embedders that never proxy. Adds NO
+# new dependencies — the client is std-only (`std::process`, `std::io`) over the existing
+# serde/serde_json. Enables `mcp::client`, `mcp::proxy_executor`, `mcp::proxy_server`.
+mcp-client = []
 
 [dependencies]
 tauri = { version = "2", features = [], optional = true }

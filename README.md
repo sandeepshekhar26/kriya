@@ -62,6 +62,48 @@ touches your data.
   <br><em>An agent operating <a href="https://actualbudget.org">Actual Budget</a> through kriya: routine actions run and are signed; money-moving ones are blocked pending approval; every action verifies offline.</em>
 </p>
 
+## kriya-gateway — govern any MCP server, zero changes
+
+The fastest way in. If an app **already exposes an MCP server**, you don't have to bolt anything
+*into* it to govern it. Launch it through `kriya-gateway` instead of directly, and every
+`tools/call` now passes deny-by-default policy → **human approval** for destructive calls →
+budget → an Ed25519 **signed, hash-chained audit** — *before* it reaches the real server. **Zero
+lines changed in that server.**
+
+MCP over stdio is already easy and free — that's not the value. The value is the **approval modal
+firing on a destructive call**, and the **signed, tamper-evident receipt** afterward, on a server
+**you didn't write**.
+
+```bash
+# wrap any existing MCP server — your real server command goes after the `--`
+kriya-gateway proxy -- node your-mcp-server.js
+```
+
+…or drop it straight into a client's MCP config (Claude Desktop, Cursor, Claude Code):
+
+```jsonc
+{
+  "mcpServers": {
+    "notes-governed": {
+      "command": "kriya-gateway",
+      "args": ["proxy", "--approval", "gui", "--", "node", "your-mcp-server.js"]
+    }
+  }
+}
+```
+
+A runnable, no-human, end-to-end proof (a read goes through and is signed; a destructive call is
+blocked at the gate and is not) lives in
+[`examples/gateway-proxy-demo/`](examples/gateway-proxy-demo/) — `./run.sh`. The design (one
+governance core, three reach fronts) is in
+[`docs/SERVICE-ARCHITECTURE.md`](docs/SERVICE-ARCHITECTURE.md).
+
+> **Honest scope:** the proxy governs apps that **already speak MCP**. An app with **no MCP and no
+> API** is the job of the *reach-in* front (a governed MCP server synthesized from the OS
+> accessibility tree) — that is **roadmap (R25), not shipped**, and is coverage-bounded;
+> computer-use over pixels is a deferred fallback. The audit trail is tamper-**evident**
+> (hash-chained, offline-verifiable), not tamper-proof.
+
 ## Why "kriya"?
 
 **kriya** (Sanskrit, क्रिया) means *action* — and, in grammar, *verb*. That is the whole idea: an

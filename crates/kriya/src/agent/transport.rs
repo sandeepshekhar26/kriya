@@ -7,7 +7,9 @@
 //! loop drives a Tauri webview, a stdio sidecar (Electron/Node — roadmap R3), or a test
 //! recorder, with no change to the loop itself.
 
-use crate::protocol::{AgentActionRequest, AgentApprovalRequest, AgentAwaitStep, AgentDone, AgentLog};
+use crate::protocol::{
+    AgentActionRequest, AgentApprovalRequest, AgentAwaitStep, AgentDone, AgentLog,
+};
 
 /// Where the host loop sends events bound for the app. Implementations must be cheap to call
 /// and non-blocking — the loop calls them inline while holding the step open. `Send + Sync`

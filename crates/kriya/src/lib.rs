@@ -68,9 +68,9 @@ pub use agent::inference::retry::{RetryExhausted, RetryPolicy};
 pub use agent::inference::{
     select_backend_with_default, Inference, NetworkProfile, StepContext, StepDecision, StepRecord,
 };
+#[cfg(feature = "tauri-host")]
+pub use agent::TauriSink;
 pub use agent::{
     run_task, ApprovalMap, GovernedApp, HostSink, PendingMap, SharedBudget, StepAdvanceMap,
 };
-#[cfg(feature = "tauri-host")]
-pub use agent::TauriSink;
 pub use sidecar::{run_sidecar, SharedWriter, StdioSink};

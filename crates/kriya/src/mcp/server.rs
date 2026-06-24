@@ -42,7 +42,13 @@ impl Server {
             })
             .collect();
         let tool_names = tools.iter().map(|t| t.name.clone()).collect();
-        Self { name: name.into(), version: version.into(), tools, tool_names, governor }
+        Self {
+            name: name.into(),
+            version: version.into(),
+            tools,
+            tool_names,
+            governor,
+        }
     }
 
     /// Number of exposed tools — used by the binary for its startup banner.
@@ -52,7 +58,11 @@ impl Server {
 
     /// Read JSON-RPC lines from `reader`, write responses to `writer`. Blocks until EOF
     /// (the client closed stdin). One JSON object per line, NDJSON-style.
-    pub fn serve<R: BufRead, W: Write>(&mut self, reader: R, writer: &mut W) -> std::io::Result<()> {
+    pub fn serve<R: BufRead, W: Write>(
+        &mut self,
+        reader: R,
+        writer: &mut W,
+    ) -> std::io::Result<()> {
         for line in reader.lines() {
             let line = line?;
             if line.trim().is_empty() {
@@ -86,18 +96,24 @@ impl Server {
         let id = req.id.clone().unwrap_or(Value::Null);
 
         let resp = match req.method.as_str() {
-            "initialize" => {
-                Response::success(id, ok_value(InitializeResult::new(&self.name, &self.version)))
-            }
-            "tools/list" => {
-                Response::success(id, ok_value(ListToolsResult { tools: self.tools.clone() }))
-            }
+            "initialize" => Response::success(
+                id,
+                ok_value(InitializeResult::new(&self.name, &self.version)),
+            ),
+            "tools/list" => Response::success(
+                id,
+                ok_value(ListToolsResult {
+                    tools: self.tools.clone(),
+                }),
+            ),
             "tools/call" => self.handle_call(id, req.params),
             // MCP health check.
             "ping" => Response::success(id, json!({})),
-            other => {
-                Response::error(id, error_code::METHOD_NOT_FOUND, format!("unknown method: {other}"))
-            }
+            other => Response::error(
+                id,
+                error_code::METHOD_NOT_FOUND,
+                format!("unknown method: {other}"),
+            ),
         };
         Some(resp)
     }
@@ -109,7 +125,11 @@ impl Server {
         let call: CallToolParams = match serde_json::from_value(params) {
             Ok(c) => c,
             Err(e) => {
-                return Response::error(id, error_code::INVALID_PARAMS, format!("bad tools/call params: {e}"))
+                return Response::error(
+                    id,
+                    error_code::INVALID_PARAMS,
+                    format!("bad tools/call params: {e}"),
+                )
             }
         };
 
@@ -181,8 +201,8 @@ mod tests {
     use super::*;
     use crate::audit::Signer;
     use crate::mcp::approval::{AutoApprove, DenyApproval};
-    use crate::mcp::executor::FnExecutor;
     use crate::mcp::executor::ActionOutcome;
+    use crate::mcp::executor::FnExecutor;
     use crate::permissions::Policy;
     use std::sync::Arc;
 
@@ -199,7 +219,9 @@ mod tests {
             Arc::new(Policy::default()),
             Arc::new(Signer::new()),
             approval,
-            Box::new(FnExecutor(|_id: &str, _p: &Value| ActionOutcome::ok(json!({"ok": true})))),
+            Box::new(FnExecutor(|_id: &str, _p: &Value| {
+                ActionOutcome::ok(json!({"ok": true}))
+            })),
         );
         Server::new("kriya-mcp", "0.1.0", schemas(), governor)
     }
@@ -248,30 +270,45 @@ mod tests {
     fn tools_call_allowed_action_returns_state() {
         let mut s = server(Box::new(DenyApproval));
         let resp = s
-            .handle(req("tools/call", json!({"name":"create_note","arguments":{"title":"hi"}})))
+            .handle(req(
+                "tools/call",
+                json!({"name":"create_note","arguments":{"title":"hi"}}),
+            ))
             .unwrap();
         let result = resp.result.unwrap();
         // success result: isError omitted, content carries the handler data.
         assert!(result.get("isError").is_none());
-        assert!(result["content"][0]["text"].as_str().unwrap().contains("\"ok\":true"));
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("\"ok\":true"));
     }
 
     #[test]
     fn tools_call_guarded_action_is_blocked_as_error_result() {
         let mut s = server(Box::new(DenyApproval));
         let resp = s
-            .handle(req("tools/call", json!({"name":"delete_note","arguments":{"id":1}})))
+            .handle(req(
+                "tools/call",
+                json!({"name":"delete_note","arguments":{"id":1}}),
+            ))
             .unwrap();
         let result = resp.result.unwrap();
         assert_eq!(result["isError"], true);
-        assert!(result["content"][0]["text"].as_str().unwrap().contains("approval"));
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("approval"));
     }
 
     #[test]
     fn tools_call_guarded_action_runs_when_approved() {
         let mut s = server(Box::new(AutoApprove));
         let resp = s
-            .handle(req("tools/call", json!({"name":"delete_note","arguments":{"id":1}})))
+            .handle(req(
+                "tools/call",
+                json!({"name":"delete_note","arguments":{"id":1}}),
+            ))
             .unwrap();
         assert!(resp.result.unwrap().get("isError").is_none());
     }
@@ -280,9 +317,15 @@ mod tests {
     fn tools_call_unknown_tool_is_error_result_not_protocol_error() {
         let mut s = server(Box::new(DenyApproval));
         let resp = s
-            .handle(req("tools/call", json!({"name":"nonexistent","arguments":{}})))
+            .handle(req(
+                "tools/call",
+                json!({"name":"nonexistent","arguments":{}}),
+            ))
             .unwrap();
-        assert!(resp.error.is_none(), "well-formed call → result, not protocol error");
+        assert!(
+            resp.error.is_none(),
+            "well-formed call → result, not protocol error"
+        );
         assert_eq!(resp.result.unwrap()["isError"], true);
     }
 
