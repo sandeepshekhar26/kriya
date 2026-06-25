@@ -99,10 +99,15 @@ Legend: ⬜ not started · 🟡 in progress · ✅ done · ⭐ flagship
 > **private `kriya-console` repo**; the standard-log-location + bundle/onboarding bits touch the
 > **public gateway**. Build next session (a kickoff prompt was handed off). See D-018.
 
-- ⬜ **R27 · Standard on-device audit-log location + auto-discovery** *(public gateway)* — the gateway
-  **defaults** its audit log to a standard, OS-appropriate dir (working default `~/.kriya/audit/`); the
-  Console **auto-discovers + tails** it (open the app → see governance, no manual import). Keep the
-  `--audit-log` override + a secondary "open a file" for ad-hoc inspection.
+- ✅ **R27 · Standard on-device audit-log location + auto-discovery** *(public gateway)* — shipped
+  (`ea24602`). The gateway **defaults** its signed-receipt log to the standard `~/.kriya/audit/` dir
+  (`audit::default_audit_dir()`, the shared writer/reader convention; created on demand, temp-dir
+  fallback). Each front writes a stable, hash-chain-continuing file there (`proxy → <server>.jsonl`,
+  `reach-in → reach-in-<app>.jsonl`, `computer-use → computer_use.jsonl`, `router → router.jsonl`);
+  `--audit-log` still overrides. `doctor` surfaces the location; `--signing-key` no longer needs
+  `--audit-log` (the default log is always present). Verified live: a proxy with **no** `--audit-log`
+  wrote `~/.kriya/audit/mock_mcp_server.jsonl`, receipt verifies offline. 97 crate + 4 new gateway
+  unit tests green. The Console's **auto-discover + tail** of this dir lands in R28.
 - ⬜ **R28 · Tauri control-plane desktop app** *(private Console + public bundle/onboarding)* — rebuild
   the Console as a **Tauri** app: a compiled **Rust backend** holds the paid value (+ the license
   check), the webview is a thin viewer. One download = bundles the **gateway binary** + an

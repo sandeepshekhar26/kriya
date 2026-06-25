@@ -311,9 +311,11 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
 > bits touch the public gateway. Protects the moat (paid value in compiled Rust, not shippable JS) and
 > stays on-device (no SaaS) per the regulated thesis.
 
-- ⬜ **Standard on-device audit-log location + auto-discovery** *(public gateway)* — gateway **defaults**
-  its audit log to a standard dir (`~/.kriya/audit/`); the Console **auto-discovers + tails** it (open
-  the app → see governance, no manual import). Keep `--audit-log` override. **(R27)**
+- ✅ **Standard on-device audit-log location** *(public gateway)* — **shipped** (`ea24602`). Gateway
+  **defaults** its signed-receipt log to `~/.kriya/audit/` (`audit::default_audit_dir()`), a stable
+  per-front file (`<server>.jsonl` / `reach-in-<app>.jsonl` / `computer_use.jsonl` / `router.jsonl`);
+  `--audit-log` overrides. Verified a front writes there with no flag + verifies offline. The
+  Console's **auto-discover + tail** of this dir is the R28 half. **(R27)**
 - ⬜ **Tauri control-plane desktop app** — rebuild the Console as **Tauri**: compiled **Rust backend**
   holds the paid value (+ license check); the webview is a thin viewer. One download bundles the
   **gateway binary** + **onboarding GUI** (perms + MCP-config wiring) + **live audit cockpit**.
