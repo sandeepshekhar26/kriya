@@ -170,6 +170,8 @@ fn usage_and_exit(msg: &str) -> ! {
         "usage: kriya-gateway proxy [--policy <p.yaml>] [--approval deny|tty|gui|auto] \
          [--actor <agent>] [--user <user>] [--audit-log <path>] [--signing-key <path>] \
          [--name <n>] -- <downstream-cmd> [args...]\n       \
+         kriya-gateway reach-in --app \"<App Name>\" [same governance flags]\n       \
+         kriya-gateway doctor [--app \"<App Name>\"]   (macOS preflight: Accessibility, bundle, snippet)\n       \
          kriya-gateway serve ...   (delegates to the kriya-mcp bolt-on)"
     );
     exit(2);
@@ -189,9 +191,13 @@ fn main() -> std::io::Result<()> {
         "serve" => usage_and_exit(
             "`serve` mode is the kriya-mcp bolt-on — run the `kriya-mcp` binary directly",
         ),
+        // Operator preflight (R24): is Accessibility granted, are we in the .app bundle, what apps
+        // can reach-in target, and the exact Claude Desktop config snippet. A human-run CLI tool,
+        // so its output goes to STDOUT (no MCP stdio session to corrupt).
+        "doctor" => run_doctor(args),
         "-h" | "--help" | "help" => usage_and_exit("help"),
         other => usage_and_exit(&format!(
-            "unknown subcommand: {other} (expected proxy|reach-in|serve)"
+            "unknown subcommand: {other} (expected proxy|reach-in|serve|doctor)"
         )),
     }
 }
@@ -537,4 +543,216 @@ fn run_reachin(_it: impl Iterator<Item = String>) -> std::io::Result<()> {
     usage_and_exit(
         "this gateway build has no reach-in support — rebuild with `--features mcp-client,reach-in`",
     )
+}
+
+// ── doctor: operator preflight (R24) ────────────────────────────────────────────────────────────
+//
+// macOS reach-in only works when (a) the gateway runs from a signed `.app` bundle with a stable
+// CFBundleIdentifier — a loose binary spawned by an Electron host (Claude Desktop) can't be granted
+// Accessibility via TCC, the bundle can — and (b) that bundle has been added to System Settings →
+// Privacy & Security → Accessibility. `doctor` checks both, lists the apps reach-in could target,
+// and prints a ready-to-paste Claude Desktop config snippet. Output goes to STDOUT: a human runs
+// this in a terminal, not inside an MCP stdio session, so there's no JSON-RPC stream to protect.
+
+/// Whether this process is currently trusted for Accessibility (macOS TCC). Returns `None` on builds
+/// that can't answer (no reach-in feature, or non-macOS). On macOS with `reach-in`, calls the system
+/// `AXIsProcessTrusted()` — an `extern "C"` fn (hence `unsafe`) that is a pure read, no side effects.
+#[cfg(all(feature = "reach-in", target_os = "macos"))]
+fn accessibility_trusted() -> Option<bool> {
+    // SAFETY: `AXIsProcessTrusted` takes no arguments, returns a `bool`, and only reads the current
+    // process's TCC grant — there is nothing to misuse and no memory to manage.
+    Some(unsafe { accessibility_sys::AXIsProcessTrusted() })
+}
+
+#[cfg(not(all(feature = "reach-in", target_os = "macos")))]
+fn accessibility_trusted() -> Option<bool> {
+    None
+}
+
+/// Best-effort list of user-facing (non-background) GUI apps — the reach-in *candidates*. Uses
+/// `osascript`/System Events rather than any private API, so it needs Automation permission for
+/// System Events; on failure (denied, not macOS, no osascript) returns `None` and the caller prints
+/// a note instead of failing. This is discovery only — it does NOT auto-govern anything.
+fn running_gui_apps() -> Option<Vec<String>> {
+    let out = std::process::Command::new("osascript")
+        .args([
+            "-e",
+            "tell application \"System Events\" to get name of (processes where background only is false)",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&out.stdout);
+    let mut apps: Vec<String> = raw
+        .trim()
+        .split(", ")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    apps.sort();
+    apps.dedup();
+    if apps.is_empty() {
+        None
+    } else {
+        Some(apps)
+    }
+}
+
+/// Resolve the path to *this* executable and whether it sits inside a `.app` bundle's
+/// `Contents/MacOS/` — the TCC-grantable location. A loose binary (the trap we hit live) can be
+/// added to the Accessibility list but the grant won't stick to a stable identity, so reach-in
+/// silently stays untrusted. Returns `(current_exe, in_bundle)`.
+fn exe_bundle_state() -> (PathBuf, bool) {
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("kriya-gateway"));
+    let in_bundle = exe.to_string_lossy().contains(".app/Contents/MacOS/");
+    (exe, in_bundle)
+}
+
+/// `kriya-gateway doctor [--app "<App Name>"]` — see the module note above. All checks are
+/// non-destructive; exit code is 0 even when something needs fixing (it's advisory).
+fn run_doctor(mut it: impl Iterator<Item = String>) -> std::io::Result<()> {
+    // Tiny hand-rolled flag parse to match the rest of the binary's style.
+    let mut app: Option<String> = None;
+    while let Some(flag) = it.next() {
+        match flag.as_str() {
+            "--app" => {
+                app = Some(
+                    it.next()
+                        .unwrap_or_else(|| usage_and_exit("--app needs a value")),
+                )
+            }
+            "-h" | "--help" => usage_and_exit("help"),
+            other => usage_and_exit(&format!("doctor: unknown argument: {other}")),
+        }
+    }
+
+    println!("kriya-gateway doctor — macOS reach-in preflight");
+    println!("================================================");
+
+    // 1. Where are we running from? (the loose-binary TCC trap).
+    let (exe, in_bundle) = exe_bundle_state();
+    println!("\n[1] Executable");
+    println!("    path: {}", exe.display());
+    if in_bundle {
+        println!("    OK   running from inside a .app bundle (Contents/MacOS/).");
+    } else {
+        println!("    WARN running as a LOOSE binary, not from a .app bundle.");
+        println!(
+            "         macOS TCC grants Accessibility to a stable bundle identity, not a bare path."
+        );
+        println!(
+            "         Build the bundle (scripts/macos/build-gateway-app.sh) and point Claude Desktop's"
+        );
+        println!(
+            "         `command` at  \"…/Kriya Gateway.app/Contents/MacOS/kriya-gateway\"  — not this binary,"
+        );
+        println!("         or the Accessibility grant will NOT stick.");
+    }
+
+    // 2. Accessibility (TCC) trust for THIS process.
+    println!("\n[2] Accessibility permission (macOS Privacy & Security → Accessibility)");
+    match accessibility_trusted() {
+        Some(true) => {
+            println!("    OK   this process is trusted for Accessibility — reach-in can read the AX tree.");
+        }
+        Some(false) => {
+            println!("    FIX  this process is NOT trusted for Accessibility.");
+            println!("         1. Open System Settings → Privacy & Security → Accessibility");
+            println!(
+                "         2. Add  \"Kriya Gateway.app\"  (the signed bundle) and toggle it ON"
+            );
+            println!("         3. Re-run this doctor from inside the bundle to confirm");
+            println!("         (opening that pane for you now…)");
+            // Best-effort: surface the exact settings pane. Ignore failure (headless / sandboxed).
+            let _ = std::process::Command::new("open")
+                .arg(
+                    "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+                )
+                .status();
+        }
+        None => {
+            #[cfg(not(feature = "reach-in"))]
+            println!(
+                "    n/a  built WITHOUT reach-in — rebuild with `--features mcp-client,reach-in` to \
+                 enable the Accessibility check and reach-in mode."
+            );
+            #[cfg(all(feature = "reach-in", not(target_os = "macos")))]
+            println!("    n/a  reach-in / Accessibility is macOS-only.");
+        }
+    }
+
+    // 3. Reach-in candidates — running GUI apps (discovery only, no auto-governance).
+    println!("\n[3] Reach-in candidates (running user-facing apps)");
+    match running_gui_apps() {
+        Some(apps) => {
+            println!(
+                "    Found {} app(s). reach-in can target any of these by name",
+                apps.len()
+            );
+            println!(
+                "    (coverage varies — native control/form UIs strong, Electron/Qt/web weak):"
+            );
+            for a in &apps {
+                println!("      • {a}");
+            }
+        }
+        None => {
+            println!(
+                "    note: couldn't list apps (System Events Automation may be denied, or not macOS)."
+            );
+            println!(
+                "          Grant Automation for System Events, or just pass the app name to --app."
+            );
+        }
+    }
+
+    // 4. Ready-to-paste Claude Desktop config snippet for the named app.
+    println!("\n[4] Claude Desktop config");
+    // Prefer the real bundle path so the snippet is copy-paste correct; fall back to the loose exe.
+    let command_path = if in_bundle {
+        exe.to_string_lossy().to_string()
+    } else {
+        // Point at where the built bundle's binary lives so the snippet is right even when doctor
+        // was (wrongly) run from a loose binary.
+        "/Applications/Kriya Gateway.app/Contents/MacOS/kriya-gateway".to_string()
+    };
+    match &app {
+        Some(name) => {
+            println!(
+                "    Paste into Claude Desktop's claude_desktop_config.json (\"mcpServers\" map),"
+            );
+            println!("    governing \"{name}\" via reach-in with the GUI approval modal:\n");
+            // Build the snippet with serde_json so quoting/escaping is always correct.
+            let server_key = format!(
+                "kriya-{}",
+                name.to_lowercase()
+                    .replace(|c: char| !c.is_alphanumeric(), "-")
+            );
+            let snippet = serde_json::json!({
+                "mcpServers": {
+                    server_key: {
+                        "command": command_path,
+                        "args": ["reach-in", "--app", name, "--approval", "gui"]
+                    }
+                }
+            });
+            println!("{}", serde_json::to_string_pretty(&snippet).unwrap());
+            if !in_bundle {
+                println!(
+                    "\n    (adjust `command` to wherever you installed the bundle; the path above assumes /Applications)"
+                );
+            }
+        }
+        None => {
+            println!(
+                "    pass  --app \"<App Name>\"  to print a ready-to-paste mcpServers snippet,"
+            );
+            println!("    e.g.  kriya-gateway doctor --app \"Numbers\"");
+        }
+    }
+
+    println!("\nDone. (doctor is advisory — it never changes governance or your config.)");
+    Ok(())
 }
