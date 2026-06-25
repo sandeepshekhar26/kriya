@@ -59,6 +59,12 @@ pub struct AxNode {
     pub actions: Vec<String>,
     /// Whether the element is currently enabled (disabled controls still appear in the tree).
     pub enabled: bool,
+    /// Whether this element's **value** is settable (`AXUIElementIsAttributeSettable` over
+    /// `kAXValueAttribute`), i.e. text fields, combo boxes, spreadsheet cells. Drives synthesis of a
+    /// `set_<role>_<title>` tool (see [`synth`]). A plain button is not value-settable, so it gets a
+    /// `press_*` tool but no `set_*` tool. The macOS walk populates this; the [`FakeBackend`] sets it
+    /// directly in tests. Defaults to `false` so an unknown/inert element never claims to be settable.
+    pub settable: bool,
 }
 
 /// The seam between the governed synthesis/serve logic and the OS accessibility API. Two
@@ -77,6 +83,25 @@ pub trait AxBackend: Send + Sync {
     /// Perform `action` (e.g. `"AXPress"`) on the element identified by `node_id`. Errs on an
     /// unknown node, an unsupported action, or an AX failure.
     fn perform(&self, node_id: &str, action: &str) -> Result<(), String>;
+
+    /// Set the **value** of the element identified by `node_id` to `value` — the typed-input
+    /// analogue of [`perform`] for a settable element (text field, spreadsheet cell). On macOS this
+    /// is `AXUIElementSetAttributeValue(elem, kAXValueAttribute, …)`; the synthesis layer only emits
+    /// a `set_*` tool for a node whose [`AxNode::settable`] is true, so a backend may assume the
+    /// element accepts a value. Errs on an unknown node or an AX failure.
+    fn set_value(&self, node_id: &str, value: &str) -> Result<(), String>;
+
+    /// Type unicode `text` into whatever element currently holds **keyboard focus** — element-free
+    /// by design (the agent first focuses a cell via a `press_*`/`set_*` tool, then types). On macOS
+    /// this synthesizes CoreGraphics keyboard events carrying the unicode string and posts them to
+    /// the focused app. Errs on an OS failure.
+    fn type_text(&self, text: &str) -> Result<(), String>;
+
+    /// Press a single **named key or chord** by name (e.g. `"return"`, `"tab"`, `"escape"`, the
+    /// arrows) — what lets the agent commit a cell and navigate. The named-key set is small and
+    /// closed; an unknown key name is an `Err` (so it surfaces as a failed outcome, never a silent
+    /// no-op). On macOS this posts a CoreGraphics key-down + key-up for the mapped virtual keycode.
+    fn send_key(&self, key: &str) -> Result<(), String>;
 }
 
 /// Owns the governance core, the synthesized tool catalog, and the policy — the Front-2 analogue
@@ -304,28 +329,59 @@ fn log_outcome(action_id: &str, outcome: &DispatchOutcome) {
 #[cfg(test)]
 pub(crate) type PerformedLog = Arc<Mutex<Vec<(String, String)>>>;
 
-/// A scriptable in-memory [`AxBackend`] for tests: a fixed node list plus a [`PerformedLog`], so a
-/// test can assert *exactly* which AX action a governed call did (or, for a blocked call, did
-/// **not**) reach. `perform` errs on an unknown node — matching the real backend — so an
-/// executor-mapping bug surfaces as a failure.
+/// One typed-input event a [`FakeBackend`] recorded, so a test can assert the executor routed the
+/// right kind/payload to the backend (the value/text/key never actually reaches a real app in a
+/// unit test — that is the lead's live check against Numbers).
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TypedInput {
+    /// `set_value(node_id, value)`.
+    SetValue { node_id: String, value: String },
+    /// `type_text(text)`.
+    TypeText { text: String },
+    /// `send_key(key)`.
+    SendKey { key: String },
+}
+
+/// Shared record of the typed-input events a [`FakeBackend`] received — the typed-input analogue of
+/// [`PerformedLog`], so a test holds a handle to assert exactly what was set/typed/pressed.
+#[cfg(test)]
+pub(crate) type TypedLog = Arc<Mutex<Vec<TypedInput>>>;
+
+/// A scriptable in-memory [`AxBackend`] for tests: a fixed node list plus a [`PerformedLog`] and a
+/// [`TypedLog`], so a test can assert *exactly* which AX action / typed input a governed call did
+/// (or, for a blocked call, did **not**) reach. `perform` and `set_value` err on an unknown node —
+/// matching the real backend — so an executor-mapping bug surfaces as a failure.
 #[cfg(test)]
 pub(crate) struct FakeBackend {
     nodes: Vec<AxNode>,
     /// Records performed actions; shared so the test keeps a handle after the backend is moved into
     /// the executor/governor.
     performed: PerformedLog,
+    /// Records typed-input events (set_value / type_text / send_key), shared the same way.
+    typed: TypedLog,
 }
 
 #[cfg(test)]
 impl FakeBackend {
     pub(crate) fn new(nodes: Vec<AxNode>) -> (Self, PerformedLog) {
+        let (this, performed, _typed) = Self::new_with_typed(nodes);
+        (this, performed)
+    }
+
+    /// Like [`new`], but also returns the [`TypedLog`] for tests that exercise the typed-input
+    /// methods. Kept separate so the many existing `perform`-only tests stay terse.
+    pub(crate) fn new_with_typed(nodes: Vec<AxNode>) -> (Self, PerformedLog, TypedLog) {
         let performed = Arc::new(Mutex::new(Vec::new()));
+        let typed = Arc::new(Mutex::new(Vec::new()));
         (
             Self {
                 nodes,
                 performed: performed.clone(),
+                typed: typed.clone(),
             },
             performed,
+            typed,
         )
     }
 }
@@ -344,6 +400,37 @@ impl AxBackend for FakeBackend {
             .lock()
             .unwrap()
             .push((node_id.to_string(), action.to_string()));
+        Ok(())
+    }
+
+    fn set_value(&self, node_id: &str, value: &str) -> Result<(), String> {
+        // Mirror the real backend: an unknown node errs (so an executor-mapping bug surfaces).
+        if !self.nodes.iter().any(|n| n.id == node_id) {
+            return Err(format!("unknown node '{node_id}'"));
+        }
+        self.typed.lock().unwrap().push(TypedInput::SetValue {
+            node_id: node_id.to_string(),
+            value: value.to_string(),
+        });
+        Ok(())
+    }
+
+    fn type_text(&self, text: &str) -> Result<(), String> {
+        self.typed.lock().unwrap().push(TypedInput::TypeText {
+            text: text.to_string(),
+        });
+        Ok(())
+    }
+
+    fn send_key(&self, key: &str) -> Result<(), String> {
+        // The fake validates the named-key set the same way the real backend does, so a test can
+        // assert an unknown key is rejected without a real CGEvent.
+        if !synth::is_known_key(key) {
+            return Err(format!("unknown key '{key}'"));
+        }
+        self.typed.lock().unwrap().push(TypedInput::SendKey {
+            key: key.to_string(),
+        });
         Ok(())
     }
 }
@@ -366,6 +453,7 @@ mod tests {
                 title: "Save".into(),
                 actions: vec!["AXPress".into()],
                 enabled: true,
+                settable: false,
             },
             AxNode {
                 id: "AXButton/Delete".into(),
@@ -373,6 +461,7 @@ mod tests {
                 title: "Delete".into(),
                 actions: vec!["AXPress".into()],
                 enabled: true,
+                settable: false,
             },
             AxNode {
                 id: "AXButton/Disabled".into(),
@@ -380,6 +469,7 @@ mod tests {
                 title: "Disabled".into(),
                 actions: vec!["AXPress".into()],
                 enabled: false,
+                settable: false,
             },
         ]
     }
@@ -539,6 +629,139 @@ budget:
         assert_eq!(err.code, error_code::METHOD_NOT_FOUND);
     }
 
+    /// A snapshot with a **settable** cell-like field, so synthesis emits a `set_*` tool and the two
+    /// always-on global tools. Used by the typed-input governed-path tests below.
+    fn typed_nodes() -> Vec<AxNode> {
+        vec![AxNode {
+            id: "AXTextField/Cell".into(),
+            role: "AXTextField".into(),
+            title: "Cell".into(),
+            actions: vec!["AXConfirm".into()],
+            enabled: true,
+            settable: true,
+        }]
+    }
+
+    /// A permissive policy for the typed-input tools, so the governed path actually executes and we
+    /// can assert the backend received the value/text/key. Real product uses the zero-config default.
+    fn typed_policy() -> Policy {
+        serde_yaml::from_str(
+            r#"
+rules:
+  - action: "*"
+    allow: true
+budget:
+  max_actions_per_minute: 60
+"#,
+        )
+        .unwrap()
+    }
+
+    /// Build a server over `typed_nodes` whose executor + test can both see the typed-input log.
+    fn typed_server(policy: Policy) -> (ReachInServer, TypedLog) {
+        let (backend, _performed, typed) = FakeBackend::new_with_typed(typed_nodes());
+        let backend: Arc<dyn AxBackend> = Arc::new(backend);
+        let policy = Arc::new(policy);
+        let executor = Box::new(executor::AxExecutor::new(backend.clone(), typed_nodes()));
+        let governor = Governor::new(
+            policy.clone(),
+            Arc::new(Signer::new()),
+            Box::new(AutoApprove),
+            executor,
+        );
+        let srv = ReachInServer::with_backend("kriya-test", backend, governor, policy).unwrap();
+        (srv, typed)
+    }
+
+    #[test]
+    fn governed_set_value_routes_node_and_value_to_backend() {
+        let (mut s, typed) = typed_server(typed_policy());
+        let resp = s
+            .handle(req(
+                "tools/call",
+                json!({"name":"set_text_field_cell","arguments":{"value":"42"}}),
+            ))
+            .unwrap();
+        assert!(resp.result.unwrap().get("isError").is_none());
+        assert_eq!(
+            *typed.lock().unwrap(),
+            vec![TypedInput::SetValue {
+                node_id: "AXTextField/Cell".into(),
+                value: "42".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn governed_type_text_routes_text_to_backend() {
+        let (mut s, typed) = typed_server(typed_policy());
+        let resp = s
+            .handle(req(
+                "tools/call",
+                json!({"name":"type_text","arguments":{"text":"hello"}}),
+            ))
+            .unwrap();
+        assert!(resp.result.unwrap().get("isError").is_none());
+        assert_eq!(
+            *typed.lock().unwrap(),
+            vec![TypedInput::TypeText {
+                text: "hello".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn governed_press_key_routes_a_known_key() {
+        let (mut s, typed) = typed_server(typed_policy());
+        let resp = s
+            .handle(req(
+                "tools/call",
+                json!({"name":"press_key","arguments":{"key":"tab"}}),
+            ))
+            .unwrap();
+        assert!(resp.result.unwrap().get("isError").is_none());
+        assert_eq!(
+            *typed.lock().unwrap(),
+            vec![TypedInput::SendKey { key: "tab".into() }]
+        );
+    }
+
+    #[test]
+    fn governed_press_key_rejects_an_unknown_key_without_touching_app() {
+        let (mut s, typed) = typed_server(typed_policy());
+        let resp = s
+            .handle(req(
+                "tools/call",
+                json!({"name":"press_key","arguments":{"key":"f13"}}),
+            ))
+            .unwrap();
+        // Well-formed but the key is unknown → the executor surfaces a failed outcome (error result),
+        // never a panic, and nothing reached the (fake) app.
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true, "{result}");
+        assert!(typed.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn missing_or_nonstring_param_is_a_clean_error_result() {
+        let (mut s, typed) = typed_server(typed_policy());
+        // set_value with no `value` arg.
+        let r1 = s
+            .handle(req("tools/call", json!({"name":"set_text_field_cell"})))
+            .unwrap();
+        assert_eq!(r1.result.unwrap()["isError"], true);
+        // type_text with a non-string `text`.
+        let r2 = s
+            .handle(req(
+                "tools/call",
+                json!({"name":"type_text","arguments":{"text":7}}),
+            ))
+            .unwrap();
+        assert_eq!(r2.result.unwrap()["isError"], true);
+        // Nothing reached the app on either malformed call.
+        assert!(typed.lock().unwrap().is_empty());
+    }
+
     /// Sanity that the executor wired into the governor maps a backend error to a failed outcome
     /// (mirrors `McpProxyExecutor`'s "downstream unavailable" path) — drive it directly.
     #[test]
@@ -555,6 +778,7 @@ budget:
                 title: "Ghost".into(),
                 actions: vec!["AXPress".into()],
                 enabled: true,
+                settable: false,
             }],
         );
         let outcome = ex.execute("press_button_ghost", &json!({}));
