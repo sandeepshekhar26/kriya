@@ -1,0 +1,17 @@
+# Governance policy for the Apple Numbers reach-in demo. kriya-gateway enforces this on every
+# tools/call BEFORE it touches Numbers — the agent can only propose; this policy decides.
+# Three deliberately different outcomes so you SEE governance, not just an action:
+rules:
+  # ALLOWED, no prompt — switching the Format inspector's tabs is harmless.
+  - action: "press_radio_button_*"
+    allow: true
+  # GATED — toggling the table's Title/Caption pauses for a human. With --approval gui this raises
+  # the native macOS approval modal; with --approval deny it's blocked outright.
+  - action: "press_check_box_*"
+    allow: true
+    require_approval: true
+  # DENIED — anything else the agent might try (toolbar buttons, inserts, deletes) is refused.
+  - action: "*"
+    allow: false
+budget:
+  max_actions_per_minute: 30
