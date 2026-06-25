@@ -11,8 +11,19 @@
 //!   suffix. The verb is derived from the AX action (`AXPress` → `press`), the role from the AX role
 //!   (`AXButton` → `button`), so the name reads like an MCP convention name the policy can match.
 //! - **Description = human role + title**, so a model sees "Press the 'Delete' button" not a slug.
-//! - **inputSchema = `{type:object}`** — AX actions take no parameters in the MVP (a press is a
-//!   press); richer schemas (set a text field's value) are a follow-up gated on coverage.
+//! - **inputSchema = `{type:object}`** — AX *press*-style actions take no parameters (a press is a
+//!   press). The **typed-input** tools added on top carry a real schema: a `set_*` tool takes a
+//!   `value` string, the global `type_text` takes a `text` string, the global `press_key` takes a
+//!   `key` from a fixed enum. These let an agent fill data (e.g. a spreadsheet cell), not just click.
+//!
+//! Typed-input tools synthesized in addition to the per-(element, action) `press_*` tools:
+//! - **`set_<role>_<title>`** — one per element whose value is *settable* ([`AxNode::settable`]);
+//!   routes via the synthetic marker [`ACTION_SET_VALUE`] to [`super::AxBackend::set_value`].
+//! - **`type_text`** (global, always present) — types free text into the focused element; marker
+//!   [`ACTION_TYPE_TEXT`]. Its `node_id` is empty (it is element-free).
+//! - **`press_key`** (global, always present) — sends a named key from [`SUPPORTED_KEYS`]; marker
+//!   [`ACTION_PRESS_KEY`]. Also element-free. Together these let the agent select a cell, type a
+//!   value, and `Tab`/`Return` to commit + move — all still routed through the unchanged governor.
 
 use std::collections::HashMap;
 
@@ -21,6 +32,41 @@ use serde_json::json;
 use crate::mcp::jsonrpc::Tool;
 
 use super::AxNode;
+
+/// Synthetic "action" markers carried on a [`SynthesizedTool`] for the **typed-input** tools. These
+/// are NOT real AX action constants (which all start `AX…`); the [`super::executor::AxExecutor`]
+/// branches on them to call the right [`super::AxBackend`] typed-input method instead of `perform`.
+/// Namespaced under `kriya.` so they can never collide with an AX action name pulled from the tree.
+pub const ACTION_SET_VALUE: &str = "kriya.set_value";
+/// Marker for the global `type_text` tool — routes to [`super::AxBackend::type_text`].
+pub const ACTION_TYPE_TEXT: &str = "kriya.type_text";
+/// Marker for the global `press_key` tool — routes to [`super::AxBackend::send_key`].
+pub const ACTION_PRESS_KEY: &str = "kriya.press_key";
+
+/// The closed set of named keys `press_key` accepts, in the order they appear in the tool's schema
+/// `enum`. Shared as the single source of truth between synthesis (the `enum`), the
+/// [`super::FakeBackend`] / executor validation ([`is_known_key`]), and the macOS keycode map — so
+/// the advertised keys, the accepted keys, and the keys with a keycode can never drift apart.
+pub const SUPPORTED_KEYS: &[&str] = &[
+    "return",
+    "enter",
+    "tab",
+    "space",
+    "delete",
+    "backspace",
+    "escape",
+    "left",
+    "right",
+    "down",
+    "up",
+];
+
+/// Whether `key` is in the [`SUPPORTED_KEYS`] set (case-sensitive — the schema advertises lowercase).
+/// The executor and the [`super::FakeBackend`] use this so an unknown key is rejected uniformly,
+/// before any OS event is posted.
+pub fn is_known_key(key: &str) -> bool {
+    SUPPORTED_KEYS.contains(&key)
+}
 
 /// One synthesized tool plus the `(node_id, action)` it routes to. The server keeps the `Tool`s
 /// for `tools/list`; the [`super::executor::AxExecutor`] keeps the full mapping so it can turn a
@@ -65,7 +111,69 @@ pub fn synthesize(nodes: &[AxNode]) -> Vec<SynthesizedTool> {
                 action: action.clone(),
             });
         }
+
+        // A settable element (text field, combo box, spreadsheet cell) also gets a `set_*` tool that
+        // writes a value directly — the typed-input analogue of a press. Reuses the same name
+        // sanitizer/deduper so `set_*` names obey the MCP charset and stay unique alongside `press_*`.
+        if node.settable {
+            let role = role_word(&node.role);
+            let base = sanitized_name("set", &role, &node.title);
+            let name = dedupe(&mut seen, base);
+            let description = if node.title.is_empty() {
+                format!("Set the value of the {} (no title)", node.role)
+            } else {
+                format!("Set the value of the '{}' {}", node.title, node.role)
+            };
+            out.push(SynthesizedTool {
+                tool: Tool {
+                    name,
+                    description,
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": { "value": { "type": "string" } },
+                        "required": ["value"],
+                    }),
+                },
+                node_id: node.id.clone(),
+                action: ACTION_SET_VALUE.to_string(),
+            });
+        }
     }
+
+    // Two ALWAYS-present, element-free global tools: type free text into the focused element, and
+    // press a named key. These are what let an agent type into a selected cell and Tab/Return to
+    // commit + navigate — capabilities no single AX element exposes. Deduped through the same `seen`
+    // map so a (vanishingly unlikely) app element named `type_text`/`press_key` can't collide.
+    out.push(SynthesizedTool {
+        tool: Tool {
+            name: dedupe(&mut seen, "type_text".to_string()),
+            description: "Type text into the focused element (e.g. a selected spreadsheet cell)"
+                .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": { "text": { "type": "string" } },
+                "required": ["text"],
+            }),
+        },
+        node_id: String::new(), // element-free: targets whatever holds keyboard focus
+        action: ACTION_TYPE_TEXT.to_string(),
+    });
+    out.push(SynthesizedTool {
+        tool: Tool {
+            name: dedupe(&mut seen, "press_key".to_string()),
+            description:
+                "Press a named key or chord (e.g. return/tab/escape/arrows) to commit or navigate"
+                    .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": { "key": { "type": "string", "enum": SUPPORTED_KEYS } },
+                "required": ["key"],
+            }),
+        },
+        node_id: String::new(),
+        action: ACTION_PRESS_KEY.to_string(),
+    });
+
     out
 }
 
@@ -194,7 +302,26 @@ mod tests {
             title: title.into(),
             actions: actions.iter().map(|a| a.to_string()).collect(),
             enabled,
+            settable: false,
         }
+    }
+
+    /// Like [`node`], but value-settable — so synthesis emits a `set_*` tool for it.
+    fn settable_node(id: &str, role: &str, title: &str, actions: &[&str]) -> AxNode {
+        AxNode {
+            settable: true,
+            ..node(id, role, title, actions, true)
+        }
+    }
+
+    /// Only the `press_*`/`set_*` element tools, dropping the two always-appended global tools, so
+    /// the per-element assertions below stay focused on what synthesis derived from the snapshot.
+    fn element_tool_names(tools: &[Tool]) -> Vec<&str> {
+        tools
+            .iter()
+            .map(|t| t.name.as_str())
+            .filter(|n| *n != "type_text" && *n != "press_key")
+            .collect()
     }
 
     #[test]
@@ -204,17 +331,20 @@ mod tests {
             node("2", "AXButton", "Quit", &["AXPress"], true),
         ];
         let tools = synthesize_tools(&nodes);
-        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(names, vec!["press_button_save", "press_button_quit"]);
+        assert_eq!(
+            element_tool_names(&tools),
+            vec!["press_button_save", "press_button_quit"]
+        );
     }
 
     #[test]
-    fn disabled_and_actionless_nodes_yield_no_tool() {
+    fn disabled_and_actionless_nodes_yield_no_element_tool() {
         let nodes = vec![
             node("1", "AXButton", "Disabled", &["AXPress"], false),
             node("2", "AXStaticText", "label", &[], true), // no actions
         ];
-        assert!(synthesize_tools(&nodes).is_empty());
+        // No per-element tool — but the two global typed-input tools are always present.
+        assert!(element_tool_names(&synthesize_tools(&nodes)).is_empty());
     }
 
     #[test]
@@ -241,7 +371,7 @@ mod tests {
             true,
         )];
         let tools = synthesize_tools(&nodes);
-        assert_eq!(tools.len(), 1);
+        assert_eq!(element_tool_names(&tools).len(), 1);
         let n = &tools[0].name;
         assert!(
             n.chars()
@@ -294,9 +424,8 @@ mod tests {
             true,
         )];
         let tools = synthesize_tools(&nodes);
-        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(
-            names,
+            element_tool_names(&tools),
             vec!["press_button_options", "show_menu_button_options"]
         );
     }
@@ -312,7 +441,7 @@ mod tests {
     fn synthesize_preserves_routing_to_node_and_action() {
         let nodes = vec![node("node-7", "AXMenuItem", "Export", &["AXPress"], true)];
         let synth = synthesize(&nodes);
-        assert_eq!(synth.len(), 1);
+        // The element tool is first (globals are appended after it).
         assert_eq!(synth[0].tool.name, "press_menu_item_export");
         assert_eq!(synth[0].node_id, "node-7");
         assert_eq!(synth[0].action, "AXPress");
@@ -323,5 +452,85 @@ mod tests {
         let nodes = vec![node("1", "AXButton", "Go", &["AXPress"], true)];
         let tools = synthesize_tools(&nodes);
         assert_eq!(tools[0].input_schema["type"], "object");
+    }
+
+    #[test]
+    fn the_two_global_typed_input_tools_are_always_present() {
+        // Even over an empty snapshot, type_text + press_key are offered (they are element-free).
+        let synth = synthesize(&[]);
+        let by_name: HashMap<&str, &SynthesizedTool> =
+            synth.iter().map(|s| (s.tool.name.as_str(), s)).collect();
+
+        let type_text = by_name.get("type_text").expect("type_text present");
+        assert_eq!(type_text.action, ACTION_TYPE_TEXT);
+        assert_eq!(type_text.node_id, ""); // element-free
+        assert_eq!(type_text.tool.input_schema["required"][0], "text");
+
+        let press_key = by_name.get("press_key").expect("press_key present");
+        assert_eq!(press_key.action, ACTION_PRESS_KEY);
+        assert_eq!(press_key.node_id, "");
+        assert_eq!(press_key.tool.input_schema["required"][0], "key");
+        // The enum advertises exactly the supported key set, in order.
+        let advertised: Vec<&str> = press_key.tool.input_schema["properties"]["key"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(advertised, SUPPORTED_KEYS);
+    }
+
+    #[test]
+    fn settable_element_gets_a_set_tool_routed_with_the_marker() {
+        let nodes = vec![settable_node("cell-7", "AXTextField", "B2", &["AXConfirm"])];
+        let synth = synthesize(&nodes);
+        let set = synth
+            .iter()
+            .find(|s| s.tool.name == "set_text_field_b2")
+            .expect("set_* tool synthesized for a settable node");
+        assert_eq!(set.action, ACTION_SET_VALUE);
+        assert_eq!(set.node_id, "cell-7"); // routes to the element it was synthesized from
+        assert_eq!(set.tool.input_schema["required"][0], "value");
+        assert_eq!(
+            set.tool.input_schema["properties"]["value"]["type"],
+            "string"
+        );
+    }
+
+    #[test]
+    fn non_settable_element_gets_no_set_tool() {
+        // A plain button is pressable but not value-settable → press_* yes, set_* no.
+        let nodes = vec![node("1", "AXButton", "Save", &["AXPress"], true)];
+        let tools = synthesize_tools(&nodes);
+        let names = element_tool_names(&tools);
+        assert!(names.contains(&"press_button_save"), "{names:?}");
+        assert!(
+            !names.iter().any(|n| n.starts_with("set_")),
+            "no set_* for a non-settable element: {names:?}"
+        );
+    }
+
+    #[test]
+    fn set_tool_name_is_sanitized_and_deduped_like_press() {
+        // A settable element with a punctuation-heavy title still yields a [a-z0-9_] name; and two
+        // settable elements with the same title get a numeric suffix (shared dedupe with press_*).
+        let nodes = vec![
+            settable_node("1", "AXTextField", "Amount ($)", &[]),
+            settable_node("2", "AXTextField", "Amount ($)", &[]),
+        ];
+        let tools = synthesize_tools(&nodes);
+        let names = element_tool_names(&tools);
+        assert_eq!(
+            names,
+            vec!["set_text_field_amount", "set_text_field_amount_2"]
+        );
+    }
+
+    #[test]
+    fn is_known_key_matches_the_supported_set() {
+        assert!(is_known_key("tab"));
+        assert!(is_known_key("return"));
+        assert!(!is_known_key("f13"));
+        assert!(!is_known_key("Tab")); // case-sensitive: schema advertises lowercase
     }
 }

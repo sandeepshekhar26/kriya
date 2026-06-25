@@ -23,14 +23,17 @@ use std::ffi::c_void;
 
 use accessibility_sys::{
     kAXChildrenAttribute, kAXDescriptionAttribute, kAXEnabledAttribute, kAXErrorSuccess,
-    kAXRoleAttribute, kAXTitleAttribute, AXError, AXIsProcessTrusted, AXUIElementCopyActionNames,
-    AXUIElementCopyAttributeValue, AXUIElementCreateApplication, AXUIElementPerformAction,
-    AXUIElementRef,
+    kAXRoleAttribute, kAXTitleAttribute, kAXValueAttribute, AXError, AXIsProcessTrusted,
+    AXUIElementCopyActionNames, AXUIElementCopyAttributeValue, AXUIElementCreateApplication,
+    AXUIElementIsAttributeSettable, AXUIElementPerformAction, AXUIElementRef,
+    AXUIElementSetAttributeValue,
 };
 use core_foundation::array::CFArray;
 use core_foundation::base::{CFType, TCFType};
 use core_foundation::boolean::CFBoolean;
 use core_foundation::string::{CFString, CFStringRef};
+use core_graphics::event::{CGEvent, CGEventTapLocation, CGKeyCode};
+use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
 use super::{AxBackend, AxNode};
 
@@ -123,6 +126,109 @@ impl AxBackend for MacAxBackend {
             ))
         }
     }
+
+    fn set_value(&self, node_id: &str, value: &str) -> Result<(), String> {
+        ensure_trusted()?;
+        let element = resolve(self.app, node_id)
+            .ok_or_else(|| format!("accessibility element '{node_id}' not found"))?;
+        let attr = CFString::new(kAXValueAttribute);
+        let value_cf = CFString::new(value);
+        // SAFETY: `element.as_ax_ref()` is a valid AX element ref retained for this call; `attr` and
+        // `value_cf` are CFStrings we own for the duration. `AXUIElementSetAttributeValue` takes the
+        // value as a borrowed `CFTypeRef` (it retains internally if it keeps it), so passing the
+        // concrete CFString ref is sound. Synthesis only emits a `set_*` tool for a settable element,
+        // but a non-settable element here just returns an AX error we surface — never UB.
+        let err = unsafe {
+            AXUIElementSetAttributeValue(
+                element.as_ax_ref(),
+                attr.as_concrete_TypeRef(),
+                value_cf.as_concrete_TypeRef() as core_foundation::base::CFTypeRef,
+            )
+        };
+        if err == kAXErrorSuccess {
+            Ok(())
+        } else {
+            Err(format!(
+                "AXUIElementSetAttributeValue(kAXValueAttribute) failed: {}",
+                ax_error_str(err)
+            ))
+        }
+    }
+
+    fn type_text(&self, text: &str) -> Result<(), String> {
+        ensure_trusted()?;
+        // A keyboard event with no specific keycode (0) carrying the unicode string types `text` into
+        // whatever holds focus — the standard CGEvent way to emit arbitrary unicode (it bypasses the
+        // physical-key→character mapping, so layout/IME don't garble multi-byte input).
+        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+            .map_err(|()| "failed to create CGEventSource for typing".to_string())?;
+        // Down then up, both carrying the string (matching how synthetic typing is normally posted).
+        for keydown in [true, false] {
+            let event = CGEvent::new_keyboard_event(source.clone(), 0, keydown)
+                .map_err(|()| "failed to create keyboard CGEvent for typing".to_string())?;
+            event.set_string(text);
+            // Post to the HID tap so the frontmost app's focused field receives it.
+            event.post(CGEventTapLocation::HID);
+            std::thread::sleep(std::time::Duration::from_millis(6));
+        }
+        // Let the event queue drain before the next op so rapid back-to-back typing/keys in one
+        // session all land — without this settle a second synthetic post can race and be dropped.
+        std::thread::sleep(std::time::Duration::from_millis(12));
+        Ok(())
+    }
+
+    fn send_key(&self, key: &str) -> Result<(), String> {
+        ensure_trusted()?;
+        let keycode = keycode_for(key).ok_or_else(|| format!("unknown key '{key}'"))?;
+        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+            .map_err(|()| "failed to create CGEventSource for key press".to_string())?;
+        // A named key is a real virtual keycode → post a down then an up, so the app sees a full
+        // keystroke (Return commits a cell, Tab moves to the next, etc.).
+        for keydown in [true, false] {
+            let event = CGEvent::new_keyboard_event(source.clone(), keycode, keydown)
+                .map_err(|()| format!("failed to create keyboard CGEvent for key '{key}'"))?;
+            event.post(CGEventTapLocation::HID);
+            std::thread::sleep(std::time::Duration::from_millis(6));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(12));
+        Ok(())
+    }
+}
+
+/// Map a [`synth::SUPPORTED_KEYS`] name to its macOS virtual keycode. Returns `None` for any name
+/// outside that set, so an unknown key is an `Err` upstream (never a silent no-op). The keycodes are
+/// the standard ANSI virtual keycodes from `<HIToolbox/Events.h>`; we hard-code the small set we
+/// support rather than pull in a keycode crate. Kept in lockstep with `SUPPORTED_KEYS` (a name there
+/// with no keycode here would be advertised but un-pressable — guarded by a test).
+fn keycode_for(key: &str) -> Option<CGKeyCode> {
+    let code: CGKeyCode = match key {
+        "return" | "enter" => 0x24,
+        "tab" => 0x30,
+        "space" => 0x31,
+        "delete" | "backspace" => 0x33,
+        "escape" => 0x35,
+        "left" => 0x7B,
+        "right" => 0x7C,
+        "down" => 0x7D,
+        "up" => 0x7E,
+        _ => return None,
+    };
+    Some(code)
+}
+
+/// Whether the element's `kAXValueAttribute` is writable (`AXUIElementIsAttributeSettable`). A read
+/// failure or a non-settable attribute both mean "not settable" → no `set_*` tool. Conservative on
+/// purpose: only an explicit `true` from the AX API makes an element claim settability.
+fn is_value_settable(element: AXUIElementRef) -> bool {
+    let attr = CFString::new(kAXValueAttribute);
+    let mut settable: std::os::raw::c_uchar = 0;
+    // SAFETY: `element` is a valid AX element ref; `attr` is a CFString we own; `settable` is an
+    // out-pointer the call fills with a Boolean (0/1) on success. We treat any error as "not
+    // settable" rather than trusting an uninitialized read.
+    let err = unsafe {
+        AXUIElementIsAttributeSettable(element, attr.as_concrete_TypeRef(), &mut settable)
+    };
+    err == kAXErrorSuccess && settable != 0
 }
 
 /// Check the process holds the Accessibility permission; without it every AX call fails opaquely.
@@ -185,6 +291,9 @@ fn walk(element: AXUIElementRef, path: &[String], depth: usize, out: &mut Vec<Ax
             .unwrap_or_default();
         let enabled = copy_bool_attr(child.as_ax_ref(), kAXEnabledAttribute).unwrap_or(true);
         let actions = copy_action_names(child.as_ax_ref());
+        // Is the element's *value* writable? Drives synthesis of a `set_*` tool. A button is not
+        // value-settable (so it gets only `press_*`); a text field / spreadsheet cell is.
+        let settable = is_value_settable(child.as_ax_ref());
 
         // Stable id: the role/title path from the root. Two siblings with the same role+title get
         // disambiguated by synthesis' dedupe on the *name*; the id stays the path so `resolve`
@@ -194,15 +303,17 @@ fn walk(element: AXUIElementRef, path: &[String], depth: usize, out: &mut Vec<Ax
         child_path.push(segment);
         let id = child_path.join(">");
 
-        // Only emit a node for elements that have at least one action (actionable); but always
-        // recurse so we reach actionable descendants of inert containers (windows, groups).
-        if !actions.is_empty() {
+        // Emit a node for an element that is *actionable* (≥1 AX action → a `press_*` tool) OR
+        // *value-settable* (→ a `set_*` tool, e.g. a text field with no press action). Either makes
+        // it useful to an agent; still always recurse so we reach descendants of inert containers.
+        if !actions.is_empty() || settable {
             out.push(AxNode {
                 id: id.clone(),
                 role,
                 title,
                 actions,
                 enabled,
+                settable,
             });
         }
         walk(child.as_ax_ref(), &child_path, depth + 1, out);
@@ -384,6 +495,7 @@ fn applescript_string(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::synth;
     use super::*;
 
     /// Unit-testable bits that need no real AX / permission.
@@ -397,6 +509,20 @@ mod tests {
     fn ax_error_str_names_known_codes() {
         assert!(ax_error_str(accessibility_sys::kAXErrorAPIDisabled).contains("APIDisabled"));
         assert!(ax_error_str(accessibility_sys::kAXErrorCannotComplete).contains("CannotComplete"));
+    }
+
+    /// Every key the `press_key` tool advertises in its schema enum MUST have a real virtual
+    /// keycode here, or it would be advertised but un-pressable. This guards the two from drifting.
+    #[test]
+    fn every_supported_key_has_a_keycode() {
+        for key in synth::SUPPORTED_KEYS {
+            assert!(
+                keycode_for(key).is_some(),
+                "advertised key '{key}' has no virtual keycode"
+            );
+        }
+        // And a name outside the set has no keycode (so it errs upstream).
+        assert!(keycode_for("f13").is_none());
     }
 
     /// Real-AX integration smoke test. Skipped cleanly unless the process actually holds the
