@@ -256,6 +256,14 @@ fn tool_catalog() -> Vec<(Tool, &'static str)> {
     ]
 }
 
+/// The fixed Front-3 tool set as plain [`Tool`]s (no routing) — what the [`ComputerUseServer`]
+/// serves and what the [`super::router`] front contributes to the namespaced union. A tiny `pub`
+/// accessor over the otherwise-private [`tool_catalog`], so the router can build its union tool
+/// list without re-deriving the catalog or reaching into private internals.
+pub fn tool_list() -> Vec<Tool> {
+    tool_catalog().into_iter().map(|(t, _)| t).collect()
+}
+
 /// The fixed `tool name → synthetic action marker` map, derived from [`tool_catalog`]. The
 /// executor builds its route table from this so the served tool names and the executor's routes
 /// share one source — a name the agent can call always resolves to exactly one backend action.

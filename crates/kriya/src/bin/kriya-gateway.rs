@@ -72,6 +72,10 @@ use kriya::mcp::{AxBackend, AxExecutor, ReachInServer};
 use kriya::mcp::MacDesktopBackend;
 #[cfg(feature = "computer-use")]
 use kriya::mcp::{ComputerUseExecutor, ComputerUseServer, DesktopBackend};
+// Router v2 (router feature) — ONE endpoint over many fronts under ONE governor. macOS-only build of
+// the real `run_router` (it assembles the macOS reach-in + computer-use backends).
+#[cfg(all(feature = "router", target_os = "macos"))]
+use kriya::mcp::{Front, RouterServer};
 use kriya::permissions::{default_proxy_policy, Policy};
 use serde::Deserialize;
 
@@ -176,6 +180,8 @@ fn usage_and_exit(msg: &str) -> ! {
          [--actor <agent>] [--user <user>] [--audit-log <path>] [--signing-key <path>] \
          [--name <n>] -- <downstream-cmd> [args...]\n       \
          kriya-gateway reach-in --app \"<App Name>\" [same governance flags]\n       \
+         kriya-gateway computer-use [same governance flags]   (system-wide pixel floor, all apps)\n       \
+         kriya-gateway router [--reach-in \"App1,App2\"] [same governance flags]   (computer-use floor + named reach-in apps, ONE governor)\n       \
          kriya-gateway doctor [--app \"<App Name>\"]   (macOS preflight: Accessibility, bundle, snippet)\n       \
          kriya-gateway serve ...   (delegates to the kriya-mcp bolt-on)"
     );
@@ -191,9 +197,11 @@ fn main() -> std::io::Result<()> {
         "proxy" => run_proxy(parse_proxy_args(args)),
         // Front 2 — govern an app that has NO MCP server / NO API via its accessibility tree.
         "reach-in" => run_reachin(args),
-        // Front 3 — governed computer-use (system-wide pixels). `router` is the unified entry: today
-        // it serves the computer-use floor + the `list_apps` discovery tool (auto-tier per app is v2).
-        "computer-use" | "router" => run_computer_use(args),
+        // Front 3 — governed computer-use (system-wide pixels): the universal reach floor alone.
+        "computer-use" => run_computer_use(args),
+        // Router v2 — ONE endpoint multiplexing the computer-use floor (any app) PLUS each
+        // `--reach-in` app's named controls, all under ONE governor (one policy/audit/actor).
+        "router" => run_router(args),
         // The existing in-process bolt-on lives in the `kriya-mcp` binary; keep one tool per
         // entry point rather than duplicating its wiring here.
         "serve" => usage_and_exit(
@@ -660,6 +668,208 @@ fn run_computer_use(_it: impl Iterator<Item = String>) -> std::io::Result<()> {
 fn run_computer_use(_it: impl Iterator<Item = String>) -> std::io::Result<()> {
     usage_and_exit(
         "this gateway build has no computer-use support — rebuild with `--features mcp-client,computer-use`",
+    )
+}
+
+/// `kriya-gateway router [--reach-in "App1,App2"] [OPTIONS]` — **router v2** (service-architecture):
+/// ONE MCP endpoint that multiplexes multiple governed fronts under ONE `Governor`. A single Claude
+/// Desktop entry then governs the **computer-use floor (any app)** PLUS the **named reach-in
+/// controls** of one or more specific apps at once — every `tools/call` routed to the right front by
+/// a `<namespace>__<tool>` prefix, all through the same policy → approval → budget → signed audit.
+///
+/// Fronts assembled here:
+/// - always the **computer-use floor** under namespace `cu` (its fixed catalog +
+///   `ComputerUseExecutor` over `MacDesktopBackend`) — the universal "support every app" floor;
+/// - for each app in `--reach-in "Numbers,Keynote"`, a reach-in front under a slug of the app name
+///   (`numbers`, `keynote`): `MacAxBackend::for_app(app)` → `snapshot()` → synthesized tools +
+///   `AxExecutor` over the same backend.
+///
+/// **Policy matches the namespaced name** — gate `cu__computer_click`, `numbers__*`, etc. Same
+/// governance flags as `proxy`/`reach-in`/`computer-use` (--policy/--approval/--actor/--user/
+/// --audit-log/--signing-key/--config/--name) PLUS `--reach-in` (comma-separated app names,
+/// optional; omit it for the floor alone). macOS-only; needs Accessibility (+ Screen Recording for
+/// the floor's screenshot tool).
+#[cfg(all(feature = "router", target_os = "macos"))]
+fn run_router(mut it: impl Iterator<Item = String>) -> std::io::Result<()> {
+    let mut config: Option<PathBuf> = None;
+    let mut policy: Option<PathBuf> = None;
+    let mut approval = "deny".to_string();
+    let mut approval_from_cli = false;
+    let mut name = "kriya-gateway".to_string();
+    let mut actor: Option<String> = None;
+    let mut user: Option<String> = None;
+    let mut audit_log: Option<PathBuf> = None;
+    let mut signing_key: Option<PathBuf> = None;
+    // The reach-in apps to ALSO govern alongside the computer-use floor (comma-separated). Optional.
+    let mut reach_in: Vec<String> = Vec::new();
+
+    while let Some(flag) = it.next() {
+        let mut take = |label: &str| -> String {
+            it.next()
+                .unwrap_or_else(|| usage_and_exit(&format!("{label} needs a value")))
+        };
+        match flag.as_str() {
+            "--reach-in" => {
+                reach_in = take("--reach-in")
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+            }
+            "--config" => config = Some(PathBuf::from(take("--config"))),
+            "--policy" => policy = Some(PathBuf::from(take("--policy"))),
+            "--approval" => {
+                approval = take("--approval");
+                approval_from_cli = true;
+            }
+            "--name" => name = take("--name"),
+            "--actor" => actor = Some(take("--actor")),
+            "--user" => user = Some(take("--user")),
+            "--audit-log" => audit_log = Some(PathBuf::from(take("--audit-log"))),
+            "--signing-key" => signing_key = Some(PathBuf::from(take("--signing-key"))),
+            "-h" | "--help" => usage_and_exit("help"),
+            other => usage_and_exit(&format!("unknown argument: {other}")),
+        }
+    }
+
+    // Reuse the proxy arg/config plumbing (no downstream), fold in `.kriya.yaml` for unset flags.
+    let mut pargs = ProxyArgs {
+        policy,
+        approval,
+        name,
+        actor,
+        user,
+        audit_log,
+        signing_key,
+        downstream: Vec::new(),
+    };
+    if let Some((cfg, path)) = load_gateway_config(&config) {
+        eprintln!("[kriya-gateway] loaded config: {}", path.display());
+        apply_config(&mut pargs, approval_from_cli, cfg);
+    }
+
+    let policy = Arc::new(match &pargs.policy {
+        Some(p) => Policy::load_or_default(p),
+        None => default_proxy_policy(),
+    });
+    for w in policy.warnings() {
+        eprintln!("[kriya-gateway] policy warning: {w}");
+    }
+    let signer = build_signer(&pargs.audit_log, &pargs.signing_key);
+    let approval = build_approval(&pargs.approval);
+    let actor = build_actor(pargs.actor.clone(), pargs.user.clone());
+    write_startup_attestation(&signer, pargs.signing_key.is_some(), &actor);
+
+    // Build the fronts. ALWAYS the computer-use floor (ns "cu") — the universal reach. Each
+    // executor is plain `Box<dyn ActionExecutor>`; the RouterServer wraps them all in ONE governor.
+    let mut fronts: Vec<Front> = Vec::new();
+    let mut front_summaries: Vec<String> = Vec::new();
+
+    let desktop: Arc<dyn DesktopBackend> = Arc::new(MacDesktopBackend::new());
+    let cu_tools = kriya::mcp::computeruse::tool_list();
+    let cu_count = cu_tools.len();
+    fronts.push(Front::new(
+        "cu",
+        cu_tools,
+        Box::new(ComputerUseExecutor::new(desktop)),
+    ));
+    front_summaries.push(format!("cu (computer-use floor, {cu_count} tools)"));
+
+    // Then one reach-in front per --reach-in app: snapshot its AX tree, synthesize tools + executor.
+    for app in &reach_in {
+        let backend: Arc<dyn AxBackend> = Arc::new(
+            MacAxBackend::for_app(app)
+                .unwrap_or_else(|e| usage_and_exit(&format!("router: reach-in '{app}': {e}"))),
+        );
+        let nodes = backend.snapshot().unwrap_or_else(|e| {
+            usage_and_exit(&format!(
+                "router: cannot read '{app}' accessibility tree: {e}"
+            ))
+        });
+        let tools = kriya::mcp::reachin::synth::synthesize_tools(&nodes);
+        let count = tools.len();
+        let ns = slug_namespace(app);
+        let executor = Box::new(AxExecutor::new(backend, nodes));
+        fronts.push(Front::new(ns.clone(), tools, executor));
+        front_summaries.push(format!("{ns} (reach-in '{app}', {count} tools)"));
+    }
+
+    let server_name = if pargs.name == "kriya-gateway" {
+        "kriya-gateway (router)".to_string()
+    } else {
+        pargs.name.clone()
+    };
+    let mut server = RouterServer::from_parts(
+        server_name,
+        fronts,
+        policy,
+        signer.clone(),
+        approval,
+        actor.clone(),
+    );
+
+    let actor_desc = match &actor {
+        Some(a) => format!("{}/{}", a.agent, a.user),
+        None => "<unattributed>".to_string(),
+    };
+    eprintln!(
+        "[kriya-gateway] router · {} front(s): {} · {} tool(s) ({} visible after policy) · \
+         approval={} · actor={} · audit log={}",
+        front_summaries.len(),
+        front_summaries.join(", "),
+        server.tool_count(),
+        server.visible_tool_count(),
+        pargs.approval,
+        actor_desc,
+        signer.log_path().display()
+    );
+
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    server.serve(stdin.lock(), &mut out)
+}
+
+/// Slugify an app name into a stable, MCP-safe namespace token (`[a-z0-9_]`): lowercase, runs of
+/// non-alphanumerics collapse to a single `_`, leading/trailing `_` trimmed. `"Apple Numbers"` →
+/// `"apple_numbers"`. It must not contain `"__"` (the namespace separator) — collapsing runs to a
+/// single `_` guarantees that. Falls back to `"app"` for an all-punctuation name.
+#[cfg(all(feature = "router", target_os = "macos"))]
+fn slug_namespace(app: &str) -> String {
+    let mut out = String::with_capacity(app.len());
+    let mut prev_sep = true; // start true so a leading separator adds no leading underscore
+    for c in app.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            prev_sep = false;
+        } else if !prev_sep {
+            out.push('_');
+            prev_sep = true;
+        }
+    }
+    while out.ends_with('_') {
+        out.pop();
+    }
+    if out.is_empty() {
+        "app".to_string()
+    } else {
+        out
+    }
+}
+
+/// Built with `router` but on a non-macOS host: the reach-in + computer-use backends are macOS-only.
+#[cfg(all(feature = "router", not(target_os = "macos")))]
+fn run_router(_it: impl Iterator<Item = String>) -> std::io::Result<()> {
+    usage_and_exit(
+        "router is currently macOS-only (it composes the macOS reach-in + computer-use fronts)",
+    )
+}
+
+/// Built WITHOUT the `router` feature: tell the operator how to get it.
+#[cfg(not(feature = "router"))]
+fn run_router(_it: impl Iterator<Item = String>) -> std::io::Result<()> {
+    usage_and_exit(
+        "this gateway build has no router support — rebuild with `--features mcp-client,reach-in,computer-use,router`",
     )
 }
 

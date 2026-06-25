@@ -46,6 +46,13 @@ pub mod reachin;
 #[cfg(feature = "computer-use")]
 pub mod computeruse;
 
+// Router v2 — ONE MCP endpoint multiplexing multiple governed fronts under ONE Governor (one
+// policy, one signer/audit, one actor). Composes the existing fronts (reach-in + computer-use)
+// behind a namespacing `RouterExecutor` and serves their union; it does NOT reimplement them.
+// Pulls in both reach-in and computer-use, so the feature enables them (see Cargo.toml).
+#[cfg(feature = "router")]
+pub mod router;
+
 #[cfg(target_os = "macos")]
 pub use approval::GuiApproval;
 pub use approval::{ApprovalGate, AutoApprove, DenyApproval, TtyApproval};
@@ -79,3 +86,8 @@ pub use computeruse::executor::ComputerUseExecutor;
 pub use computeruse::macos::MacDesktopBackend;
 #[cfg(feature = "computer-use")]
 pub use computeruse::{ComputerUseServer, DesktopBackend};
+
+// Router v2 public surface: the multiplexing executor + the unified serve loop. Portable (no FFI of
+// its own) — the macOS backends come from the reach-in / computer-use fronts it composes.
+#[cfg(feature = "router")]
+pub use router::{Front, RouterExecutor, RouterServer};
