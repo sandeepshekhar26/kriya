@@ -49,6 +49,11 @@ reach-in = ["dep:accessibility-sys", "dep:core-foundation", "dep:core-graphics"]
 # routed through the unchanged Governor. Off by default. The macOS backend uses CGEvent (mouse/key/
 # scroll) + `screencapture`; `base64` encodes the PNG for the screenshot tool's image result.
 computer-use = ["dep:core-graphics", "dep:core-foundation", "dep:accessibility-sys", "dep:base64"]
+# Router v2 — ONE MCP endpoint multiplexing multiple governed fronts under ONE Governor (one policy,
+# one signer/audit, one actor): the computer-use floor (any app) PLUS specific apps' named reach-in
+# controls, each `tools/call` routed to the right front by a `<ns>__<tool>` namespace. Composes the
+# existing fronts (it does NOT reimplement them), so it simply turns both on; adds NO new deps.
+router = ["reach-in", "computer-use"]
 
 [dependencies]
 tauri = { version = "2", features = [], optional = true }
