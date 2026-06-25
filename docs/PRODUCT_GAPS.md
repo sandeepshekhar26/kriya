@@ -316,14 +316,17 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
   per-front file (`<server>.jsonl` / `reach-in-<app>.jsonl` / `computer_use.jsonl` / `router.jsonl`);
   `--audit-log` overrides. Verified a front writes there with no flag + verifies offline. The
   Console's **auto-discover + tail** of this dir is the R28 half. **(R27)**
-- ⬜ **Tauri control-plane desktop app** — rebuild the Console as **Tauri**: compiled **Rust backend**
-  holds the paid value (+ license check); the webview is a thin viewer. One download bundles the
-  **gateway binary** + **onboarding GUI** (perms + MCP-config wiring) + **live audit cockpit**.
-  Freemium in one app; **remove the sample-log UI**. Related: a **stable self-signed signing identity**
-  to end the re-grant-on-rebuild churn. **(R28)**
-- ⬜ **Offline-license distribution** *(private)* — Rust backend verifies a **signed Ed25519 license
-  offline** (reuse receipts infra; ship the public key). No runtime server / no upload / no accounts;
-  only backend = checkout → license-issuer. Cloud/self-host **fleet** console deferred. **(R29)**
+- ✅ **Tauri control-plane desktop app** — **shipped** in 🔒 `kriya-console`. Tauri rebuild: compiled
+  **Rust backend** holds the paid value + license check; the React views are the thin viewer. The
+  backend **auto-discovers + tails** `~/.kriya/audit/` and streams **Rust-verified** receipts live;
+  **sample-log loader removed** (import demoted). One download bundles the **gateway sidecar** +
+  **onboarding GUI** (gateway detect, perms panes, MCP-config merge) + **live audit cockpit**. Freemium
+  in one app. Verified via `tauri dev` + the `.app` builds. **(R28)**
+- ✅ **Offline-license distribution** *(private)* — **shipped** in 🔒 `kriya-console`. Rust backend
+  verifies a **signed Ed25519 license fully offline** against an embedded issuer key (reuses receipts
+  canonicalization); paid features behind a `require_pro()` gate. No runtime server / no upload / no
+  accounts. Issuer is a documented **deferred stub** (dev minter behind a gitignored seed). Verified:
+  a minted license flips free→pro live. Cloud/self-host **fleet** console deferred. **(R29)**
 
 ## Near-term focus
 
