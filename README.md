@@ -95,14 +95,26 @@ kriya-gateway proxy -- node your-mcp-server.js
 A runnable, no-human, end-to-end proof (a read goes through and is signed; a destructive call is
 blocked at the gate and is not) lives in
 [`examples/gateway-proxy-demo/`](examples/gateway-proxy-demo/) — `./run.sh`. The design (one
-governance core, three reach fronts) is in
+governance core + a **4-tier reach model**) is in
 [`docs/SERVICE-ARCHITECTURE.md`](docs/SERVICE-ARCHITECTURE.md).
 
-> **Honest scope:** the proxy governs apps that **already speak MCP**. An app with **no MCP and no
-> API** is the job of the *reach-in* front (a governed MCP server synthesized from the OS
-> accessibility tree) — that is **roadmap (R25), not shipped**, and is coverage-bounded;
-> computer-use over pixels is a deferred fallback. The audit trail is tamper-**evident**
-> (hash-chained, offline-verifiable), not tamper-proof.
+### Reaches every app — governed (the 4-tier model)
+
+One governance core, the reach picked by how the app exposes itself, richest first:
+**bolt-on/serve** (a kriya-instrumented app's real named handlers) → **proxy** (any MCP server,
+zero changes) → **reach-in** (typed tools synthesized from the macOS accessibility tree, for apps with
+no MCP/API — shipped, macOS) → **computer-use** (system-wide pixels: click/type/scroll/screenshot —
+shipped, macOS; the universal floor, so no app is unsupported). Governance *richness* is tiered by
+instrumentation: semantic deny/approve of a **named** action at the top, coarse click/keystroke
+gating at the floor.
+
+> **Honest scope.** A named-action policy needs an instrumented app; reach-in is coverage-bounded
+> (degrades on Electron/Qt/web UIs); computer-use is universal but its governance is **coarse**
+> (gates/audits clicks & keystrokes, not named actions) and needs Accessibility + Screen Recording.
+> The audit trail is tamper-**evident** (hash-chained, offline-verifiable), not tamper-proof.
+> **Vs an ungoverned computer-use agent (e.g. Cowork):** the differentiator is that every action is
+> policy-gated + signed + on-device + **vendor-neutral** (governs *any* MCP agent, under the app
+> owner's rules) — not the ability to drive apps.
 
 ## Why "kriya"?
 
