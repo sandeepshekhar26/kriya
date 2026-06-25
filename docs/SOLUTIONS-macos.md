@@ -83,7 +83,11 @@ accessibility (AX) tree:
    - **policy** — deny-by-default; reads allowed, destructive/spend actions require approval
    - **approval modal** — `--approval gui` shows a native modal a human approves or denies
    - **budget** — spend/rate limits enforced before the action runs
-   - **signed audit** — every decision is an Ed25519-signed receipt in a JSONL log
+   - **signed audit** — every decision is an Ed25519-signed receipt in a JSONL log. By default the
+     log lands in the **standard on-device location `~/.kriya/audit/`** (a per-front file, e.g.
+     `reach-in-numbers.jsonl`) — the directory the **Kriya control-plane app auto-discovers and
+     tails**, so you open the app and see governance with no file to import. `--audit-log <path>`
+     still overrides for ad-hoc inspection.
    - **attestation** — with a pinned signing key, the log opens with an on-device attestation receipt
 
 The agent never drives pixels or scrapes the screen; it calls **typed tools**, and the gateway turns
