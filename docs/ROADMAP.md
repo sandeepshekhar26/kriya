@@ -79,12 +79,41 @@ Legend: ⬜ not started · 🟡 in progress · ✅ done · ⭐ flagship
   only, needs user-granted Accessibility permission, degrades on Electron/Qt/custom-drawn UIs — the
   "any macOS app" claim was research-refuted. **Still ⬜:** Windows UIA backend; the **coverage-ratio
   measurement on 5 real ICP apps** before this goes in a pitch.
-- 🟡 **R26 · Front-3 computer-use fallback (deferred / design-partner-gated)** — scaffold shipped.
-  `mcp::computer_use::ComputerUseExecutor` (off-by-default `computer-use` feature): the thin governed
-  seam — same `Governor` above it — that delegates a cleared call to an external "computer-use driver"
-  command (reuses `ProcessExecutor`); inert + readable-failure when unconfigured (steers to Fronts
-  1/2). The heavy CV/vision pipeline deliberately lives in the external driver, not the governed core.
-  **Still ⬜ (deferred):** an actual driver/integration — only when a design partner needs it.
+- ✅ **R26 · Front-3 governed computer-use (D-017)** — SHIPPED (macOS; was deferred, pulled in by
+  D-017 "support everything / sell governance"). `mcp::computeruse` (off-by-default `computer-use`
+  feature): a fixed system-wide tool set (`computer_screenshot/click/move/scroll/type/key`,
+  `list_apps`) that drives **any** app via pixels (CGEvent + `screencapture`, base64 PNG result),
+  every action through the unchanged `Governor`. The **universal governed floor** — no app is
+  unsupported. `kriya-gateway computer-use`. **Honest caveat:** pixel-tier policy is coarse (gate
+  clicks/keystrokes, not named actions); richest governance stays the instrumented fronts.
+- ✅ **R26.1 · Router v2 — auto-tier multiplexer (D-017)** — SHIPPED (`b7cadb7`). One MCP endpoint
+  (`kriya-gateway router [--reach-in "App,…"]`) multiplexing the computer-use floor + per-app reach-in
+  under ONE `Governor` (one policy/signer/audit/actor); tools served namespaced `<ns>__<tool>`, routed
+  per call. 14 router tests; verified live (`cu`(7) + `numbers`(1354) under one audit).
+
+---
+
+## CP — Console / control-plane app + distribution (D-018) — 🔜 NEXT SESSION
+
+> The shippable, demoable form of the paid Console + how it's sold. The Console rebuild lives in the
+> **private `kriya-console` repo**; the standard-log-location + bundle/onboarding bits touch the
+> **public gateway**. Build next session (a kickoff prompt was handed off). See D-018.
+
+- ⬜ **R27 · Standard on-device audit-log location + auto-discovery** *(public gateway)* — the gateway
+  **defaults** its audit log to a standard, OS-appropriate dir (working default `~/.kriya/audit/`); the
+  Console **auto-discovers + tails** it (open the app → see governance, no manual import). Keep the
+  `--audit-log` override + a secondary "open a file" for ad-hoc inspection.
+- ⬜ **R28 · Tauri control-plane desktop app** *(private Console + public bundle/onboarding)* — rebuild
+  the Console as a **Tauri** app: a compiled **Rust backend** holds the paid value (+ the license
+  check), the webview is a thin viewer. One download = bundles the **gateway binary** + an
+  **onboarding GUI** (grant Accessibility/Screen-Recording, wire the MCP client config) + the **live
+  signed-audit cockpit**. Freemium in one app (free monitor/onboarding vs license-gated paid
+  features). **Remove the sample-log UI.** Related: a **stable self-signed signing identity** (ends the
+  re-grant-on-every-rebuild churn).
+- ⬜ **R29 · Offline-license distribution (paid tier)** *(private)* — the Rust backend verifies a
+  **signed Ed25519 license offline** (reuse the receipts infra; ship the public key). No runtime
+  server / no data upload / no accounts. Only backend = a **checkout → tiny license-issuer**. Scaffold
+  the verify path now; wire checkout when there's a buyer. Cloud/self-host **fleet** console deferred.
 
 ---
 
