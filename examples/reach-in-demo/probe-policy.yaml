@@ -1,0 +1,9 @@
+# PROBE policy — allow everything, so `tools/list` shows the FULL set of tools the reach-in can
+# synthesize from an app's accessibility tree (the gateway hides policy-denied tools from discovery,
+# so a deny-by-default policy would under-report coverage). Use this ONLY for measuring coverage.
+# For real governance you'd use a restrictive policy (allow reads, gate/deny the rest).
+rules:
+  - action: "*"
+    allow: true
+budget:
+  max_actions_per_minute: 120
