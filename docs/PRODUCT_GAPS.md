@@ -295,10 +295,33 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
   ignored real-AX test. **Coverage-gated** (macOS-only, needs Accessibility permission, degrades on
   Electron/Qt/web UIs — "any macOS app" was research-refuted). ⬜ Windows UIA + the 5-ICP-app
   coverage measurement. **(R25)**
-- 🟡 **Front 3 — computer-use fallback** — scaffold shipped: `ComputerUseExecutor` (off-by-default
-  `computer-use` feature) — the thin governed seam delegating to an external driver (reuses
-  `ProcessExecutor`), inert when unconfigured. ⬜ an actual driver — deferred / design-partner-gated.
-  **(R26)**
+- ✅ **Front 3 — governed computer-use** — SHIPPED (macOS, D-017): `mcp::computeruse`
+  (off-by-default `computer-use` feature) — a fixed system-wide tool set (screenshot/click/move/
+  scroll/type/key + `list_apps`) driving **any** app via pixels (CGEvent + `screencapture`), every
+  action through the unchanged `Governor`. The **universal governed floor**. ⬜ Windows/Linux backends.
+  **(R26)** — pixel-tier governance is coarse by nature (gate clicks/keystrokes, not named actions).
+- ✅ **Router v2 — auto-tier multiplexer** — SHIPPED (D-017, `b7cadb7`): one endpoint
+  (`kriya-gateway router [--reach-in "App,…"]`) multiplexing the computer-use floor + per-app reach-in
+  under ONE `Governor`; tools namespaced `<ns>__<tool>`, routed per call. 14 tests; verified live.
+
+## 9. Distribution / control-plane app (D-018)
+
+> How the paid Console ships + is sold. Decided 2026-06-25 ([D-018](DECISIONS.md)); **build next
+> session.** The Console rebuild is 🔒 private (`kriya-console`); the standard-log + bundle/onboarding
+> bits touch the public gateway. Protects the moat (paid value in compiled Rust, not shippable JS) and
+> stays on-device (no SaaS) per the regulated thesis.
+
+- ⬜ **Standard on-device audit-log location + auto-discovery** *(public gateway)* — gateway **defaults**
+  its audit log to a standard dir (`~/.kriya/audit/`); the Console **auto-discovers + tails** it (open
+  the app → see governance, no manual import). Keep `--audit-log` override. **(R27)**
+- ⬜ **Tauri control-plane desktop app** — rebuild the Console as **Tauri**: compiled **Rust backend**
+  holds the paid value (+ license check); the webview is a thin viewer. One download bundles the
+  **gateway binary** + **onboarding GUI** (perms + MCP-config wiring) + **live audit cockpit**.
+  Freemium in one app; **remove the sample-log UI**. Related: a **stable self-signed signing identity**
+  to end the re-grant-on-rebuild churn. **(R28)**
+- ⬜ **Offline-license distribution** *(private)* — Rust backend verifies a **signed Ed25519 license
+  offline** (reuse receipts infra; ship the public key). No runtime server / no upload / no accounts;
+  only backend = checkout → license-issuer. Cloud/self-host **fleet** console deferred. **(R29)**
 
 ## Near-term focus
 
