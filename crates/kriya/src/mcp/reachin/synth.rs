@@ -96,13 +96,31 @@ fn role_word(role: &str) -> String {
 
 /// Build the base tool name `<verb>_<role>[_<title-slug>]`. The title slug is omitted when the
 /// title is empty, so an untitled button is still a valid `press_button` (deduped if repeated).
+///
+/// Final `[a-z0-9_]` guard: `verb`/`role` come from raw AX action/role strings via `to_snake`, which
+/// splits CamelCase but does NOT drop punctuation. Real apps expose pathological action names with
+/// colons, newlines, and parens (e.g. macOS Calculator's "Name:Copy\nTarget:0x0\nSelector:(null)"),
+/// which would violate MCP's tool-name charset and break a strict client's `tools/list`. So slugify
+/// the assembled name and clamp its length so every synthesized name is a valid, sane identifier.
 fn sanitized_name(verb: &str, role: &str, title: &str) -> String {
     let slug = slugify(title);
-    if slug.is_empty() {
+    let base = if slug.is_empty() {
         format!("{verb}_{role}")
     } else {
         format!("{verb}_{role}_{slug}")
+    };
+    let mut clean = slugify(&base);
+    if clean.is_empty() {
+        clean = "action".to_string();
     }
+    // Some apps expose whole-sentence action names; keep tool names readable and bounded.
+    if clean.len() > 64 {
+        clean.truncate(64);
+        while clean.ends_with('_') {
+            clean.pop();
+        }
+    }
+    clean
 }
 
 /// Ensure uniqueness: the first use of a base name keeps it; later collisions get `_2`, `_3`, …
@@ -209,6 +227,42 @@ mod tests {
             .name
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'));
+    }
+
+    #[test]
+    fn pathological_action_names_are_sanitized_to_valid_identifiers() {
+        // A real app (macOS Calculator) exposed AX action names with colons, newlines, and parens.
+        // Every synthesized tool name must still be [a-z0-9_] so a strict MCP client accepts it.
+        let nodes = vec![node(
+            "1",
+            "AXScrollArea",
+            "Last Expression",
+            &["Name:Copy\nTarget:0x0\nSelector:(null)"],
+            true,
+        )];
+        let tools = synthesize_tools(&nodes);
+        assert_eq!(tools.len(), 1);
+        let n = &tools[0].name;
+        assert!(
+            n.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+            "name must be [a-z0-9_], got: {n:?}"
+        );
+        assert!(!n.contains("__"), "no doubled underscores: {n:?}");
+        assert!(!n.starts_with('_') && !n.ends_with('_'), "trimmed: {n:?}");
+    }
+
+    #[test]
+    fn very_long_names_are_clamped() {
+        let long_title = "word ".repeat(50); // ~250 chars before slugging
+        let nodes = vec![node("1", "AXButton", &long_title, &["AXPress"], true)];
+        let tools = synthesize_tools(&nodes);
+        assert!(
+            tools[0].name.len() <= 64,
+            "len {} > 64",
+            tools[0].name.len()
+        );
+        assert!(!tools[0].name.ends_with('_'));
     }
 
     #[test]
