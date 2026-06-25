@@ -1,0 +1,169 @@
+# Kriya Gateway on macOS — solutions guide
+
+The Kriya Gateway puts **one governance layer** in front of the apps an AI agent drives on a Mac:
+every action runs through **policy → human approval → budget → signed audit → on-device
+attestation**, regardless of how the app exposes itself. This guide is practical: how to install it,
+what reach-in can and can't do, and how the three fronts fit together.
+
+The governance core is identical across every front. What changes is only *how the gateway reaches
+the app*.
+
+---
+
+## 1. Install and the one-time Accessibility grant
+
+### Build / install the signed `.app`
+
+```bash
+bash scripts/macos/build-gateway-app.sh          # → dist/macos/Kriya Gateway.app + KriyaGateway.dmg
+```
+
+Open the `.dmg` and drag **Kriya Gateway.app** to `/Applications`.
+
+### Grant Accessibility once
+
+reach-in (Front 2) reads an app's macOS accessibility tree, which requires the **Accessibility**
+permission. Grant it once:
+
+> System Settings → Privacy & Security → Accessibility → add **Kriya Gateway.app** → toggle ON
+
+Run the built-in preflight to check the grant, open that exact pane for you, list the apps reach-in
+can target, and print a ready-to-paste Claude Desktop snippet:
+
+```bash
+"/Applications/Kriya Gateway.app/Contents/MacOS/kriya-gateway" doctor --app "Numbers"
+```
+
+### Why it MUST be the `.app` bundle (the loose-binary trap)
+
+macOS gates Accessibility behind **TCC**, which keys a permission to a stable **app identity**
+(the bundle's `CFBundleIdentifier`, here `com.kriya.gateway`) — **not** to a file path.
+
+We hit this live with Claude Desktop:
+
+- A **loose binary** spawned by an Electron host (Claude Desktop) **cannot** be granted
+  Accessibility. macOS will let you add it to the list, but the grant never sticks, so the gateway
+  stays untrusted and reach-in can't read the tree.
+- The **signed `.app`** with a fixed bundle identifier **can** be granted, and the grant persists.
+
+So your MCP client's `command` must point at the binary **inside** the bundle —
+`…/Kriya Gateway.app/Contents/MacOS/kriya-gateway` — never at a bare binary. `kriya-gateway doctor`
+warns you when it detects it is running loose.
+
+---
+
+## 2. "Will all my apps be listed and governed automatically?"
+
+**No.** There is **no auto-governance** and nothing is governed silently.
+
+- `kriya-gateway doctor` performs reach-in **discovery**: it lists the running, user-facing apps as
+  *candidates*. That is a menu, not a policy — listing an app does nothing to it.
+- You **opt an app in** explicitly by configuring a gateway server for it (one `mcpServers` entry,
+  with `--app "<Name>"`) and giving it a **policy**. Until you do, the gateway never touches it.
+- Even an opted-in app is fully gated: every single action still passes through your policy and (in
+  `--approval gui` mode) a human approval modal before anything happens.
+
+Discovery answers "what *could* I govern?"; you decide "what *do* I govern?".
+
+---
+
+## 3. How typed, governed actions come out of accessibility (reach-in)
+
+For an app with no MCP server and no API, the gateway synthesizes a governed tool surface from the
+accessibility (AX) tree:
+
+1. **Read the AX tree** of the target app (buttons, fields, checkboxes, menus, …).
+2. **Synthesize typed tools** from those elements — the same small, typed action vocabulary the
+   in-process host uses:
+   - `press` — click a button / control
+   - `set_value` — set a field/control to a value
+   - `type_text` — type into the focused element
+   - `press_key` — send a key / shortcut
+3. **Route every call through the one governance core** — exactly as the proxy and bolt-on do:
+   - **policy** — deny-by-default; reads allowed, destructive/spend actions require approval
+   - **approval modal** — `--approval gui` shows a native modal a human approves or denies
+   - **budget** — spend/rate limits enforced before the action runs
+   - **signed audit** — every decision is an Ed25519-signed receipt in a JSONL log
+   - **attestation** — with a pinned signing key, the log opens with an on-device attestation receipt
+
+The agent never drives pixels or scrapes the screen; it calls **typed tools**, and the gateway turns
+a cleared call into the corresponding AX action.
+
+### Honest coverage limits
+
+reach-in's reach is the AX tree's reach, so coverage varies by app:
+
+- **Strong:** native macOS **control / form** apps — buttons, toggles, steppers, text fields,
+  menus. This is where reach-in shines (press a button, set a field, run a command).
+- **Weak / degraded:** **Electron, Qt, and web UIs** expose thin or non-standard AX trees; many
+  controls are invisible or unlabeled.
+- **Weak for bulk data entry:** **spreadsheets** (e.g. Numbers) surface a sparse grid over AX —
+  good for pressing toolbar controls and toggles, poor for reliable cell-by-cell data entry.
+
+When an app speaks MCP, prefer the **proxy** (Front 1). When it's a kriya-instrumented app, prefer
+**serve** (the bolt-on). reach-in is the front for the apps the other two can't reach.
+
+---
+
+## 4. How a "Spent-kind" app (built on `--exec`) is discovered — NOT via accessibility
+
+A kriya-instrumented app like **Spent** is **not** reached through accessibility. It ships its own
+governed surface, which is topologically the **strongest** front because the gateway governs the
+app's **real, named handlers** — not synthesized approximations of its UI.
+
+How it works:
+
+1. The app declares a **kriya manifest**: the SDK's `getToolSchemas()` is dumped to a `tools.json`
+   (the "dump-tools" step) describing its real named actions (e.g. `add_transaction`,
+   `delete_container`).
+2. The app provides an **`--exec` handler** — a command the gateway runs per cleared action; it
+   reads `{"action","params"}` on stdin and performs the real operation in-app.
+3. The gateway runs in **`serve`** mode over that manifest + handler:
+
+   ```bash
+   kriya-mcp --tools tools.json --policy policy.yaml --exec "node handler.js" --approval gui
+   ```
+
+   (`kriya-gateway serve …` is the same bolt-on; point the client at the `kriya-mcp` binary.)
+
+Because the gateway governs the app's **own** named handlers, there's no AX guesswork, no coverage
+gap, and the typed tools match the app's real domain. This is the deepest integration — and the path
+a new local-first AI app should build toward.
+
+---
+
+## 5. The three fronts — one core, three reaches
+
+The right front is chosen by **how the app exposes itself**, and all three share the identical
+policy → approval → budget → signed audit → attestation core.
+
+| The app you want to govern | Front | How the gateway reaches it | Strength |
+|---|---|---|---|
+| A **kriya-instrumented** app (ships a manifest + `--exec` handler, e.g. Spent) | **serve / bolt-on** (`kriya-mcp --tools … --exec …`) | Governs the app's **real named handlers** | **Strongest** — typed to the app's real domain, no guesswork |
+| An app that already speaks **MCP** | **proxy** (`kriya-gateway proxy -- <server-cmd>`) | Transparent stdio proxy in front of the real MCP server, **zero changes** | Strong — governs the server's declared tools |
+| An **uninstrumented** app — no MCP, no API (e.g. Numbers) | **reach-in** (`kriya-gateway reach-in --app "<Name>"`) | Synthesizes typed tools from the **macOS AX tree** | Coverage-bounded — strong on native control/form UIs, weak on Electron/Qt/web/spreadsheet data entry |
+
+Pick the strongest front the app supports: prefer **serve** if it's kriya-instrumented, else
+**proxy** if it speaks MCP, else **reach-in**. The governance — and the signed audit trail your
+auditor reads — is the same whichever front carries the action.
+
+---
+
+## Quick reference
+
+```bash
+# Preflight: Accessibility grant + bundle check + candidate apps + Claude Desktop snippet
+"…/Kriya Gateway.app/Contents/MacOS/kriya-gateway" doctor --app "Numbers"
+
+# Front 1 — proxy an existing MCP server (zero changes)
+kriya-gateway proxy --approval gui -- node actual-mcp-server.js
+
+# Front 2 — reach into an uninstrumented app via accessibility
+kriya-gateway reach-in --app "Numbers" --approval gui
+
+# serve / bolt-on — govern a kriya-instrumented app's real handlers
+kriya-mcp --tools tools.json --policy policy.yaml --exec "node handler.js" --approval gui
+```
+
+For packaging and Developer ID + notarization (real distribution), see
+[`scripts/macos/README.md`](../scripts/macos/README.md).

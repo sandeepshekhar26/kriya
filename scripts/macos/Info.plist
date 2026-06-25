@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Info.plist template for the Kriya Gateway .app bundle (R24).
+
+  WHY a bundle at all: macOS TCC (the Accessibility permission store) keys a grant to a stable
+  app identity (CFBundleIdentifier), NOT to a file path. A loose binary spawned by an Electron
+  host such as Claude Desktop cannot be granted Accessibility — we proved this live. A signed
+  .app with a fixed CFBundleIdentifier (com.kriya.gateway) CAN, and the grant sticks across runs.
+  build-gateway-app.sh stamps CFBundleShortVersionString / CFBundleVersion via PlistBuddy from
+  its --version flag; the values below are the defaults.
+-->
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>Kriya Gateway</string>
+  <key>CFBundleDisplayName</key><string>Kriya Gateway</string>
+  <key>CFBundleIdentifier</key><string>com.kriya.gateway</string>
+  <key>CFBundleExecutable</key><string>kriya-gateway</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleVersion</key><string>0.1.0</string>
+  <key>CFBundleShortVersionString</key><string>0.1.0</string>
+  <!-- Agent/background app: no Dock icon, no menu bar. The gateway is a stdio MCP server a client
+       launches, not a windowed app the user double-clicks. -->
+  <key>LSUIElement</key><true/>
+  <key>LSMinimumSystemVersion</key><string>12.0</string>
+</dict>
+</plist>
