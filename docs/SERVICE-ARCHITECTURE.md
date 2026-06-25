@@ -227,11 +227,44 @@ actions degrade on custom-drawn / Electron / Qt / web-embedded UIs, need a user-
 block App-Store sandboxing, and can't drive elevated apps. **Gate this front on measuring the
 coverage ratio on 5 real ICP apps** (POS / CRM / regulated) before committing it to a pitch.
 
-## 6. Front 3 — computer-use fallback (deferred)
+## 6. Front 3 — governed computer-use (the universal floor) — **active (D-017)**
 
-A `ComputerUseExecutor: ActionExecutor` mapping a cleared call to pixel actions, only where Fronts
-1–2 cannot reach. Same `Governor`. Design-partner-gated; documented for completeness, not on the
-near-term path.
+**Promoted from "deferred" to a first-class front (D-017).** Computer-use is the *universal* reach
+mechanism: it drives **any** app via pixels, so no app is ever unsupported. The differentiator vs an
+ungoverned computer-use agent (e.g. Cowork) is that **every action is routed through the unchanged
+`Governor`** — policy → approval → budget → signed audit — before it fires.
+
+Built as a fixed, system-wide tool set (not synthesized from an app): `computer_screenshot`,
+`computer_click {x,y,button?}`, `computer_move {x,y}`, `computer_type {text}`, `computer_key {key}`,
+`computer_scroll {x,y,dx,dy}`. The macOS executor performs them via CoreGraphics `CGEvent` (mouse,
+scroll, keyboard) + `screencapture` (screenshot → base64 PNG). Same `Governor` above it; exposed
+**system-wide** via `kriya-gateway computer-use` (no `--app` — it governs the whole desktop).
+
+**Honest scope:** governance here is **coarse** — you gate/audit *clicks and keystrokes*, not
+semantic actions (pixels carry no named operation to deny-by-default). The value at this tier is the
+**signed audit trail of everything the agent did on screen + approval gates**, not deny-by-default of
+a named action. Needs **Screen Recording** permission (for screenshots) on top of Accessibility.
+
+## 6a. The 4-tier reach model + the router (D-017)
+
+A single gateway reaches a target by the **richest available** mechanism; governance *richness* is
+tiered by how instrumented the app is:
+
+| Tier | App exposes | Reach | Governance |
+|---|---|---|---|
+| **Proxy / bolt-on** | MCP server / named handlers | narrow | **rich, semantic** (deny/approve a named action) |
+| **Reach-in** | accessibility tree | medium | medium (named element) |
+| **Computer-use** | nothing | **everything** | **coarse** (click/keystroke) |
+
+**"Support everything, sell governance":** computer-use is the universal floor (Act 1, operability —
+the part Cowork also does, but ungoverned); the governance is richest where the app cooperates (Act
+2, the moat). The **router** (`kriya-gateway router`) is one gateway / one policy / one signed audit
+that exposes the computer-use floor + a `list_apps` discovery tool and (v2) **auto-selects the richest
+tier per app** (proxy → bolt-on → reach-in → computer-use). **Reach-in is the *middle* tier, not the
+headline** — it races computer-use on reach and loses; lead governance demos with the bolt-on
+(semantic). The durable moat is **vendor-neutral** (governs any MCP agent, not just Claude) +
+**app-owner-defined, on-device, tamper-evident, compliance-grade** governance — not "we can drive
+apps." See [DECISIONS.md](DECISIONS.md) D-017.
 
 ## 7. The shippable product — `kriya-gateway`
 
