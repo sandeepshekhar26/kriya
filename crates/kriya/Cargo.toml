@@ -44,11 +44,11 @@ mcp-client = []
 # compiles only the platform-agnostic core (the AxBackend trait, tool synthesis, AxExecutor,
 # ReachInServer over an injected backend) — the real AX backend is `#[cfg(target_os = "macos")]`.
 reach-in = ["dep:accessibility-sys", "dep:core-foundation", "dep:core-graphics"]
-# Front 3 — the computer-use fallback (`mcp::computer_use`): drives a CLEARED tools/call as pixel
-# input via an external "computer-use driver" command, for apps Fronts 1 & 2 can't reach. Deferred /
-# design-partner-gated. Off by default; adds NO dependencies (the heavy CV pipeline lives in the
-# external driver, not in the governed core — this is just the thin ActionExecutor seam).
-computer-use = []
+# Front 3 — governed computer-use (`mcp::computeruse`, D-017): a fixed, system-wide tool set
+# (screenshot/click/move/scroll/type/key/list_apps) that drives any app via pixels, every action
+# routed through the unchanged Governor. Off by default. The macOS backend uses CGEvent (mouse/key/
+# scroll) + `screencapture`; `base64` encodes the PNG for the screenshot tool's image result.
+computer-use = ["dep:core-graphics", "dep:core-foundation", "dep:accessibility-sys", "dep:base64"]
 
 [dependencies]
 tauri = { version = "2", features = [], optional = true }
@@ -62,6 +62,9 @@ sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
 ureq = { version = "2", features = ["json", "tls"], optional = true }
 rusqlite = { version = "0.31", features = ["bundled"] }
+# Front 3 (computer-use) only — base64-encode the screenshot PNG into the tool's image result.
+# Cross-platform + optional, pulled solely by the `computer-use` feature; default build never sees it.
+base64 = { version = "0.22", optional = true }
 
 # Front 2 (reach-in) macOS-only FFI deps. Target-gated so non-macOS builds of the `reach-in`
 # feature never try to resolve them — `dep:` in the feature still works because Cargo treats an
