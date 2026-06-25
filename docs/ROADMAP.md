@@ -108,17 +108,25 @@ Legend: ⬜ not started · 🟡 in progress · ✅ done · ⭐ flagship
   `--audit-log` (the default log is always present). Verified live: a proxy with **no** `--audit-log`
   wrote `~/.kriya/audit/mock_mcp_server.jsonl`, receipt verifies offline. 97 crate + 4 new gateway
   unit tests green. The Console's **auto-discover + tail** of this dir lands in R28.
-- ⬜ **R28 · Tauri control-plane desktop app** *(private Console + public bundle/onboarding)* — rebuild
-  the Console as a **Tauri** app: a compiled **Rust backend** holds the paid value (+ the license
-  check), the webview is a thin viewer. One download = bundles the **gateway binary** + an
-  **onboarding GUI** (grant Accessibility/Screen-Recording, wire the MCP client config) + the **live
-  signed-audit cockpit**. Freemium in one app (free monitor/onboarding vs license-gated paid
-  features). **Remove the sample-log UI.** Related: a **stable self-signed signing identity** (ends the
-  re-grant-on-every-rebuild churn).
-- ⬜ **R29 · Offline-license distribution (paid tier)** *(private)* — the Rust backend verifies a
-  **signed Ed25519 license offline** (reuse the receipts infra; ship the public key). No runtime
-  server / no data upload / no accounts. Only backend = a **checkout → tiny license-issuer**. Scaffold
-  the verify path now; wire checkout when there's a buyer. Cloud/self-host **fleet** console deferred.
+- ✅ **R28 · Tauri control-plane desktop app** *(private Console + public bundle/onboarding)* — shipped
+  in 🔒 `kriya-console` (Tauri rebuild). A compiled **Rust backend** holds the paid value + the license
+  check; the existing React views are the thin viewer. The backend **auto-discovers + tails**
+  `~/.kriya/audit/` (R27) and streams **Rust-verified** receipts live; the **sample-log loader is
+  removed** (manual import demoted to a secondary "open a file"). One download bundles the **gateway
+  binary as a Tauri sidecar** + an **onboarding GUI** (detect gateway, open Accessibility/Screen-Recording
+  panes, merge the MCP client config — reuses `doctor` logic) + the **live signed-audit cockpit**.
+  Freemium in one app: free = live monitor + verify + onboarding; paid = license-gated **fleet
+  correlation + compliance export**, both generated in compiled Rust. Verified end-to-end via
+  `tauri dev` (live receipts shown + verified, incl. an R20-chained receipt — fixed a `prev_hash` gap
+  in the browser verifier too) and the `.app` builds. Stable self-signed signing identity: see the
+  related task below.
+- ✅ **R29 · Offline-license distribution (paid tier)** *(private)* — shipped in 🔒 `kriya-console`. The
+  Rust backend verifies a **signed Ed25519 license fully offline** against an embedded issuer public
+  key (reuses the receipts canonicalization). No runtime server / no upload / no accounts; the free
+  tier needs none. Paid features call a `require_pro()` gate. The **issuer is the documented deferred
+  stub** (a dev `issue-license` minter behind a gitignored seed proves the verify path; checkout →
+  offline signer is wired when a buyer exists). Verified live: a minted license flips the app free→pro
+  and unlocks the gated views. Cloud/self-host **fleet** console still deferred.
 
 ---
 
