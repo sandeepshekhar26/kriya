@@ -67,6 +67,11 @@ use kriya::mcp::{
 use kriya::mcp::MacAxBackend;
 #[cfg(feature = "reach-in")]
 use kriya::mcp::{AxBackend, AxExecutor, ReachInServer};
+// Front 3 (computer-use) types — only when built with `--features computer-use`. macOS backend.
+#[cfg(all(feature = "computer-use", target_os = "macos"))]
+use kriya::mcp::MacDesktopBackend;
+#[cfg(feature = "computer-use")]
+use kriya::mcp::{ComputerUseExecutor, ComputerUseServer, DesktopBackend};
 use kriya::permissions::{default_proxy_policy, Policy};
 use serde::Deserialize;
 
@@ -179,13 +184,16 @@ fn usage_and_exit(msg: &str) -> ! {
 
 fn main() -> std::io::Result<()> {
     let mut args = std::env::args().skip(1);
-    let sub = args
-        .next()
-        .unwrap_or_else(|| usage_and_exit("a subcommand is required (proxy|reach-in|serve)"));
+    let sub = args.next().unwrap_or_else(|| {
+        usage_and_exit("a subcommand is required (proxy|reach-in|computer-use|router|serve|doctor)")
+    });
     match sub.as_str() {
         "proxy" => run_proxy(parse_proxy_args(args)),
         // Front 2 — govern an app that has NO MCP server / NO API via its accessibility tree.
         "reach-in" => run_reachin(args),
+        // Front 3 — governed computer-use (system-wide pixels). `router` is the unified entry: today
+        // it serves the computer-use floor + the `list_apps` discovery tool (auto-tier per app is v2).
+        "computer-use" | "router" => run_computer_use(args),
         // The existing in-process bolt-on lives in the `kriya-mcp` binary; keep one tool per
         // entry point rather than duplicating its wiring here.
         "serve" => usage_and_exit(
@@ -197,7 +205,7 @@ fn main() -> std::io::Result<()> {
         "doctor" => run_doctor(args),
         "-h" | "--help" | "help" => usage_and_exit("help"),
         other => usage_and_exit(&format!(
-            "unknown subcommand: {other} (expected proxy|reach-in|serve|doctor)"
+            "unknown subcommand: {other} (expected proxy|reach-in|computer-use|router|serve|doctor)"
         )),
     }
 }
@@ -542,6 +550,116 @@ fn run_reachin(_it: impl Iterator<Item = String>) -> std::io::Result<()> {
 fn run_reachin(_it: impl Iterator<Item = String>) -> std::io::Result<()> {
     usage_and_exit(
         "this gateway build has no reach-in support — rebuild with `--features mcp-client,reach-in`",
+    )
+}
+
+/// `kriya-gateway computer-use [OPTIONS]` (and `router`) — Front 3 (service-architecture §6, D-017):
+/// **governed computer-use**, the universal reach floor. A fixed, system-wide tool set
+/// (screenshot/click/move/scroll/type/key + `list_apps`) drives ANY app via pixels, every call routed
+/// through the same `Governor` (policy → approval → budget → signed audit) as the other fronts. No
+/// `--app` — it governs the whole desktop. Same governance flags as `proxy`/`reach-in`. macOS-only;
+/// needs Accessibility (for input) + Screen Recording (for `computer_screenshot`).
+#[cfg(all(feature = "computer-use", target_os = "macos"))]
+fn run_computer_use(mut it: impl Iterator<Item = String>) -> std::io::Result<()> {
+    let mut config: Option<PathBuf> = None;
+    let mut policy: Option<PathBuf> = None;
+    let mut approval = "deny".to_string();
+    let mut approval_from_cli = false;
+    let mut name = "kriya-gateway".to_string();
+    let mut actor: Option<String> = None;
+    let mut user: Option<String> = None;
+    let mut audit_log: Option<PathBuf> = None;
+    let mut signing_key: Option<PathBuf> = None;
+
+    while let Some(flag) = it.next() {
+        let mut take = |label: &str| -> String {
+            it.next()
+                .unwrap_or_else(|| usage_and_exit(&format!("{label} needs a value")))
+        };
+        match flag.as_str() {
+            "--config" => config = Some(PathBuf::from(take("--config"))),
+            "--policy" => policy = Some(PathBuf::from(take("--policy"))),
+            "--approval" => {
+                approval = take("--approval");
+                approval_from_cli = true;
+            }
+            "--name" => name = take("--name"),
+            "--actor" => actor = Some(take("--actor")),
+            "--user" => user = Some(take("--user")),
+            "--audit-log" => audit_log = Some(PathBuf::from(take("--audit-log"))),
+            "--signing-key" => signing_key = Some(PathBuf::from(take("--signing-key"))),
+            "-h" | "--help" => usage_and_exit("help"),
+            other => usage_and_exit(&format!("unknown argument: {other}")),
+        }
+    }
+
+    // Reuse the proxy arg/config plumbing (no downstream, no --app), fold in `.kriya.yaml`.
+    let mut pargs = ProxyArgs {
+        policy,
+        approval,
+        name,
+        actor,
+        user,
+        audit_log,
+        signing_key,
+        downstream: Vec::new(),
+    };
+    if let Some((cfg, path)) = load_gateway_config(&config) {
+        eprintln!("[kriya-gateway] loaded config: {}", path.display());
+        apply_config(&mut pargs, approval_from_cli, cfg);
+    }
+
+    let policy = Arc::new(match &pargs.policy {
+        Some(p) => Policy::load_or_default(p),
+        None => default_proxy_policy(),
+    });
+    for w in policy.warnings() {
+        eprintln!("[kriya-gateway] policy warning: {w}");
+    }
+    let signer = build_signer(&pargs.audit_log, &pargs.signing_key);
+    let approval = build_approval(&pargs.approval);
+    let actor = build_actor(pargs.actor.clone(), pargs.user.clone());
+    write_startup_attestation(&signer, pargs.signing_key.is_some(), &actor);
+
+    // System-wide governed desktop control — no per-app snapshot; the fixed tool set drives the whole
+    // screen via CGEvent + screencapture. This is the universal "support every app" floor (D-017).
+    let backend: Arc<dyn DesktopBackend> = Arc::new(MacDesktopBackend::new());
+    let executor = Box::new(ComputerUseExecutor::new(backend));
+    let governor =
+        Governor::new(policy.clone(), signer.clone(), approval, executor).with_actor(actor.clone());
+    let mut server = ComputerUseServer::new(governor, policy);
+
+    let actor_desc = match &actor {
+        Some(a) => format!("{}/{}", a.agent, a.user),
+        None => "<unattributed>".to_string(),
+    };
+    eprintln!(
+        "[kriya-gateway] computer-use (system-wide, all apps) · {} tool(s) ({} visible after policy) \
+         · approval={} · actor={} · audit log={}",
+        server.tool_count(),
+        server.visible_tool_count(),
+        pargs.approval,
+        actor_desc,
+        signer.log_path().display()
+    );
+
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    server.serve(stdin.lock(), &mut out)
+}
+
+/// Built with `computer-use` but on a non-macOS host: the desktop driver is macOS-only today.
+#[cfg(all(feature = "computer-use", not(target_os = "macos")))]
+fn run_computer_use(_it: impl Iterator<Item = String>) -> std::io::Result<()> {
+    usage_and_exit("computer-use is currently macOS-only (CGEvent + screencapture)")
+}
+
+/// Built WITHOUT the `computer-use` feature: tell the operator how to get it.
+#[cfg(not(feature = "computer-use"))]
+fn run_computer_use(_it: impl Iterator<Item = String>) -> std::io::Result<()> {
+    usage_and_exit(
+        "this gateway build has no computer-use support — rebuild with `--features mcp-client,computer-use`",
     )
 }
 

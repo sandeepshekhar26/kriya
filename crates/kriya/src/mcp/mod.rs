@@ -39,10 +39,12 @@ pub mod proxy_server;
 #[cfg(feature = "reach-in")]
 pub mod reachin;
 
-// Front 3 — the computer-use fallback (service-architecture §6). Off-by-default `computer-use`
-// feature; deferred / design-partner-gated. The thin governed seam only (no CV deps).
+// Front 3 — governed computer-use (service-architecture §6, D-017): a fixed, system-wide tool set
+// (screenshot/click/move/scroll/type/key/list_apps) that drives any app via pixels, every action
+// routed through the unchanged Governor. Off-by-default `computer-use` feature; the macOS backend
+// (CGEvent + screencapture) is gated inside the module, the core (trait/server/executor) is portable.
 #[cfg(feature = "computer-use")]
-pub mod computer_use;
+pub mod computeruse;
 
 #[cfg(target_os = "macos")]
 pub use approval::GuiApproval;
@@ -69,6 +71,11 @@ pub use reachin::macos::MacAxBackend;
 #[cfg(feature = "reach-in")]
 pub use reachin::{AxBackend, AxNode, ReachInServer};
 
-// Front 3 public surface.
+// Front 3 public surface: the trait, the executor, and the system-wide serve loop. The macOS desktop
+// backend is re-exported only on macOS.
 #[cfg(feature = "computer-use")]
-pub use computer_use::ComputerUseExecutor;
+pub use computeruse::executor::ComputerUseExecutor;
+#[cfg(all(feature = "computer-use", target_os = "macos"))]
+pub use computeruse::macos::MacDesktopBackend;
+#[cfg(feature = "computer-use")]
+pub use computeruse::{ComputerUseServer, DesktopBackend};
