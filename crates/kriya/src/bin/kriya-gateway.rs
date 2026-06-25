@@ -22,9 +22,11 @@
 //!   --approval <mode>     how guarded calls are decided: deny (default) | tty | gui | auto
 //!   --actor <agent>       agent identity stamped into every signed receipt (R8). Omit → unattributed
 //!   --user <user>         operator the run acts for (default: $USER). Only used with --actor
-//!   --audit-log <path>    signed-receipt JSONL log (default: $TMPDIR/kriya-audit.jsonl)
+//!   --audit-log <path>    signed-receipt JSONL log. Default: a per-front file under the standard
+//!                         ~/.kriya/audit/ dir (the Console auto-discovers + tails it — R27). Override
+//!                         for an ad-hoc log somewhere else.
 //!   --signing-key <path>  persist the Ed25519 identity here (0600) for a STABLE trust anchor
-//!                         across runs (R20). Requires --audit-log. Default: ephemeral per-process key
+//!                         across runs (R20). Default: ephemeral per-process key
 //!   --name <n>            server name reported to the client in `initialize` (default: kriya-gateway)
 //!   -- <downstream-cmd>   EVERYTHING after `--` is the downstream MCP server command + its args
 //! ```
@@ -49,13 +51,23 @@
 //! receipt. With an ephemeral per-process key the attestation is skipped (it would not be
 //! meaningfully verifiable across runs); a one-line stderr note records the decision either way.
 //!
+//! ## Standard on-device audit-log location (R27 / D-018)
+//! When no `--audit-log` is given, the gateway writes its signed-receipt log to a **stable per-front
+//! file under `~/.kriya/audit/`** — the standard, OS-appropriate directory the **kriya control-plane
+//! Console auto-discovers and tails** (open the app, see your governance; no file-hunting, no manual
+//! import). The filename names the front so re-runs continue the same hash-chained log instead of
+//! scattering one file per run: a proxied server → `<server>.jsonl`, `reach-in --app Numbers` →
+//! `reach-in-numbers.jsonl`, `computer-use` → `computer_use.jsonl`, `router` → `router.jsonl`. Pass
+//! `--audit-log <path>` to override (ad-hoc inspection, or a custom location). The directory is
+//! created on first write; the convention is shared with the Console via [`default_audit_dir`].
+//!
 //! Banner + per-call decisions go to **stderr**; stdout is reserved for the MCP JSON-RPC stream.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::sync::{Arc, Mutex};
 
-use kriya::audit::{now_ms, Actor, Receipt, Signer, ATTESTATION_ON_DEVICE};
+use kriya::audit::{default_audit_dir, now_ms, Actor, Receipt, Signer, ATTESTATION_ON_DEVICE};
 #[cfg(target_os = "macos")]
 use kriya::mcp::GuiApproval;
 use kriya::mcp::{
@@ -312,20 +324,74 @@ fn build_approval(kind: &str) -> Box<dyn ApprovalGate> {
     }
 }
 
-/// Build the signer, validating audit-log / signing-key paths up front so a bad path is a clean
-/// startup error rather than a hard failure mid-session (service-architecture §7). A persisted
-/// `--signing-key` gives a stable trust anchor across runs (R20); it requires `--audit-log`.
-fn build_signer(audit_log: &Option<PathBuf>, signing_key: &Option<PathBuf>) -> Arc<Signer> {
-    match (signing_key, audit_log) {
-        (Some(key), Some(log)) => match Signer::with_identity(key, log.clone()) {
+/// Build the signer for an already-resolved audit-log path, validating the signing-key path up front
+/// so a bad path is a clean startup error rather than a hard failure mid-session (service-architecture
+/// §7). The `audit_log` is always concrete here — [`resolve_audit_log`] defaults it under the standard
+/// `~/.kriya/audit/` directory (R27) when the operator passes no `--audit-log`, so the gateway always
+/// has a stable, Console-discoverable log. A persisted `--signing-key` gives a stable trust anchor
+/// across runs (R20); without it the signer mints an ephemeral per-process key but still appends to
+/// the same log file.
+fn build_signer(audit_log: &Path, signing_key: &Option<PathBuf>) -> Arc<Signer> {
+    match signing_key {
+        Some(key) => match Signer::with_identity(key, audit_log.to_path_buf()) {
             Ok(s) => Arc::new(s),
             Err(e) => usage_and_exit(&format!("cannot use --signing-key {key:?}: {e}")),
         },
-        (Some(_), None) => {
-            usage_and_exit("--signing-key requires --audit-log (the persisted log it anchors)")
+        None => Arc::new(Signer::with_log_path(audit_log.to_path_buf())),
+    }
+}
+
+/// Resolve the audit-log path for a front (R27 / D-018). An explicit `--audit-log` (or the config
+/// file's `audit_log`) always wins. Otherwise default to a **stable file under the standard
+/// `~/.kriya/audit/` directory**, named for this front (`<label>.jsonl`), so the control-plane
+/// Console auto-discovers and tails it and re-runs of the same front *continue the same
+/// hash-chained log* instead of scattering a new file per run. `label` is a human-meaningful, stable
+/// identifier for the front (the downstream server name, the reach-in app, `computer-use`, `router`).
+fn resolve_audit_log(explicit: Option<PathBuf>, label: &str) -> PathBuf {
+    explicit
+        .unwrap_or_else(|| default_audit_dir().join(format!("{}.jsonl", slugify(label, "gateway"))))
+}
+
+/// A stable, human-meaningful label for a proxied downstream server, used to name its default
+/// audit-log file (R27). Prefer the first script-like argument's file stem (e.g.
+/// `node actual-mcp-server.js` → `actual-mcp-server`); else the program's own basename
+/// (`uvx some-server` → `uvx`). Falls back to `proxy`.
+fn downstream_label(downstream: &[String]) -> String {
+    let pick = downstream
+        .iter()
+        .find(|a| !a.starts_with('-') && Path::new(a.as_str()).extension().is_some())
+        .or_else(|| downstream.first())
+        .map(|s| s.as_str())
+        .unwrap_or("proxy");
+    Path::new(pick)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "proxy".to_string())
+}
+
+/// Slugify an arbitrary string into a stable, filesystem- and MCP-safe token (`[a-z0-9_]`):
+/// lowercase, runs of non-alphanumerics collapse to a single `_`, leading/trailing `_` trimmed.
+/// Returns `fallback` for an all-punctuation / empty input. Used for default audit-log filenames
+/// (R27) and router namespaces (it never emits `__`, the router's namespace separator).
+fn slugify(s: &str, fallback: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_sep = true; // start true so a leading separator adds no leading underscore
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            prev_sep = false;
+        } else if !prev_sep {
+            out.push('_');
+            prev_sep = true;
         }
-        (None, Some(log)) => Arc::new(Signer::with_log_path(log.clone())),
-        (None, None) => Arc::new(Signer::new()),
+    }
+    while out.ends_with('_') {
+        out.pop();
+    }
+    if out.is_empty() {
+        fallback.to_string()
+    } else {
+        out
     }
 }
 
@@ -381,7 +447,10 @@ fn run_proxy(args: ProxyArgs) -> std::io::Result<()> {
         eprintln!("[kriya-gateway] policy warning: {w}");
     }
 
-    let signer = build_signer(&args.audit_log, &args.signing_key);
+    // R27: default the audit log to a stable per-server file under ~/.kriya/audit/ (named for the
+    // downstream server) so the Console auto-discovers it; --audit-log still overrides.
+    let audit_log = resolve_audit_log(args.audit_log.clone(), &downstream_label(&args.downstream));
+    let signer = build_signer(&audit_log, &args.signing_key);
     let approval = build_approval(&args.approval);
     let actor = build_actor(args.actor.clone(), args.user.clone());
 
@@ -499,7 +568,9 @@ fn run_reachin(mut it: impl Iterator<Item = String>) -> std::io::Result<()> {
     for w in policy.warnings() {
         eprintln!("[kriya-gateway] policy warning: {w}");
     }
-    let signer = build_signer(&pargs.audit_log, &pargs.signing_key);
+    // R27: default to a stable reach-in-<app>.jsonl under ~/.kriya/audit/; --audit-log overrides.
+    let audit_log = resolve_audit_log(pargs.audit_log.clone(), &format!("reach-in-{app}"));
+    let signer = build_signer(&audit_log, &pargs.signing_key);
     let approval = build_approval(&pargs.approval);
     let actor = build_actor(pargs.actor.clone(), pargs.user.clone());
     write_startup_attestation(&signer, pargs.signing_key.is_some(), &actor);
@@ -624,7 +695,9 @@ fn run_computer_use(mut it: impl Iterator<Item = String>) -> std::io::Result<()>
     for w in policy.warnings() {
         eprintln!("[kriya-gateway] policy warning: {w}");
     }
-    let signer = build_signer(&pargs.audit_log, &pargs.signing_key);
+    // R27: default to a stable computer-use.jsonl under ~/.kriya/audit/; --audit-log overrides.
+    let audit_log = resolve_audit_log(pargs.audit_log.clone(), "computer-use");
+    let signer = build_signer(&audit_log, &pargs.signing_key);
     let approval = build_approval(&pargs.approval);
     let actor = build_actor(pargs.actor.clone(), pargs.user.clone());
     write_startup_attestation(&signer, pargs.signing_key.is_some(), &actor);
@@ -755,7 +828,10 @@ fn run_router(mut it: impl Iterator<Item = String>) -> std::io::Result<()> {
     for w in policy.warnings() {
         eprintln!("[kriya-gateway] policy warning: {w}");
     }
-    let signer = build_signer(&pargs.audit_log, &pargs.signing_key);
+    // R27: default to a stable router.jsonl under ~/.kriya/audit/ (one log for the whole router,
+    // all fronts under one governor); --audit-log overrides.
+    let audit_log = resolve_audit_log(pargs.audit_log.clone(), "router");
+    let signer = build_signer(&audit_log, &pargs.signing_key);
     let approval = build_approval(&pargs.approval);
     let actor = build_actor(pargs.actor.clone(), pargs.user.clone());
     write_startup_attestation(&signer, pargs.signing_key.is_some(), &actor);
@@ -830,31 +906,12 @@ fn run_router(mut it: impl Iterator<Item = String>) -> std::io::Result<()> {
     server.serve(stdin.lock(), &mut out)
 }
 
-/// Slugify an app name into a stable, MCP-safe namespace token (`[a-z0-9_]`): lowercase, runs of
-/// non-alphanumerics collapse to a single `_`, leading/trailing `_` trimmed. `"Apple Numbers"` →
-/// `"apple_numbers"`. It must not contain `"__"` (the namespace separator) — collapsing runs to a
-/// single `_` guarantees that. Falls back to `"app"` for an all-punctuation name.
+/// Slugify an app name into a stable, MCP-safe namespace token (`[a-z0-9_]`): `"Apple Numbers"` →
+/// `"apple_numbers"`. Must not contain `"__"` (the router's namespace separator) — [`slugify`]
+/// collapses runs of non-alphanumerics to a single `_`, which guarantees that. Falls back to `"app"`.
 #[cfg(all(feature = "router", target_os = "macos"))]
 fn slug_namespace(app: &str) -> String {
-    let mut out = String::with_capacity(app.len());
-    let mut prev_sep = true; // start true so a leading separator adds no leading underscore
-    for c in app.chars() {
-        if c.is_ascii_alphanumeric() {
-            out.push(c.to_ascii_lowercase());
-            prev_sep = false;
-        } else if !prev_sep {
-            out.push('_');
-            prev_sep = true;
-        }
-    }
-    while out.ends_with('_') {
-        out.pop();
-    }
-    if out.is_empty() {
-        "app".to_string()
-    } else {
-        out
-    }
+    slugify(app, "app")
 }
 
 /// Built with `router` but on a non-macOS host: the reach-in + computer-use backends are macOS-only.
@@ -1081,6 +1138,72 @@ fn run_doctor(mut it: impl Iterator<Item = String>) -> std::io::Result<()> {
         }
     }
 
+    // 5. Standard audit-log location (R27): where signed receipts land by default and the directory
+    // the control-plane Console auto-discovers + tails. Surfaced so the operator knows where their
+    // governance trail is recorded without passing --audit-log.
+    println!("\n[5] Audit log location (signed receipts)");
+    let audit_dir = default_audit_dir();
+    println!("    default dir: {}", audit_dir.display());
+    println!("    Each front writes a stable <front>.jsonl here — proxy → <server>.jsonl,");
+    println!("    reach-in → reach-in-<app>.jsonl, computer-use → computer_use.jsonl, router → router.jsonl.");
+    println!(
+        "    The Kriya control-plane app auto-discovers + tails this directory (no manual import)."
+    );
+    println!("    Override per-run with  --audit-log <path>  for ad-hoc inspection.");
+
     println!("\nDone. (doctor is advisory — it never changes governance or your config.)");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slugify_basics() {
+        assert_eq!(slugify("Apple Numbers", "app"), "apple_numbers");
+        assert_eq!(slugify("computer-use", "x"), "computer_use");
+        assert_eq!(slugify("reach-in-Numbers", "x"), "reach_in_numbers");
+        assert_eq!(slugify("  -- !! ", "fallback"), "fallback");
+        // Never emits the router's "__" namespace separator (runs collapse to a single "_").
+        assert!(!slugify("a___b", "x").contains("__"));
+    }
+
+    #[test]
+    fn downstream_label_prefers_script_stem() {
+        assert_eq!(
+            downstream_label(&["node".into(), "actual-mcp-server.js".into()]),
+            "actual-mcp-server"
+        );
+        // No script-like arg → fall back to the program basename.
+        assert_eq!(
+            downstream_label(&["uvx".into(), "some-server".into()]),
+            "uvx"
+        );
+        // Flags are skipped when picking the script.
+        assert_eq!(
+            downstream_label(&["python".into(), "-m".into(), "server.py".into()]),
+            "server"
+        );
+        assert_eq!(downstream_label(&[]), "proxy");
+    }
+
+    #[test]
+    fn resolve_audit_log_respects_explicit_override() {
+        let explicit = PathBuf::from("/tmp/custom-audit.jsonl");
+        assert_eq!(
+            resolve_audit_log(Some(explicit.clone()), "router"),
+            explicit
+        );
+    }
+
+    #[test]
+    fn resolve_audit_log_defaults_to_named_file_under_standard_dir() {
+        let p = resolve_audit_log(None, "computer-use");
+        assert_eq!(
+            p.file_name().unwrap().to_string_lossy(),
+            "computer_use.jsonl"
+        );
+        assert_eq!(p.parent().unwrap(), default_audit_dir());
+    }
 }

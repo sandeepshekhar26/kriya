@@ -204,6 +204,35 @@ pub fn now_ms() -> u128 {
         .unwrap_or(0)
 }
 
+/// The standard on-device directory for kriya audit logs: `~/.kriya/audit/` (R27 / D-018). The
+/// gateway defaults its signed-receipt log here so the control-plane Console can **auto-discover and
+/// tail** governance with no manual file import — open the app, see your receipts. It is a shared
+/// convention across the gateway (writer) and the Console (reader), so both compute it the same way.
+/// The directory is created if missing. Falls back to the OS temp dir when no home directory is
+/// resolvable (headless / unusual environments) so a signer always has a writable location rather
+/// than silently dropping receipts.
+pub fn default_audit_dir() -> PathBuf {
+    match home_dir().map(|h| h.join(".kriya").join("audit")) {
+        // Best-effort create; on failure (e.g. a read-only home) fall back to temp so the log still
+        // lands somewhere writable.
+        Some(dir) if std::fs::create_dir_all(&dir).is_ok() => dir,
+        _ => std::env::temp_dir(),
+    }
+}
+
+/// Resolve the user's home directory without pulling in a dependency: `$HOME` on Unix,
+/// `%USERPROFILE%` on Windows. `None` if neither is set.
+fn home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("USERPROFILE").map(PathBuf::from)
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("HOME").map(PathBuf::from)
+    }
+}
+
 /// Load a 32-byte Ed25519 seed from `path` (lowercase hex), or generate one and persist it there
 /// (creating parent dirs; restricted to 0600 on Unix). An existing-but-invalid key file is an
 /// error, never overwritten — losing a durable signing identity must be a deliberate act, not a
@@ -661,5 +690,28 @@ mod tests {
             "key left untouched"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R27: the standard audit dir resolves to an existing, writable directory; with `$HOME` set
+    /// (the normal case, incl. CI) it lands at `~/.kriya/audit/` so the Console can auto-discover it.
+    #[test]
+    fn default_audit_dir_is_a_writable_directory() {
+        let dir = default_audit_dir();
+        assert!(
+            dir.is_dir(),
+            "default audit dir should exist after the call: {}",
+            dir.display()
+        );
+        if std::env::var_os("HOME").is_some() && cfg!(not(windows)) {
+            assert!(
+                dir.ends_with("audit") && dir.to_string_lossy().contains(".kriya"),
+                "with HOME set the default dir should be ~/.kriya/audit, got {}",
+                dir.display()
+            );
+        }
+        // Prove it is actually writable (a signer must be able to append a receipt here).
+        let probe = dir.join(format!("kriya-r27-probe-{}.tmp", uuid::Uuid::new_v4()));
+        std::fs::write(&probe, b"ok").expect("default audit dir must be writable");
+        let _ = std::fs::remove_file(&probe);
     }
 }
