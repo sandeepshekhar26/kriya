@@ -132,20 +132,27 @@ a new local-first AI app should build toward.
 
 ---
 
-## 5. The three fronts — one core, three reaches
+## 5. The 4-tier reach model — support every app, govern it (D-017)
 
-The right front is chosen by **how the app exposes itself**, and all three share the identical
-policy → approval → budget → signed audit → attestation core.
+The gateway reaches a target by the **richest mechanism the app supports**, and **all four share the
+identical** policy → approval → budget → signed audit → attestation core. The more instrumented the
+app, the **richer** the governance; computer-use is the **universal floor**, so *no app is unsupported.*
 
-| The app you want to govern | Front | How the gateway reaches it | Strength |
+| The app you want to govern | Front | How the gateway reaches it | Governance richness |
 |---|---|---|---|
-| A **kriya-instrumented** app (ships a manifest + `--exec` handler, e.g. Spent) | **serve / bolt-on** (`kriya-mcp --tools … --exec …`) | Governs the app's **real named handlers** | **Strongest** — typed to the app's real domain, no guesswork |
-| An app that already speaks **MCP** | **proxy** (`kriya-gateway proxy -- <server-cmd>`) | Transparent stdio proxy in front of the real MCP server, **zero changes** | Strong — governs the server's declared tools |
-| An **uninstrumented** app — no MCP, no API (e.g. Numbers) | **reach-in** (`kriya-gateway reach-in --app "<Name>"`) | Synthesizes typed tools from the **macOS AX tree** | Coverage-bounded — strong on native control/form UIs, weak on Electron/Qt/web/spreadsheet data entry |
+| A **kriya-instrumented** app (manifest + `--exec`, e.g. Spent) | **serve / bolt-on** (`kriya-mcp --tools … --exec …`) | the app's **real named handlers** | **Richest** — deny/approve a *named* domain action (`delete_transaction`) |
+| An app that already speaks **MCP** | **proxy** (`kriya-gateway proxy -- <server-cmd>`) | transparent stdio proxy, **zero changes** | Strong — governs the server's declared tools |
+| An **uninstrumented** app with an AX tree (e.g. Numbers) | **reach-in** (`kriya-gateway reach-in --app "<Name>"`) | typed tools from the **macOS AX tree** | Medium — gate a named element ("press Delete"); coverage-bounded |
+| **Any app at all** (the floor) | **computer-use** (`kriya-gateway computer-use` / `router`) | system-wide **pixels** — CGEvent click/type/scroll + screenshot | **Coarse** — gate/audit *clicks & keystrokes*, not named actions |
 
-Pick the strongest front the app supports: prefer **serve** if it's kriya-instrumented, else
-**proxy** if it speaks MCP, else **reach-in**. The governance — and the signed audit trail your
-auditor reads — is the same whichever front carries the action.
+Pick the strongest front the app supports (serve → proxy → reach-in → computer-use); the **router**
+subcommand will (v2) auto-select per app. **"Support everything"** = computer-use is the universal
+floor; **"sell governance"** = the value is richest where the app is instrumented.
+
+**Vs an ungoverned computer-use agent (e.g. Cowork):** reach is the same at the floor, but every kriya
+action is **policy-gated + signed + on-device + vendor-neutral** (it governs *any* MCP agent, and the
+rules are the **app owner's**, not the AI client's — which can't be toggled off). That governance, not
+the ability to drive apps, is the moat.
 
 ---
 
@@ -160,6 +167,9 @@ kriya-gateway proxy --approval gui -- node actual-mcp-server.js
 
 # Front 2 — reach into an uninstrumented app via accessibility
 kriya-gateway reach-in --app "Numbers" --approval gui
+
+# Front 3 — governed computer-use (ANY app, system-wide): the universal floor (alias: router)
+kriya-gateway computer-use --approval gui
 
 # serve / bolt-on — govern a kriya-instrumented app's real handlers
 kriya-mcp --tools tools.json --policy policy.yaml --exec "node handler.js" --approval gui
