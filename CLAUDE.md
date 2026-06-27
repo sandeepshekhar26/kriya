@@ -31,6 +31,7 @@ they ever disagree with memory, the repo wins (decision [D-008](docs/DECISIONS.m
 | [docs/LAUNCH.md](docs/LAUNCH.md) | Show HN plan, opening comment, objection answers, Twitter thread | Working roadmap item R12 / launch |
 | [architecture.md](architecture.md) | How the bolt-on / in-process **pattern** works end to end | Touching the protocol / host loop |
 | [docs/SERVICE-ARCHITECTURE.md](docs/SERVICE-ARCHITECTURE.md) | **The service architecture** (D-016): one governance core + three reach fronts + the shippable `kriya-gateway` product; tech + sequence diagrams + build-over plan | Building the gateway / proxy / fronts (R22–R26) |
+| [docs/THREE-FRONTIERS.md](docs/THREE-FRONTIERS.md) | **Local-only & SUPERSEDED (2026-06-27).** The original "three frontiers" positioning essay — premise (desktop has no agent tooling standard) is outdated (desktop has MCP-stdio too). The public positioning is now the **governance / control-plane** thesis in the README. Kept for history; **do not re-surface the three-frontiers framing publicly.** | Positioning history only — never as the current pitch |
 
 ## Current direction (as of 2026-06-24)
 

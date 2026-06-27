@@ -29,6 +29,10 @@ docs/strategy/
 # Reclassified local-only 2026-06-26: it carries implementation detail (signing-key/module/attestation
 # specifics) that shouldn't sit on a public surface (console-public-restraint).
 docs/SERVICE-ARCHITECTURE.md
+# Reclassified local-only 2026-06-27: the "three frontiers" essay's premise (desktop has no agent
+# tooling standard) is outdated — desktop has MCP-stdio too. The public positioning is now the
+# governance / control-plane thesis (in the README); this essay is kept local for history only.
+docs/THREE-FRONTIERS.md
 
 # Patent drafts — MUST stay local. Public disclosure before filing destroys novelty
 # (absolute novelty in IN/EU) and starts the US grace clock. Never commit/push.

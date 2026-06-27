@@ -361,9 +361,11 @@ Actual Budget flagship. The one artifact still outstanding is the **video** — 
   so the signed bytes don't depend on any build's serde_json `preserve_order` feature. Byte-identical
   today (cross-checked: Python binding drove the host → a sorted-params receipt the standalone
   verifier validated). Hardens the audit trail + the patent's canonicalisation claim. 15 audit tests.
-- ✅ **Positioning essay in-repo** — `0c3cf24`. [docs/THREE-FRONTIERS.md](THREE-FRONTIERS.md): the
-  canonical "three frontiers of agent-meets-software" essay (web→WebMCP, cloud→MCP, desktop/local→
-  nothing) so the project's *why* is readable from a fresh clone and anchored to the wedge (D-009).
+- ✅ **Positioning essay in-repo** — `0c3cf24`. `docs/THREE-FRONTIERS.md`: the original "three
+  frontiers of agent-meets-software" essay. **Superseded 2026-06-27** — its premise (desktop has no
+  agent tooling standard) is outdated (desktop has MCP-stdio too); the public positioning is now the
+  governance / control-plane thesis in the README. The essay is kept **local-only** (gitignored) for
+  history; the README no longer links it.
 - ✅ **R11 · Audit-receipt tamper tests + finish the budget (api-calls/hr cap)** — `44637f5`
   (budget) + `e2ae449` (tamper tests). **Budget battery complete:** a second, independent
   trailing-hour cap on inference/API calls (`budget.max_api_calls_per_hour`) bounds model *cost*,
