@@ -290,10 +290,18 @@ Actual Budget flagship. The one artifact still outstanding is the **video** — 
   `agent-policy.yaml`, source-only. WPF is Windows-only, so **build + record it on Windows** and
   confirm the `⚠️ API` signatures against the checkout; the binding it builds on is verified
   cross-platform.
-- ⬜ **R19 · Java/Kotlin (JVM) SDK binding** (🌐 public, MIT) — one binding (Java, usable from
-  Kotlin/Scala) on **Maven Central**, with a Swing or JavaFX sample. Captures the JVM half of
-  regulated enterprise desktop (EU public sector, banks, hospitals, industrial control dashboards) —
-  the same seam, second-largest surface after .NET.
+- ✅ **R19 · Java/Kotlin (JVM) SDK binding** (🌐 public, MIT) — **binding shipped & verified.** Built
+  without a design partner (the documented next binding after Python/.NET, [D-012](DECISIONS.md)).
+  `bindings/java/` is a faithful, **zero-runtime-dependency** port of the verified Python/.NET bindings —
+  `Registry` (registerAction/wrapAction, validation, composition via `ctx.call`, MCP/JSON-Schema tool
+  schemas), `Protocol` (camelCase NDJSON wire), `Host` (spawn `kriya-host` over stdio, `runTask`,
+  `recentMemory`), typed `P.*` parameter schemas, and a tiny built-in `Json` codec (Java SE has no
+  stdlib JSON — no Jackson/Gson). Targets **Java 11** (broad LTS for the regulated JVM-desktop ICP);
+  usable from Java/Kotlin/Scala. **44 unit tests** + an integration test driving the **real**
+  `kriya-host` (action → approval → memory recall) + a runnable `NoteAppHost` example (the JVM parallel
+  of `node-sidecar-host`) — proven live on macOS (two signed creates, a `delete_note` held for human
+  approval then signed, signed memory recalled). Maven Central metadata staged (`com.kriyanative:kriya`;
+  publish is the planner's, [D-004](DECISIONS.md)). **Optional follow-on:** a Swing/JavaFX GUI sample.
 - ❌ **C++ binding — deferred (design-partner-gated).** Highest stakes (EDA, medical imaging, CAD
   kernels) but its marquee apps are reachable via the .NET/Python add-in SDKs anyway, and it has no
   universal package manager. Build only behind a specific embedded/medical-device partner.
@@ -320,6 +328,17 @@ Actual Budget flagship. The one artifact still outstanding is the **video** — 
 
 ## Done (newest first)
 
+- ✅ **R19 · Java/Kotlin (JVM) SDK binding** — `bindings/java/`. The JVM binding of kriya: a faithful,
+  **zero-runtime-dependency** (pure Java SE) port of the verified Python/.NET bindings — `Registry`
+  (registerAction/wrapAction, validation, composition, MCP/JSON-Schema), `Protocol` (camelCase NDJSON
+  wire), `Host` (spawn `kriya-host` over stdio, `runTask`, `recentMemory`), typed `P.*` schemas, plus a
+  tiny built-in `Json` codec (Java SE has no stdlib JSON; no third-party dep). A *second binding, not a
+  new host* — speaks the existing NDJSON protocol to the one Rust host. Java 11 LTS floor; usable from
+  Java/Kotlin/Scala. Verified end-to-end: **44 unit tests** (json/registry/validation/json-schema/
+  host-framing) + an integration test driving the **real** `kriya-host` (action → approval → memory
+  recall) + a runnable `NoteAppHost` example, proven live on macOS. Maven Central metadata staged
+  (`com.kriyanative:kriya` 0.0.1; publish is the planner's, [D-004](DECISIONS.md)). Built without a
+  design partner — the documented next binding after Python (R17) / .NET (R18) per [D-012](DECISIONS.md).
 - 🟡 **R18 (binding) · C#/.NET SDK binding** — `fa61b0a` (binding + 25 tests) + `9380299` (runnable
   example). The .NET binding of kriya: `bindings/dotnet/` — `Registry` (RegisterAction/WrapAction,
   validation, composition, MCP/JSON-Schema tool schemas), `Protocol` (camelCase NDJSON wire), `Host`
