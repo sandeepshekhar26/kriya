@@ -83,8 +83,11 @@ receipt fields, flattened, plus the signer's `public_key` and the `signature` (b
 {"step_id":"…","action_id":"delete_transaction","params":{"id":"txn-1"},"success":true,"ts_ms":1781528596227,"actor":{"agent":"claude-desktop","user":"alice"},"public_key":"f662…79a0","signature":"8025…1007"}
 ```
 
-Default path: `$TMPDIR/kriya-audit.jsonl` (override with `--audit-log`). The host prints its public
-key at startup (`audit pubkey=…`) so an operator can capture it for pinning (see next).
+Default path: the **standard on-device location `~/.kriya/audit/`** for the `kriya-gateway` product —
+the directory the Kriya Console app auto-discovers and tails — with a stable per-front filename; the
+`kriya-host` developer CLI defaults to `$TMPDIR/kriya-audit.jsonl`. Either is overridable with
+`--audit-log`. The host prints its public key at startup (`audit pubkey=…`) so an operator can
+capture it for pinning (see next).
 
 ## Verifying offline
 

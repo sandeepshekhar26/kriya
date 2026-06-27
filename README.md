@@ -1,7 +1,13 @@
-# kriya (MCP for Desktop)
+# kriya — the on-device control plane for AI agents on your Mac
 
-> **Build desktop apps that AI agents can understand and operate** — directly, through your app's
-> real typed actions, not by screenshotting the screen and guessing where to click.
+> **Download one app.** It installs the governance gateway, walks you through the macOS permissions,
+> wires your MCP client, and shows live, signed proof of everything an agent does. **Nothing leaves
+> your machine.** Receipts land in a standard on-device location (`~/.kriya/audit/`) and the app
+> tails them automatically — open it and you're watching live governance, no import, no log-hunting.
+>
+> Works with any MCP agent (Claude Desktop, Cursor, …). Every call is checked against deny-by-default
+> policy, paused for human approval when it matters, and written to a signed, tamper-evident receipt —
+> zero integration code.
 
 ## The three frontiers of "agent meets software"
 
@@ -49,9 +55,10 @@ capabilities once as a typed **action**: a human triggers it by clicking, an age
 calling it — the *same* code underneath. The agent's entire view of your app is structured state
 and a typed menu of what it can do. No screenshots, no DOM scraping, no guessing.
 
-*Think: React/Electron, but for the age of AI agents.* Build a new app this way, or **bolt it onto
-an app you already have** — and expose those actions to any agent (Claude Desktop, Cursor, …) over
-MCP.
+That typed-action layer is what the app governs. **Most people start by downloading the app** to
+govern agents they already run; when you want the richest, *named*-action governance you can also
+build a new app on kriya or **bolt it onto one you already have** — exposing those actions to any
+agent (Claude Desktop, Cursor, …) over MCP.
 
 And because an agent operating a real app needs guardrails, kriya bakes them in: every action runs
 through **permission → human approval → budget → a signed audit trail**, on-device, before it
@@ -64,15 +71,22 @@ touches your data.
 
 ## kriya-gateway — govern any MCP server, zero changes
 
-The fastest way in. If an app **already exposes an MCP server**, you don't have to bolt anything
-*into* it to govern it. Launch it through `kriya-gateway` instead of directly, and every
-`tools/call` now passes deny-by-default policy → **human approval** for destructive calls →
+**The fastest way in is the Kriya app** (macOS) — download it; it installs the gateway, requests the
+macOS permissions it needs, and wires your MCP client (Claude Desktop, Cursor, Claude Code) for you,
+then opens a live cockpit where you watch each governed call get approved and signed. No config files,
+no manual paths — and because receipts land in `~/.kriya/audit/`, the app auto-discovers and tails
+them the moment they appear.
+
+If an app **already exposes an MCP server**, you don't have to bolt anything *into* it to govern it.
+Every `tools/call` now passes deny-by-default policy → **human approval** for destructive calls →
 budget → an Ed25519 **signed, hash-chained audit** — *before* it reaches the real server. **Zero
 lines changed in that server.**
 
 MCP over stdio is already easy and free — that's not the value. The value is the **approval modal
 firing on a destructive call**, and the **signed, tamper-evident receipt** afterward, on a server
 **you didn't write**.
+
+**Power-user / manual path** — drive the same gateway from the command line instead:
 
 ```bash
 # wrap any existing MCP server — your real server command goes after the `--`
@@ -94,9 +108,8 @@ kriya-gateway proxy -- node your-mcp-server.js
 
 A runnable, no-human, end-to-end proof (a read goes through and is signed; a destructive call is
 blocked at the gate and is not) lives in
-[`examples/gateway-proxy-demo/`](examples/gateway-proxy-demo/) — `./run.sh`. The design (one
-governance core + a **4-tier reach model**) is in
-[`docs/SERVICE-ARCHITECTURE.md`](docs/SERVICE-ARCHITECTURE.md).
+[`examples/gateway-proxy-demo/`](examples/gateway-proxy-demo/) — `./run.sh`. The design is one
+governance core + a **4-tier reach model**, described next.
 
 ### Reaches every app — governed (the 4-tier model)
 
@@ -197,7 +210,11 @@ past it.
   renderer can't tamper with. One Rust host, a binding per language (TS + Python today; .NET/JVM
   next).
 
-## Two ways to adopt
+## Go deeper: instrument your own app
+
+The download-the-app path above governs any MCP agent with zero integration code. When you own the
+app and want the **deepest, enterprise tier** — semantic deny/approve of your app's *named* actions,
+not just generic MCP calls — you instrument it directly. Two ways in:
 
 **Build a new local-first agent app:**
 ```bash
@@ -316,27 +333,26 @@ Pick the inference backend with `AGENT_BACKEND` (`deterministic` default, or `cl
 - For desktop/local apps, the only GA product is Microsoft Copilot Studio — still vision-based,
   still ungoverned. That's the gap kriya fills.
 
-## Enterprise — kriya Console
+## One app, two tiers
 
-The runtime in this repo makes a *single* app safely agent-drivable, on-device, and stays **MIT,
-free, forever**. Organizations running agents across **many** apps, users, and machines need one
-layer more: somewhere to oversee and *prove* what every agent did, and to set the policy
-centrally. That's **kriya Console** — a separate, commercial product for teams and regulated
-deployments, built on top of this open runtime. *The engine is open; the cockpit is paid.*
+It's a single download with two tiers — no SaaS, no accounts, no cloud; **everything runs
+on-device.**
 
-The Console never changes how the runtime works — it consumes the same Ed25519-signed receipts
-and the same `agent-policy.yaml` the open host already emits and enforces:
+- **Free** — the live governance monitor, offline receipt verification, and guided setup. Fully
+  usable on its own: download free and you're watching each governed call get approved and signed,
+  and you can verify any receipt without trusting the vendor.
+- **Compliance tier** *(license-gated)* — unlocks **auditor-ready evidence export** and **cross-app
+  correlation**: one trustworthy view of what every agent did across all your governed apps,
+  exported as evidence for an auditor. Tampered or forged entries are flagged. The license is an
+  offline license — no SaaS, no accounts, no cloud.
 
-- **Cross-app audit, verified locally.** Aggregate the signed audit logs from every kriya app and
-  verify them on-device — nothing leaves the machine. Tampered or forged entries are flagged,
-  giving you one trustworthy view of what every agent across the org actually did.
-- **Author policy centrally.** Decide what every agent may do — allow, require approval, or deny —
-  across all your apps from one place, spot the actions you haven't governed yet, and validate it
-  before it ships. The Console produces the policy the open runtime enforces.
-- **The foundation for regulated rollouts.** Tamper-evident audit plus centrally-enforced policy
-  is what **EU AI Act** (enforcement opens Aug 2026) and **SOC 2** ask for when an agent touches
-  real data — on-device, where cloud MCP gateways structurally can't reach. (One-click
-  compliance-evidence export is on the Console roadmap.)
+The paid tier never changes how governance works — it consumes the same Ed25519-signed receipts and
+the same policy the free monitor already verifies and enforces. Tamper-evident audit plus
+correlated, exportable evidence is what **EU AI Act** (enforcement opens Aug 2026) and **SOC 2** ask
+for when an agent touches real data — on-device, where cloud MCP gateways structurally can't reach.
+
+> Cross-app correlation across the apps on one machine has shipped. A cloud / cross-*machine* fleet
+> console is on the roadmap, not a current deliverable.
 
 Enterprise & regulated deployments → [kriyanative.com](https://kriyanative.com) ·
 Sandeepshekhar26@gmail.com.

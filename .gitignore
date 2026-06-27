@@ -26,6 +26,9 @@ crates/kriya/Cargo.lock
 # Internal planning docs — kept local, not published (per planner, 2026-06-15).
 docs/DECISIONS.md
 docs/strategy/
+# Reclassified local-only 2026-06-26: it carries implementation detail (signing-key/module/attestation
+# specifics) that shouldn't sit on a public surface (console-public-restraint).
+docs/SERVICE-ARCHITECTURE.md
 
 # Patent drafts — MUST stay local. Public disclosure before filing destroys novelty
 # (absolute novelty in IN/EU) and starts the US grace clock. Never commit/push.
