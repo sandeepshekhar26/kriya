@@ -104,11 +104,16 @@ governance *cannot* live in the cloud: it has to live where the data and the use
 
 ## kriya
 
-That's the layer I'm building: **kriya** — an open-source (MIT) framework (Rust agent host +
-TypeScript SDK + React inspector). It speaks **MCP** outward over the same **stdio** transport an
-agent already knows — so the typed-tool half is nothing exotic. The part a raw stdio server leaves
-out is the governance: with kriya each action runs through **permission → human approval → budget →
-a signed audit log**, on-device, before it touches your data.
+That's the layer I'm building: **kriya** — the on-device control plane for AI agents on your Mac.
+You download one app: it installs the governance gateway, walks you through the macOS permissions,
+wires your MCP client, and shows live, signed proof of everything an agent does. It works with any
+MCP agent (Claude Desktop, Cursor, …), and nothing leaves your machine. Under the hood is an
+open-source (MIT) runtime that speaks **MCP** outward over the same **stdio** transport an agent
+already knows — so the typed-tool half is nothing exotic. The part a raw stdio server leaves out is
+the governance: with kriya each action runs through **permission → human approval → budget → a
+signed audit log**, on-device, before it touches your data. Receipts land in a standard on-device
+location and the app tails them automatically — open it and you're watching live governance, no
+import, no log-hunting.
 
 The proof: kriya was bolted onto **Actual Budget** — a local finance app with *no HTTP API* — in
 **~37 lines**. The agent auto-categorizes transactions (each signed), but **cannot delete or move
@@ -134,6 +139,9 @@ The structural truth doesn't change: **a local app whose data has no other door 
 from the outside.** When the app is the only path to the resource, the host inside it is the only
 place an "the agent cannot bypass this" guarantee can actually hold — so governance has to live
 on-device, where the data and the users are. That's the frontier kriya is for.
+
+**Download the app (macOS).** It's free to monitor and verify: live governance monitor, offline
+receipt verification, and guided setup — no SaaS, no accounts, no cloud. Everything runs on-device.
 
 ---
 

@@ -15,9 +15,9 @@ deliberately small so the pattern is legible.
 > **Note (added 2026-06-24, [D-016](docs/DECISIONS.md)):** this file explains the *bolt-on / in-process
 > pattern*. The forward-looking **service architecture** — one governance core + three reach fronts
 > (a zero-change stdio **proxy** in front of any MCP server, an OS-accessibility **reach-in** for
-> no-API apps, computer-use fallback), shipped as a standalone **`kriya-gateway` product** — lives in
-> **[docs/SERVICE-ARCHITECTURE.md](docs/SERVICE-ARCHITECTURE.md)** with tech + sequence diagrams and
-> the build-over plan. The MCP-server mode below (`kriya-mcp`) is the seam the proxy front extends.
+> no-API apps, computer-use fallback) ships as the standalone **`kriya-gateway`**, bundled inside the
+> downloadable **Kriya Console** app. The MCP-server mode below (`kriya-mcp`) is the seam the proxy
+> front extends.
 
 ## The core idea
 

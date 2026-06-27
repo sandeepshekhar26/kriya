@@ -10,25 +10,41 @@ the app*.
 
 ---
 
+## What you get
+
+Kriya is the **on-device control plane** for AI agents on your Mac. It's **freemium**: the **free**
+tier gives you a live governance monitor, offline receipt verification, and guided setup; a license
+unlocks the **compliance tier** — auditor-ready evidence export and cross-app correlation. Everything
+runs **on-device** — no SaaS, no accounts, no cloud. **macOS.** Works with any MCP agent (Claude
+Desktop, Cursor, …): every call is checked against deny-by-default policy, paused for human approval
+when it matters, and written to a signed, tamper-evident receipt — zero integration code.
+
+---
+
 ## 1. Install and the one-time Accessibility grant
 
-### Build / install the signed `.app`
+### Download and install
 
-```bash
-bash scripts/macos/build-gateway-app.sh          # → dist/macos/Kriya Gateway.app + KriyaGateway.dmg
-```
+**Download Kriya Console, drag it to `/Applications`, and open it.** (On disk the bundle is
+`Kriya Gateway.app` — that's the app you'll see in the macOS permission dialogs below.) On first
+launch the in-app setup walks you through it: it grants the macOS permissions reach-in needs and
+wires your MCP client's config for you — no terminal required.
 
-Open the `.dmg` and drag **Kriya Gateway.app** to `/Applications`.
+> Advanced / building from source: you can also build the signed `.app` yourself with
+> `bash scripts/macos/build-gateway-app.sh` (→ `dist/macos/Kriya Gateway.app + KriyaGateway.dmg`),
+> then open the `.dmg` and drag **Kriya Gateway.app** to `/Applications`.
 
 ### Grant Accessibility once
 
 reach-in (Front 2) reads an app's macOS accessibility tree, which requires the **Accessibility**
-permission. Grant it once:
+permission. The in-app setup requests this for you on first launch; the GUI is the path most people
+should use. If you prefer to do it by hand:
 
 > System Settings → Privacy & Security → Accessibility → add **Kriya Gateway.app** → toggle ON
 
-Run the built-in preflight to check the grant, open that exact pane for you, list the apps reach-in
-can target, and print a ready-to-paste Claude Desktop snippet:
+For headless or scripted setups, a terminal preflight is available as an **option** — it checks the
+grant, opens that exact pane for you, lists the apps reach-in can target, and prints a ready-to-paste
+Claude Desktop snippet:
 
 ```bash
 "/Applications/Kriya Gateway.app/Contents/MacOS/kriya-gateway" doctor --app "Numbers"

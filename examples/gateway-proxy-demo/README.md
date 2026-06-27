@@ -77,7 +77,7 @@ nothing to sign:
 
 > The exact response strings for a blocked call and the exact receipt field names come from the
 > gateway binary (built by the kriya core). Treat the shapes above as illustrative; the contract is
-> what `kriya-gateway --help` and `docs/SERVICE-ARCHITECTURE.md` §7 confirm.
+> what `kriya-gateway --help` confirms.
 
 ## Verify a receipt offline (tamper-**evident**, no network)
 
@@ -153,7 +153,7 @@ Plus a 30-calls/minute budget so a looping agent can't hammer the downstream ser
 
 ## Learn more
 
-- [`docs/SERVICE-ARCHITECTURE.md`](../../docs/SERVICE-ARCHITECTURE.md) — the gateway design: one
-  governance core, three reach fronts, and the product spec (§7).
+- [the repo README's reach-model section](../../README.md) — the gateway design: one governance
+  core and the reach fronts (computer-use floor + per-app reach-in).
 - [`examples/actual-budget-bolt-on/`](../actual-budget-bolt-on/) — the in-process `wrapAction`
   bolt-on (the enterprise-depth, non-bypassable topology) on a real finance app.
