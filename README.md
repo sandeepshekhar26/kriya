@@ -9,60 +9,22 @@
 > policy, paused for human approval when it matters, and written to a signed, tamper-evident receipt —
 > zero integration code.
 
-## The three frontiers of "agent meets software"
+## Calling is solved. Governing isn't.
 
-AI agents need to operate software. That interaction is splitting into three tiers. For *tooling*
-— how an agent calls an app's functions — all three now have a standard (on desktop it's **MCP's
-original stdio transport**, how Claude Desktop and Cursor already spawn local servers). For
-*governance* — permissioning and auditing what the agent then does — only two tiers have an owner;
-the third, which holds the most sensitive data, has none on-device:
+MCP already standardized how an agent *calls* software — stdio for local apps (how Claude Desktop and
+Cursor spawn local servers), HTTP for cloud, WebMCP for the browser. That part is commodity and free.
+What it deliberately leaves out is **enforcement**: human approval is a client-side *should*, and
+stdio gets no auth at all.
 
-```
-                        ┌─────────────────────────────────────────────────────┐
-                        │        How agents reach software today              │
-                        ├─────────────┬─────────────────┬─────────────────────┤
-                        │  Web apps   │   Cloud APIs    │  Desktop / local    │
-                        │             │                 │  apps               │
-  Standard              │  WebMCP     │   MCP / HTTP    │  MCP / stdio        │
-                        │  (W3C trial)│   (Linux Fdn)   │  (local subproc.)   │
-  Agent interface       │  Declared   │   REST / tool   │  Typed tools via    │
-                        │  tools in   │   schemas       │  stdio MCP*         │
-                        │  the page   │                 │                     │
-  Governance            │  Browser    │   Gateway-level │  ❌ None on-device  │
-                        │  sandbox    │   (crowded)     │  — can't permission,│
-                        │             │                 │  audit, or gate     │
-  Who's building it     │  Google,    │   Anthropic,    │  ← kriya is here    │
-                        │  browser    │   OpenAI,       │                     │
-                        │  vendors    │   Microsoft     │                     │
-                        └─────────────┴─────────────────┴─────────────────────┘
-```
+So the missing piece isn't tooling — it's a **control plane**: a checkpoint between the agent and your
+data that enforces **deny-by-default policy, human approval on the calls that matter, budgets, and a
+signed, tamper-evident audit** — one the agent can't bypass and the client can't disable. It matters
+most for the apps holding your most sensitive data: a local POS terminal, a finance tool, a healthcare
+workstation. Those can't be governed from the *outside* — there's no cloud API to wrap, no external
+door to enforce at. The control plane has to live where the data and the human are: **on the device.**
 
-<sub>*Screenshots + pixel-clicking is the fallback for an app nobody has instrumented — not the
-ceiling. The desktop gap isn't tooling (stdio MCP already does typed tools); it's on-device
-governance.</sub>
-
-**The gap:** a local app with no API and private data — a POS terminal, a finance tool, a
-healthcare workstation — can't be governed from the *outside* (no other door means no external
-chokepoint to enforce at). Governance must live where the data and the human are: **inside the app,
-on the device.** That's the frontier kriya builds for.
-([Full article →](https://medium.com/@sandeepshekhar26/the-three-frontiers-of-agent-meets-software-and-the-one-nobodys-building-for-a7cafda13715))
-
----
-
-Every app today was built for humans clicking buttons. Now AI agents need to use those same apps —
-and they shouldn't have to squint at pixels to do it. With kriya you declare each of your app's
-capabilities once as a typed **action**: a human triggers it by clicking, an agent triggers it by
-calling it — the *same* code underneath. The agent's entire view of your app is structured state
-and a typed menu of what it can do. No screenshots, no DOM scraping, no guessing.
-
-That typed-action layer is what the app governs. **Most people start by downloading the app** to
-govern agents they already run; when you want the richest, *named*-action governance you can also
-build a new app on kriya or **bolt it onto one you already have** — exposing those actions to any
-agent (Claude Desktop, Cursor, …) over MCP.
-
-And because an agent operating a real app needs guardrails, kriya bakes them in: every action runs
-through **permission → human approval → budget → a signed audit trail**, on-device, before it
-touches your data.
+kriya is that control plane. Point any MCP agent at it and every call is checked, paused for approval
+when it matters, and signed — on your machine, with nothing leaving it.
 
 <p align="center">
   <img src="examples/actual-budget-bolt-on/demo.gif" alt="an AI agent operating Actual Budget through kriya — routine actions run and are signed, money-moving ones are blocked pending approval, every receipt verifiable" width="760">
@@ -272,7 +234,7 @@ local-first finance app with **no HTTP API** — in ~37 lines, without changing 
 > categorizing a transaction costs ~700 tokens via a typed action vs. ~8,000–15,000 tokens when
 > screenshot-and-clicking the same edit. Typed actions are cheaper *because* the model reasons over
 > meaning, not pixels.
-> <br><sub>(Benchmark: [Reflex, May 2026](https://medium.com/@sandeepshekhar26/the-three-frontiers-of-agent-meets-software-and-the-one-nobodys-building-for-a7cafda13715); kriya estimate via Anthropic's documented image-token formula.)</sub>
+> <br><sub>(Benchmark: Reflex, May 2026; kriya estimate via Anthropic's documented image-token formula.)</sub>
 
 ## What's in the box
 
@@ -312,7 +274,6 @@ Pick the inference backend with `AGENT_BACKEND` (`deterministic` default, or `cl
 
 ## Docs
 
-- [docs/THREE-FRONTIERS.md](docs/THREE-FRONTIERS.md) — **the positioning essay** (the *why*): the three surfaces agents reach software through, and the desktop/local one nobody's governing
 - [architecture.md](architecture.md) — how the pattern works, end to end
 - [docs/SECURITY.md](docs/SECURITY.md) — how the signed audit trail is tamper-evident (and an honest threat model)
 - [docs/ROADMAP.md](docs/ROADMAP.md) — what's built and what's next
