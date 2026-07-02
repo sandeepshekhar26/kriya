@@ -9,6 +9,24 @@
 > policy, paused for human approval when it matters, and written to a signed, tamper-evident receipt —
 > zero integration code.
 
+**Get it:**
+[⬇ Kriya Console for macOS](https://github.com/sandeepshekhar26/kriya/releases/tag/console-v0.1.0)
+(free, signed + notarized, universal) ·
+[⬇ `kriya-audit` verifier](https://github.com/sandeepshekhar26/kriya/releases/tag/audit-v0.1.0)
+(free, macOS + Linux) ·
+[Govern Claude Code in 5 minutes](https://kriyanative.com/docs/claude-code/)
+
+**Don't trust us — check (60 seconds):**
+
+```sh
+curl -fsSLO https://github.com/sandeepshekhar26/kriya/releases/download/audit-v0.1.0/kriya-audit-0.1.0-macos-universal.zip
+unzip -o kriya-audit-0.1.0-macos-universal.zip
+curl -fsSLO https://github.com/sandeepshekhar26/kriya/releases/download/audit-v0.1.0/sample-receipts.jsonl
+./kriya-audit sample-receipts.jsonl        # 20 signature(s) verified — OK
+sed '1s/list_transactions/X/' sample-receipts.jsonl > tampered.jsonl
+./kriya-audit tampered.jsonl               # FAIL — signature does not match (exit 1)
+```
+
 ## Calling is solved. Governing isn't.
 
 MCP already standardized how an agent *calls* software — stdio for local apps (how Claude Desktop and
