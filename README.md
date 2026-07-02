@@ -115,7 +115,7 @@ MCP covers Claude Code's connected servers; its **native** tools (`Bash`, `Edit`
 touch MCP. `kriya-hook` closes that gap through Claude Code's own hooks seam:
 
 ```bash
-cargo install --git https://github.com/sandeepshekhar26/kriya kriya --bin kriya-hook --no-default-features
+cargo install kriya --bin kriya-hook --no-default-features
 ```
 
 …then one paste into `~/.claude/settings.json`:
