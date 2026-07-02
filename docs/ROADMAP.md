@@ -328,6 +328,17 @@ Actual Budget flagship. The one artifact still outstanding is the **video** — 
 
 ## Done (newest first)
 
+- ✅ **R30 · `kriya-hook` — govern Claude Code's native tools (2026-07-02)** — a hooks-seam adapter
+  (`src/bin/kriya-hook.rs`): `PreToolUse` = policy gate (+ optional approval; blocked attempts are
+  signed `success:false` receipts; fail-closed, exit 2 with the reason fed back to the model),
+  `PostToolUse` = the signed, hash-chained outcome receipt. Persistent signing identity
+  (`~/.kriya/keys/claude-code-hook.key`), receipts in the standard `~/.kriya/audit/claude-code.jsonl`
+  (Console auto-discovers, R27), chain spans invocations. Record-only default policy; enforce via
+  `--policy` (`claude-code__*` namespace). Verified: 5 unit tests + a 6-case scripted payload e2e,
+  and the log re-proved independently by `tools/verify-receipts` AND the released `kriya-audit`
+  0.1.0 (byte-compatibility across repos). Design calls in [D-019](DECISIONS.md). Works unchanged
+  with Bedrock-hosted Claude (`CLAUDE_CODE_USE_BEDROCK=1`).
+
 - ✅ **R19 · Java/Kotlin (JVM) SDK binding** — `bindings/java/`. The JVM binding of kriya: a faithful,
   **zero-runtime-dependency** (pure Java SE) port of the verified Python/.NET bindings — `Registry`
   (registerAction/wrapAction, validation, composition, MCP/JSON-Schema), `Protocol` (camelCase NDJSON
