@@ -91,6 +91,32 @@ gating at the floor.
 > policy-gated + signed + on-device + **vendor-neutral** (governs *any* MCP agent, under the app
 > owner's rules) — not the ability to drive apps.
 
+### Govern Claude Code's native tools — `kriya-hook`
+
+MCP covers Claude Code's connected servers; its **native** tools (`Bash`, `Edit`, `Write`, …) never
+touch MCP. `kriya-hook` closes that gap through Claude Code's own hooks seam — one paste into
+`~/.claude/settings.json`:
+
+```jsonc
+{
+  "hooks": {
+    "PreToolUse":  [{ "hooks": [{ "type": "command", "command": "kriya-hook pre" }] }],
+    "PostToolUse": [{ "hooks": [{ "type": "command", "command": "kriya-hook post" }] }]
+  }
+}
+```
+
+`pre` is the **gate** (policy → optional human approval; a blocked call exits 2 with the reason, and
+the blocked *attempt* is itself a signed receipt), `post` is the **record** (an Ed25519, hash-chained
+receipt of what actually ran). Receipts land in `~/.kriya/audit/claude-code.jsonl` under a persistent
+signing identity, the chain spans hook invocations, and the same offline verifiers — `kriya-audit`,
+[`tools/verify-receipts`](tools/verify-receipts/), the 5-language bindings — re-prove them without
+trusting this repo. The default policy is **record-only** (nothing blocks until you author rules);
+budgets need the long-running gateway, and hooks are a cooperative seam — whoever controls
+`settings.json` controls them (use managed settings org-wide). This works the same when Claude Code
+runs against **your own AWS Bedrock** (`CLAUDE_CODE_USE_BEDROCK=1`): the model stays in your cloud
+boundary, the action evidence stays on your machine.
+
 ## Why "kriya"?
 
 **kriya** (Sanskrit, क्रिया) means *action* — and, in grammar, *verb*. That is the whole idea: an
