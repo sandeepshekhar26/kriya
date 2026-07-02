@@ -94,8 +94,13 @@ gating at the floor.
 ### Govern Claude Code's native tools — `kriya-hook`
 
 MCP covers Claude Code's connected servers; its **native** tools (`Bash`, `Edit`, `Write`, …) never
-touch MCP. `kriya-hook` closes that gap through Claude Code's own hooks seam — one paste into
-`~/.claude/settings.json`:
+touch MCP. `kriya-hook` closes that gap through Claude Code's own hooks seam:
+
+```bash
+cargo install --git https://github.com/sandeepshekhar26/kriya kriya --bin kriya-hook --no-default-features
+```
+
+…then one paste into `~/.claude/settings.json`:
 
 ```jsonc
 {
