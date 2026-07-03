@@ -37,6 +37,12 @@ http-inference = ["dep:ureq"]
 # new dependencies — the client is std-only (`std::process`, `std::io`) over the existing
 # serde/serde_json. Enables `mcp::client`, `mcp::proxy_executor`, `mcp::proxy_server`.
 mcp-client = []
+# Remote MCP upstreams for the broker (W2-2): a Streamable-HTTP + SSE transport so `kriya-gateway
+# broker` can govern REMOTE MCP servers (a `url:` upstream), not just spawned stdio ones — the path
+# that reaches Claude Desktop / Cursor / Copilot's hosted servers. Reuses the same synchronous
+# `ureq` HTTP/TLS client the inference backends use (no tokio, no async), so it adds no new dep when
+# `http-inference` is already on. Implies `mcp-client` (it extends the same McpClient).
+mcp-http = ["mcp-client", "dep:ureq"]
 # Front 2 — the reach-in adapter (`mcp::reachin`): synthesize a governed MCP server from a running
 # app's OS accessibility tree, for apps with no MCP server and no API. Off by default so the
 # default build stays unchanged and pulls in NO macOS FFI deps. The accessibility-sys +

@@ -508,17 +508,26 @@ fn run_proxy(args: ProxyArgs) -> std::io::Result<()> {
 }
 
 /// One upstream MCP server the broker multiplexes: a stable `name` (its namespace in the served
-/// union — tools appear as `<name>__<tool>`) and the `command` + `args` to spawn it. Remote
-/// (HTTP/SSE) upstreams land in W2-2; this is the stdio multi-upstream core.
+/// union — tools appear as `<name>__<tool>`) and EITHER a local stdio server to spawn (`command` +
+/// `args`) OR a remote server to connect to (`url` + optional `headers`, W2-2). Exactly one of
+/// `command`/`url` must be set.
 #[derive(Debug, Deserialize)]
 struct BrokerUpstream {
     /// Stable namespace for this upstream (slugified). Tools are served as `<name>__<tool>` and
     /// policy matches that namespaced name (`<name>__*` gates the whole upstream).
     name: String,
-    /// The upstream server program to spawn.
-    command: String,
+    /// Local stdio upstream: the server program to spawn. Mutually exclusive with `url`.
+    #[serde(default)]
+    command: Option<String>,
     #[serde(default)]
     args: Vec<String>,
+    /// Remote upstream (W2-2): the MCP server's Streamable-HTTP endpoint. Mutually exclusive with
+    /// `command` — reaches hosted servers a client adds directly (no local process to spawn).
+    #[serde(default)]
+    url: Option<String>,
+    /// Extra request headers for a remote `url` upstream — e.g. `Authorization: "Bearer <token>"`.
+    #[serde(default)]
+    headers: std::collections::BTreeMap<String, String>,
 }
 
 /// The broker config file (`--config broker.yaml`). The `upstreams:` list is the only broker-
@@ -536,6 +545,38 @@ struct BrokerConfig {
     name: Option<String>,
     actor: Option<String>,
     user: Option<String>,
+}
+
+/// Connect a remote (HTTP/SSE) broker upstream (W2-2). Gated on `mcp-http`: a build without it that
+/// hits a `url:` upstream is a clean startup error telling the operator to rebuild, not a mystery.
+#[cfg(feature = "mcp-http")]
+fn connect_remote_upstream(
+    name: &str,
+    url: &str,
+    headers: &std::collections::BTreeMap<String, String>,
+) -> Arc<Mutex<McpClient>> {
+    let hdrs: Vec<(String, String)> = headers
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    match McpClient::connect_http(url, hdrs) {
+        Ok(c) => Arc::new(Mutex::new(c)),
+        Err(e) => usage_and_exit(&format!(
+            "broker: failed to connect remote upstream '{name}' ({url}): {e}"
+        )),
+    }
+}
+
+#[cfg(not(feature = "mcp-http"))]
+fn connect_remote_upstream(
+    name: &str,
+    _url: &str,
+    _headers: &std::collections::BTreeMap<String, String>,
+) -> Arc<Mutex<McpClient>> {
+    usage_and_exit(&format!(
+        "broker: upstream '{name}' is remote (`url:`), but this build has no HTTP support — \
+         rebuild with `--features mcp-http`"
+    ))
 }
 
 /// `kriya-gateway broker --config broker.yaml [OPTIONS]` — the **aggregator** (W2): ONE MCP
@@ -650,11 +691,25 @@ fn run_broker(mut it: impl Iterator<Item = String>) -> std::io::Result<()> {
     let mut fronts: Vec<Front> = Vec::new();
     let mut summaries: Vec<String> = Vec::new();
     for (up, ns) in cfg.upstreams.iter().zip(&namespaces) {
-        let client = match McpClient::spawn(&up.command, &up.args) {
-            Ok(c) => Arc::new(Mutex::new(c)),
-            Err(e) => usage_and_exit(&format!(
-                "broker: failed to spawn upstream '{}' ({}): {e}",
-                up.name, up.command
+        // A local stdio upstream (`command`) or a remote one (`url`) — exactly one. The connect
+        // path differs; everything after (handshake → tools → Front) is identical, which is the
+        // whole point of the McpClient backend enum (W2-2).
+        let client = match (&up.command, &up.url) {
+            (Some(cmd), None) => match McpClient::spawn(cmd, &up.args) {
+                Ok(c) => Arc::new(Mutex::new(c)),
+                Err(e) => usage_and_exit(&format!(
+                    "broker: failed to spawn upstream '{}' ({cmd}): {e}",
+                    up.name
+                )),
+            },
+            (None, Some(url)) => connect_remote_upstream(&up.name, url, &up.headers),
+            (Some(_), Some(_)) => usage_and_exit(&format!(
+                "broker: upstream '{}' sets both `command` and `url` — pick one",
+                up.name
+            )),
+            (None, None) => usage_and_exit(&format!(
+                "broker: upstream '{}' sets neither `command` (stdio) nor `url` (remote)",
+                up.name
             )),
         };
         {
@@ -675,7 +730,8 @@ fn run_broker(mut it: impl Iterator<Item = String>) -> std::io::Result<()> {
         let count = tools.len();
         let executor = Box::new(McpProxyExecutor::new(client));
         fronts.push(Front::new(ns.clone(), tools, executor));
-        summaries.push(format!("{ns} ('{}', {count} tools)", up.name));
+        let kind = if up.url.is_some() { "remote" } else { "stdio" };
+        summaries.push(format!("{ns} ('{}', {kind}, {count} tools)", up.name));
     }
 
     let mut server =
