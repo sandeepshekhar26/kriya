@@ -38,7 +38,17 @@ const PROXY_ID_BASE: u64 = 1;
 pub struct McpClient {
     /// `None` for an in-memory test client; `Some` for a spawned downstream (killed on drop).
     child: Option<Child>,
-    transport: Transport<Box<dyn BufRead + Send>, Box<dyn Write + Send>>,
+    backend: Backend,
+}
+
+/// Where an [`McpClient`]'s JSON-RPC actually flows. Stdio (a spawned or in-memory downstream, the
+/// original Front-1 path) or HTTP (a REMOTE MCP server over Streamable HTTP + SSE — the broker's
+/// W2-2 path). Both expose the same request/notify surface so [`McpProxyExecutor`] and the broker
+/// are identical regardless of transport.
+enum Backend {
+    Stdio(Transport<Box<dyn BufRead + Send>, Box<dyn Write + Send>>),
+    #[cfg(feature = "mcp-http")]
+    Http(HttpTransport),
 }
 
 impl McpClient {
@@ -66,7 +76,19 @@ impl McpClient {
         let writer: Box<dyn Write + Send> = Box::new(stdin);
         Ok(Self {
             child: Some(child),
-            transport: Transport::new(reader, writer),
+            backend: Backend::Stdio(Transport::new(reader, writer)),
+        })
+    }
+
+    /// Connect to a **remote** MCP server over Streamable HTTP (W2-2). `url` is the server's MCP
+    /// endpoint; `headers` are extra request headers (e.g. `("Authorization", "Bearer …")`) sent on
+    /// every call. No subprocess — the "child" is `None`. The MCP session id the server assigns on
+    /// `initialize` is captured and echoed on later requests automatically.
+    #[cfg(feature = "mcp-http")]
+    pub fn connect_http(url: &str, headers: Vec<(String, String)>) -> std::io::Result<Self> {
+        Ok(Self {
+            child: None,
+            backend: Backend::Http(HttpTransport::new(url, headers)),
         })
     }
 
@@ -82,7 +104,7 @@ impl McpClient {
         let writer: Box<dyn Write + Send> = Box::new(writer);
         Self {
             child: None,
-            transport: Transport::new(reader, writer),
+            backend: Backend::Stdio(Transport::new(reader, writer)),
         }
     }
 
@@ -123,13 +145,21 @@ impl McpClient {
     /// `result`. Used for transparent passthrough of arbitrary methods (`resources/*`, `prompts/*`,
     /// `ping`, …) the proxy doesn't model. A JSON-RPC error reply becomes an `Err` string.
     pub fn request(&mut self, method: &str, params: Option<Value>) -> Result<Value, String> {
-        self.transport.request(method, params)
+        match &mut self.backend {
+            Backend::Stdio(t) => t.request(method, params),
+            #[cfg(feature = "mcp-http")]
+            Backend::Http(h) => h.request(method, params),
+        }
     }
 
     /// Fire-and-forget notification (no id, no response) — forwarded verbatim from the client to
     /// the downstream (e.g. `notifications/initialized`, `notifications/cancelled`).
     pub fn notify(&mut self, method: &str, params: Option<Value>) -> Result<(), String> {
-        self.transport.notify(method, params)
+        match &mut self.backend {
+            Backend::Stdio(t) => t.notify(method, params),
+            #[cfg(feature = "mcp-http")]
+            Backend::Http(h) => h.notify(method, params),
+        }
     }
 }
 
@@ -238,6 +268,176 @@ impl<R: BufRead, W: Write> Transport<R, W> {
         }
         Ok(line)
     }
+}
+
+/// A **remote** MCP transport over Streamable HTTP + SSE (W2-2) — the broker's path to hosted MCP
+/// servers. Synchronous (`ureq`, no async), matching the stdio [`Transport`]'s request→response
+/// contract: POST a JSON-RPC request, read the reply from either a single JSON body or an SSE
+/// stream, correlate by id. Captures and echoes the server's `Mcp-Session-Id`, and sends any
+/// operator-supplied headers (e.g. `Authorization: Bearer …`) on every call.
+#[cfg(feature = "mcp-http")]
+struct HttpTransport {
+    url: String,
+    /// Extra headers sent on every request (auth, etc.).
+    extra_headers: Vec<(String, String)>,
+    /// The MCP session id the server assigns on `initialize`, echoed on later requests. `None`
+    /// until the server sends one (servers that don't use sessions simply never set it).
+    session_id: Option<String>,
+    next_id: u64,
+    agent: ureq::Agent,
+}
+
+#[cfg(feature = "mcp-http")]
+impl HttpTransport {
+    fn new(url: &str, extra_headers: Vec<(String, String)>) -> Self {
+        Self {
+            url: url.to_string(),
+            extra_headers,
+            session_id: None,
+            next_id: PROXY_ID_BASE,
+            agent: ureq::agent(),
+        }
+    }
+
+    fn alloc_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    /// Build a POST with the MCP + session + operator headers applied.
+    fn post(&self) -> ureq::Request {
+        let mut req = self
+            .agent
+            .post(&self.url)
+            .set("Content-Type", "application/json")
+            // MCP Streamable HTTP: the server may reply with a single JSON object OR an SSE stream.
+            .set("Accept", "application/json, text/event-stream");
+        if let Some(sid) = &self.session_id {
+            req = req.set("Mcp-Session-Id", sid);
+        }
+        for (k, v) in &self.extra_headers {
+            req = req.set(k, v);
+        }
+        req
+    }
+
+    fn request(&mut self, method: &str, params: Option<Value>) -> Result<Value, String> {
+        let id = self.alloc_id();
+        let mut msg = json!({ "jsonrpc": "2.0", "id": id, "method": method });
+        if let Some(p) = params {
+            msg["params"] = p;
+        }
+
+        let resp = match self.post().send_string(&msg.to_string()) {
+            Ok(r) => r,
+            Err(ureq::Error::Status(code, r)) => {
+                let body = r.into_string().unwrap_or_default();
+                return Err(format!(
+                    "remote {method} HTTP {code}: {}",
+                    body.trim().chars().take(300).collect::<String>()
+                ));
+            }
+            Err(e) => return Err(format!("remote {method} request failed: {e}")),
+        };
+
+        // Capture the session id the server assigns (typically on the initialize reply).
+        if let Some(sid) = resp.header("Mcp-Session-Id") {
+            self.session_id = Some(sid.to_string());
+        }
+
+        if resp.content_type().contains("event-stream") {
+            read_sse_for_id(resp, id, method)
+        } else {
+            let body = resp
+                .into_string()
+                .map_err(|e| format!("remote {method}: reading body: {e}"))?;
+            let v: Value = serde_json::from_str(&body)
+                .map_err(|e| format!("remote {method}: reply is not JSON: {e}"))?;
+            extract_result(&v, id, method)
+        }
+    }
+
+    fn notify(&mut self, method: &str, params: Option<Value>) -> Result<(), String> {
+        let mut msg = json!({ "jsonrpc": "2.0", "method": method });
+        if let Some(p) = params {
+            msg["params"] = p;
+        }
+        match self.post().send_string(&msg.to_string()) {
+            // The spec returns 202 Accepted (a 2xx, so ureq gives Ok) with no body — ignore it.
+            Ok(_) => Ok(()),
+            Err(ureq::Error::Status(code, _)) => {
+                Err(format!("remote notify {method} HTTP {code}"))
+            }
+            Err(e) => Err(format!("remote notify {method} failed: {e}")),
+        }
+    }
+}
+
+/// Read an SSE response stream, returning the `result` of the first JSON-RPC message whose id
+/// matches `id`. Interleaved notifications / server-initiated requests (other or absent ids) are
+/// skipped — the same correlation discipline the stdio transport applies.
+#[cfg(feature = "mcp-http")]
+fn read_sse_for_id(resp: ureq::Response, id: u64, method: &str) -> Result<Value, String> {
+    sse_find_result(BufReader::new(resp.into_reader()), id, method)
+}
+
+/// The SSE event-loop, generic over the byte source so it is unit-testable with an in-memory
+/// stream (no `ureq::Response`). Correlates the first `data:` event that parses to a JSON-RPC
+/// message with the matching `id`.
+#[cfg(feature = "mcp-http")]
+fn sse_find_result<R: BufRead>(reader: R, id: u64, method: &str) -> Result<Value, String> {
+    let mut data = String::new();
+    let mut check = |data: &str| -> Option<Result<Value, String>> {
+        if data.is_empty() {
+            return None;
+        }
+        match serde_json::from_str::<Value>(data) {
+            Ok(v) if v.get("id") == Some(&json!(id)) => Some(extract_result(&v, id, method)),
+            _ => None, // a notification, a different id, or a partial event — keep reading
+        }
+    };
+    for line in reader.lines() {
+        let line = line.map_err(|e| format!("remote {method}: SSE read: {e}"))?;
+        if let Some(rest) = line.strip_prefix("data:") {
+            if !data.is_empty() {
+                data.push('\n');
+            }
+            data.push_str(rest.trim_start());
+        } else if line.is_empty() {
+            // Blank line ends one SSE event — try to correlate, then reset for the next event.
+            if let Some(found) = check(&data) {
+                return found;
+            }
+            data.clear();
+        }
+        // `event:` / `id:` / comment (`:`) lines carry no JSON-RPC payload — ignore.
+    }
+    // A stream that ended without a terminating blank line: try the trailing event.
+    if let Some(found) = check(&data) {
+        return found;
+    }
+    Err(format!(
+        "remote {method}: SSE stream ended before a reply for id {id}"
+    ))
+}
+
+/// Pull `result` out of a JSON-RPC response value (or map a JSON-RPC error to `Err`). Shared by the
+/// single-JSON and SSE HTTP reply paths; mirrors the stdio transport's error mapping.
+#[cfg(feature = "mcp-http")]
+fn extract_result(v: &Value, id: u64, method: &str) -> Result<Value, String> {
+    if v.get("id") != Some(&json!(id)) {
+        return Err(format!("remote {method}: reply id mismatch (expected {id})"));
+    }
+    if let Some(err) = v.get("error") {
+        let code = err.get("code").and_then(Value::as_i64).unwrap_or(0);
+        let message = err
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown error");
+        return Err(format!("remote {method} error {code}: {message}"));
+    }
+    Ok(v.get("result").cloned().unwrap_or(Value::Null))
 }
 
 /// Parse an `InitializeResult` from a raw `result` value (camelCase wire shape).
@@ -428,5 +628,49 @@ mod tests {
         assert_eq!(init.server_info.name, "actual-mcp");
         assert_eq!(init.server_info.version, "1.2.3");
         assert_eq!(init.capabilities["resources"], json!({}));
+    }
+
+    // ── W2-2: remote HTTP transport SSE parsing ──────────────────────────────────────────────
+
+    #[cfg(feature = "mcp-http")]
+    #[test]
+    fn sse_correlates_the_matching_event_and_skips_notifications() {
+        // A progress notification (no id) precedes our real reply (id 1). Standard SSE framing:
+        // `event:`/`data:` lines, events separated by a blank line.
+        let stream = concat!(
+            "event: message\n",
+            "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{}}\n",
+            "\n",
+            "event: message\n",
+            "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n",
+            "\n",
+        );
+        let got = sse_find_result(Cursor::new(stream), 1, "tools/call").unwrap();
+        assert_eq!(got, json!({ "ok": true }));
+    }
+
+    #[cfg(feature = "mcp-http")]
+    #[test]
+    fn sse_maps_a_jsonrpc_error_event_to_err() {
+        let stream = "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"boom\"}}\n\n";
+        let err = sse_find_result(Cursor::new(stream), 1, "tools/call").unwrap_err();
+        assert!(err.contains("boom"), "got: {err}");
+    }
+
+    #[cfg(feature = "mcp-http")]
+    #[test]
+    fn sse_without_a_matching_reply_is_an_error_not_a_hang() {
+        // Only a mismatched id — the stream ends without our reply.
+        let stream = "data: {\"jsonrpc\":\"2.0\",\"id\":99,\"result\":1}\n\n";
+        let err = sse_find_result(Cursor::new(stream), 1, "tools/list").unwrap_err();
+        assert!(err.contains("ended before a reply"), "got: {err}");
+    }
+
+    #[cfg(feature = "mcp-http")]
+    #[test]
+    fn sse_handles_a_trailing_event_without_a_final_blank_line() {
+        let stream = "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"tail\"}";
+        let got = sse_find_result(Cursor::new(stream), 1, "ping").unwrap();
+        assert_eq!(got, json!("tail"));
     }
 }
