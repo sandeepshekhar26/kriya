@@ -71,6 +71,12 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 # Cross-platform + optional, pulled solely by the `computer-use` feature; default build never sees it.
 base64 = { version = "0.22", optional = true }
 
+# Unix-only: advisory flock on the audit log so CONCURRENT writers of one chain (e.g. parallel
+# kriya-hook invocations, each a fresh process) serialize their [re-seed tail -> append] and the
+# hash chain never forks (W1-6). Already in the dependency tree transitively; explicit and tiny.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # Front 2 (reach-in) macOS-only FFI deps. Target-gated so non-macOS builds of the `reach-in`
 # feature never try to resolve them — `dep:` in the feature still works because Cargo treats an
 # optional dep under any target as feature-activatable; on a non-macOS host the dep is simply
