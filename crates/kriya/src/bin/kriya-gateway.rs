@@ -88,7 +88,10 @@ use kriya::mcp::{ComputerUseExecutor, ComputerUseServer, DesktopBackend};
 // the real `run_router` (it assembles the macOS reach-in + computer-use backends).
 #[cfg(all(feature = "router", target_os = "macos"))]
 use kriya::mcp::{Front, RouterServer};
-use kriya::permissions::{default_proxy_policy, Policy};
+use kriya::permissions::{default_broker_policy, default_proxy_policy, Policy};
+// Broker (W2): the router core multiplexes N proxied MCP upstreams under one governor. Available
+// under `mcp-client` (no OS deps) — same gate as the proxy this binary already requires.
+use kriya::mcp::{Front, RouterServer};
 use serde::Deserialize;
 
 struct ProxyArgs {
@@ -191,6 +194,7 @@ fn usage_and_exit(msg: &str) -> ! {
         "usage: kriya-gateway proxy [--policy <p.yaml>] [--approval deny|tty|gui|auto] \
          [--actor <agent>] [--user <user>] [--audit-log <path>] [--signing-key <path>] \
          [--name <n>] -- <downstream-cmd> [args...]\n       \
+         kriya-gateway broker --config broker.yaml [same governance flags]   (ONE endpoint over N MCP upstreams, one governor)\n       \
          kriya-gateway reach-in --app \"<App Name>\" [same governance flags]\n       \
          kriya-gateway computer-use [same governance flags]   (system-wide pixel floor, all apps)\n       \
          kriya-gateway router [--reach-in \"App1,App2\"] [same governance flags]   (computer-use floor + named reach-in apps, ONE governor)\n       \
@@ -207,6 +211,9 @@ fn main() -> std::io::Result<()> {
     });
     match sub.as_str() {
         "proxy" => run_proxy(parse_proxy_args(args)),
+        // Broker (W2) — ONE endpoint, N MCP upstreams, one governor/signer/log. The single wiring
+        // point for a client with no hook (Claude Desktop) or many servers (Cursor). Config-driven.
+        "broker" => run_broker(args),
         // Front 2 — govern an app that has NO MCP server / NO API via its accessibility tree.
         "reach-in" => run_reachin(args),
         // Front 3 — governed computer-use (system-wide pixels): the universal reach floor alone.
@@ -490,6 +497,202 @@ fn run_proxy(args: ProxyArgs) -> std::io::Result<()> {
         server.tool_count(),
         server.visible_tool_count(),
         args.approval,
+        actor_desc,
+        signer.log_path().display()
+    );
+
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    server.serve(stdin.lock(), &mut out)
+}
+
+/// One upstream MCP server the broker multiplexes: a stable `name` (its namespace in the served
+/// union — tools appear as `<name>__<tool>`) and the `command` + `args` to spawn it. Remote
+/// (HTTP/SSE) upstreams land in W2-2; this is the stdio multi-upstream core.
+#[derive(Debug, Deserialize)]
+struct BrokerUpstream {
+    /// Stable namespace for this upstream (slugified). Tools are served as `<name>__<tool>` and
+    /// policy matches that namespaced name (`<name>__*` gates the whole upstream).
+    name: String,
+    /// The upstream server program to spawn.
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+}
+
+/// The broker config file (`--config broker.yaml`). The `upstreams:` list is the only broker-
+/// specific field; the rest mirror the gateway governance knobs so a project pins its whole posture
+/// in one file. Unknown fields are rejected so a typo is a clean error, not a silent no-op.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BrokerConfig {
+    #[serde(default)]
+    upstreams: Vec<BrokerUpstream>,
+    policy: Option<PathBuf>,
+    approval: Option<String>,
+    audit_log: Option<PathBuf>,
+    signing_key: Option<PathBuf>,
+    name: Option<String>,
+    actor: Option<String>,
+    user: Option<String>,
+}
+
+/// `kriya-gateway broker --config broker.yaml [OPTIONS]` — the **aggregator** (W2): ONE MCP
+/// endpoint multiplexing N upstream MCP servers under ONE governor. A client with no hook seam
+/// (Claude Desktop) or many servers (Cursor) points at this single entry; every upstream's tools
+/// are served namespaced (`<upstream>__<tool>`) and every `tools/call` routes through the same
+/// policy → approval → budget → signed audit into one `broker.jsonl` chain. This reuses the
+/// router's `RouterServer` (each upstream is a `Front` whose executor is an `McpProxyExecutor`
+/// over that upstream's spawned client), so one governor, one signer, one actor cover them all —
+/// exactly the router's "one Governor, not one-per-front" property, applied to proxied MCP.
+///
+/// The `upstreams:` list lives in the config file (there's no clean single-command-line form for N
+/// servers). Governance flags (--policy/--approval/--actor/--user/--audit-log/--signing-key/--name)
+/// still work and take precedence over the config's same-named fields. With no `--policy`, the
+/// default is a **per-namespace** deny-by-default (reads allow, destructive/spend approve, else
+/// deny) — the flat proxy default would never match the namespaced names.
+fn run_broker(mut it: impl Iterator<Item = String>) -> std::io::Result<()> {
+    let mut config: Option<PathBuf> = None;
+    let mut policy: Option<PathBuf> = None;
+    let mut approval: Option<String> = None;
+    let mut name: Option<String> = None;
+    let mut actor: Option<String> = None;
+    let mut user: Option<String> = None;
+    let mut audit_log: Option<PathBuf> = None;
+    let mut signing_key: Option<PathBuf> = None;
+
+    while let Some(flag) = it.next() {
+        let mut take = |label: &str| -> String {
+            it.next()
+                .unwrap_or_else(|| usage_and_exit(&format!("{label} needs a value")))
+        };
+        match flag.as_str() {
+            "--config" => config = Some(PathBuf::from(take("--config"))),
+            "--policy" => policy = Some(PathBuf::from(take("--policy"))),
+            "--approval" => approval = Some(take("--approval")),
+            "--name" => name = Some(take("--name")),
+            "--actor" => actor = Some(take("--actor")),
+            "--user" => user = Some(take("--user")),
+            "--audit-log" => audit_log = Some(PathBuf::from(take("--audit-log"))),
+            "--signing-key" => signing_key = Some(PathBuf::from(take("--signing-key"))),
+            "-h" | "--help" => usage_and_exit("help"),
+            other => usage_and_exit(&format!("broker: unknown argument: {other}")),
+        }
+    }
+
+    // The broker needs its `upstreams:` list, which only lives in a config file. Auto-discover the
+    // same broker.yaml/.kriya-broker.yaml the way proxy discovers .kriya.yaml, but require SOME
+    // config with upstreams — a broker with no upstreams is a no-op the operator didn't intend.
+    let cfg_path = config.clone().or_else(|| {
+        [".kriya-broker.yaml", "broker.yaml"]
+            .iter()
+            .map(PathBuf::from)
+            .find(|p| p.exists())
+    });
+    let cfg_path = cfg_path.unwrap_or_else(|| {
+        usage_and_exit(
+            "broker needs a config file with `upstreams:` — pass --config broker.yaml \
+             (see: kriya-gateway broker --help)",
+        )
+    });
+    let text = std::fs::read_to_string(&cfg_path)
+        .unwrap_or_else(|e| usage_and_exit(&format!("cannot read broker config {cfg_path:?}: {e}")));
+    let cfg: BrokerConfig = serde_yaml::from_str(&text)
+        .unwrap_or_else(|e| usage_and_exit(&format!("broker config {cfg_path:?} is malformed: {e}")));
+    eprintln!("[kriya-gateway] loaded broker config: {}", cfg_path.display());
+
+    if cfg.upstreams.is_empty() {
+        usage_and_exit(&format!(
+            "broker config {cfg_path:?} declares no `upstreams:` — nothing to multiplex"
+        ));
+    }
+
+    // Precedence CLI > config > default, matching the proxy path.
+    let policy_path = policy.or(cfg.policy);
+    let approval = approval.or(cfg.approval).unwrap_or_else(|| "deny".into());
+    let actor_name = actor.or(cfg.actor);
+    let user = user.or(cfg.user);
+    let name = name.or(cfg.name).unwrap_or_else(|| "kriya-gateway (broker)".into());
+
+    // Namespaces are slugified upstream names; reject collisions up front (two upstreams sharing a
+    // namespace would silently merge tool sets and cross-route — a correctness bug, not a warning).
+    let mut namespaces: Vec<String> = Vec::new();
+    for up in &cfg.upstreams {
+        let ns = slugify(&up.name, "upstream");
+        if namespaces.contains(&ns) {
+            usage_and_exit(&format!(
+                "broker: two upstreams slugify to the same namespace '{ns}' — rename one \
+                 (namespaces must be unique; they prefix every tool and every policy rule)"
+            ));
+        }
+        namespaces.push(ns);
+    }
+
+    let policy = Arc::new(match &policy_path {
+        Some(p) => Policy::load_or_default(p),
+        None => default_broker_policy(&namespaces),
+    });
+    for w in policy.warnings() {
+        eprintln!("[kriya-gateway] policy warning: {w}");
+    }
+
+    // R27: one broker.jsonl chain for the whole aggregator (all upstreams, one governor).
+    let audit_log = resolve_audit_log(audit_log.or(cfg.audit_log), "broker");
+    let signing_key = signing_key.or(cfg.signing_key);
+    let signer = build_signer(&audit_log, &signing_key);
+    let approval_gate = build_approval(&approval);
+    let actor = build_actor(actor_name, user);
+    write_startup_attestation(&signer, signing_key.is_some(), &actor);
+
+    // Spawn each upstream, handshake it, cache its tools, and wrap it as a Front whose executor is
+    // an McpProxyExecutor over that upstream's own client. One RouterServer then governs them all.
+    let mut fronts: Vec<Front> = Vec::new();
+    let mut summaries: Vec<String> = Vec::new();
+    for (up, ns) in cfg.upstreams.iter().zip(&namespaces) {
+        let client = match McpClient::spawn(&up.command, &up.args) {
+            Ok(c) => Arc::new(Mutex::new(c)),
+            Err(e) => usage_and_exit(&format!(
+                "broker: failed to spawn upstream '{}' ({}): {e}",
+                up.name, up.command
+            )),
+        };
+        {
+            let mut guard = client.lock().unwrap();
+            if let Err(e) = guard.initialize() {
+                usage_and_exit(&format!("broker: upstream '{}' handshake failed: {e}", up.name));
+            }
+        }
+        let tools = {
+            let mut guard = client.lock().unwrap();
+            guard
+                .list_tools()
+                .unwrap_or_else(|e| usage_and_exit(&format!(
+                    "broker: upstream '{}' tools/list failed: {e}",
+                    up.name
+                )))
+        };
+        let count = tools.len();
+        let executor = Box::new(McpProxyExecutor::new(client));
+        fronts.push(Front::new(ns.clone(), tools, executor));
+        summaries.push(format!("{ns} ('{}', {count} tools)", up.name));
+    }
+
+    let mut server =
+        RouterServer::from_parts(name, fronts, policy, signer.clone(), approval_gate, actor.clone());
+
+    let actor_desc = match &actor {
+        Some(a) => format!("{}/{}", a.agent, a.user),
+        None => "<unattributed>".to_string(),
+    };
+    eprintln!(
+        "[kriya-gateway] broker · {} upstream(s): {} · {} tool(s) ({} visible after policy) · \
+         approval={} · actor={} · audit log={}",
+        summaries.len(),
+        summaries.join(", "),
+        server.tool_count(),
+        server.visible_tool_count(),
+        approval,
         actor_desc,
         signer.log_path().display()
     );
