@@ -1,0 +1,33 @@
+# kriya-gateway broker — ONE MCP endpoint governing N upstream servers (W2).
+#
+# Point a client that has no hook seam (Claude Desktop) or that runs many servers (Cursor) at a
+# SINGLE kriya-gateway entry, and it governs every upstream through one policy → approval → budget →
+# signed audit, all into one ~/.kriya/audit/broker.jsonl chain. Each upstream's tools are served
+# namespaced as `<name>__<tool>`, so policy gates a whole server with `<name>__*`.
+#
+#   kriya-gateway broker --config broker.yaml
+#
+# Claude Desktop (claude_desktop_config.json → "mcpServers"):
+#   { "mcpServers": { "kriya": {
+#       "command": "/Applications/Kriya Console.app/Contents/MacOS/kriya-gateway",
+#       "args": ["broker", "--config", "/absolute/path/to/broker.yaml"]
+#   } } }
+
+upstreams:
+  # Each entry: a stable `name` (its namespace) + the `command`/`args` to spawn the real server.
+  - name: notes
+    command: node
+    args: ["mock-mcp-server.js"]
+
+  # Add as many as you run — one endpoint governs them all. e.g. a second stdio server:
+  # - name: github
+  #   command: npx
+  #   args: ["-y", "@modelcontextprotocol/server-github"]
+
+# Optional governance knobs (same as `proxy`; CLI flags override these). With none set, the default
+# is a per-namespace deny-by-default: read-shaped names allow, destructive/spend names require
+# approval, everything else denies.
+# policy: agent-policy.yaml
+# approval: gui          # deny (default) | tty | gui (macOS) | auto
+# signing-key: ~/.kriya/keys/broker.key   # a durable, pinnable identity across runs
+# actor: claude-desktop

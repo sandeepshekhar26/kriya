@@ -242,6 +242,48 @@ pub const DESTRUCTIVE_PREFIXES: &[&str] = &[
     "archive",
 ];
 
+/// The zero-config **default deny-by-default policy for the broker** (W2): the same read-allow /
+/// destructive-approve / else-deny posture as [`default_proxy_policy`], but the rules are minted
+/// **per upstream namespace** — the broker serves tools as `<upstream>__<tool>`, so the flat
+/// `get_*` prefixes would never match and would silently deny everything. For each namespace `ns`
+/// this emits `ns__get_*`-style allows, `ns__delete*`-style approval gates, then the final
+/// catch-all deny. An upstream not in `namespaces` (impossible via the broker, which builds this
+/// from its own upstream list) falls to deny — the safe direction.
+pub fn default_broker_policy(namespaces: &[String]) -> Policy {
+    let mut rules = Vec::new();
+    for ns in namespaces {
+        for p in READ_PREFIXES {
+            rules.push(Rule {
+                action: format!("{ns}__{p}*"),
+                allow: true,
+                require_approval: false,
+            });
+        }
+        for p in DESTRUCTIVE_PREFIXES {
+            rules.push(Rule {
+                action: format!("{ns}__{p}*"),
+                allow: true,
+                require_approval: true,
+            });
+        }
+    }
+    rules.push(Rule {
+        action: "*".into(),
+        allow: false,
+        require_approval: false,
+    });
+    Policy {
+        rules,
+        // One budget spans the whole broker session — all upstreams together, same cap as proxy.
+        budget: Budget {
+            max_actions_per_minute: Some(60),
+            max_api_calls_per_hour: None,
+        },
+        retry: None,
+        on_device: false,
+    }
+}
+
 /// The zero-config **default deny-by-default policy** the `kriya-gateway proxy` uses when no
 /// `--policy` file is given (D-016 / service-architecture §7): read-like names allow, destructive /
 /// spend names require human approval, everything else is denied — with a sane per-minute budget so
@@ -503,6 +545,23 @@ retry:
             "even writes deny unless read-shaped"
         );
         // A budget cap is in force so a runaway agent is bounded.
+        assert_eq!(p.max_actions_per_minute(), Some(60));
+    }
+
+    #[test]
+    fn default_broker_policy_gates_per_upstream_namespace() {
+        let p = default_broker_policy(&["github".into(), "linear".into()]);
+        // The same read/destructive posture as the proxy default, per namespace.
+        assert_eq!(p.check("github__get_issue"), Decision::Allow);
+        assert_eq!(p.check("linear__list_projects"), Decision::Allow);
+        assert_eq!(p.check("github__delete_repo"), Decision::RequiresApproval);
+        assert_eq!(p.check("linear__send_invite"), Decision::RequiresApproval);
+        // Non-read, non-destructive names deny — same safe fall-through as the proxy default.
+        assert_eq!(p.check("github__create_issue"), Decision::Deny);
+        // A namespace the broker didn't declare denies outright.
+        assert_eq!(p.check("ghost__get_anything"), Decision::Deny);
+        // The flat (un-namespaced) name never matches a broker rule.
+        assert_eq!(p.check("get_issue"), Decision::Deny);
         assert_eq!(p.max_actions_per_minute(), Some(60));
     }
 
