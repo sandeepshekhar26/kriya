@@ -1,6 +1,10 @@
-//! `kriya-hook` — govern **Claude Code's native tools** (Bash, Edit, Write, …) via its hooks
-//! seam (R30). The gateway already governs everything MCP-routed; native tool calls never touch
-//! MCP — hooks are exactly where they surface. One paste into `~/.claude/settings.json`:
+//! `kriya-hook` — govern **the whole Claude Code lane** via its hooks seam (R30): native tools
+//! (Bash, Edit, Write, …) **and every MCP server attached to Claude Code** (`mcp__<server>__<tool>`
+//! calls). Servers added straight to Claude Code never pass a gateway — hooks are the one seam
+//! that sees them all, with zero per-server config (the snippet below sets **no `matcher`**, and
+//! per the hooks contract an absent matcher fires for *every* tool — verified 2026-07-03 against
+//! the hooks reference). The gateway remains the seam for *other* MCP clients (Claude Desktop,
+//! Cursor, …). One paste into `~/.claude/settings.json`:
 //!
 //! ```jsonc
 //! { "hooks": {
@@ -12,7 +16,10 @@
 //! Claude Code pipes a JSON payload on stdin (`hook_event_name`, `tool_name`, `tool_input`,
 //! and on PostToolUse `tool_response` — see the hooks reference:
 //! <https://docs.anthropic.com/en/docs/claude-code/hooks>). Mapping: every tool call becomes the
-//! governed action `claude-code__<tool_name lowercased>` with `params = tool_input`.
+//! governed action `claude-code__<tool_name lowercased>` with `params = tool_input`; MCP tools
+//! keep their full name, so `mcp__github__create_issue` becomes
+//! `claude-code__mcp__github__create_issue` — which makes **per-server policy** a prefix glob
+//! (`claude-code__mcp__github__*`).
 //!
 //! ## Division of labor (why two hooks)
 //! - **`pre` is the GATE.** Policy check (+ optional human approval). A blocked call exits **2**
@@ -43,6 +50,9 @@
 //!   - { action: "claude-code__glob",  allow: true }
 //!   - { action: "claude-code__grep",  allow: true }
 //!   - { action: "claude-code__bash",  allow: true, require_approval: true }
+//!   # MCP servers attached to Claude Code, gated per server:
+//!   - { action: "claude-code__mcp__github__*",  allow: true, require_approval: true }
+//!   - { action: "claude-code__mcp__*",          allow: false }
 //!   - { action: "claude-code__*",     allow: true }
 //! ```
 //!
@@ -139,7 +149,9 @@ fn action_id_for(tool_name: &str) -> String {
 }
 
 /// Success of a completed call, derived from `tool_response`: an explicit `success` bool wins;
-/// an `error`/`is_error` marker means failure; otherwise the tool ran and returned → success.
+/// an `error`/`is_error`/`isError` marker means failure; otherwise the tool ran and returned →
+/// success. `isError` (camelCase) is the MCP `CallToolResult` convention — without it every failed
+/// `mcp__*` call would sign as a success, which is wrong evidence.
 fn outcome_success(tool_response: Option<&Value>) -> bool {
     match tool_response {
         None => true,
@@ -150,8 +162,10 @@ fn outcome_success(tool_response: Option<&Value>) -> bool {
             if v.get("error").is_some() {
                 return false;
             }
-            if let Some(b) = v.get("is_error").and_then(Value::as_bool) {
-                return !b;
+            for key in ["is_error", "isError"] {
+                if let Some(b) = v.get(key).and_then(Value::as_bool) {
+                    return !b;
+                }
             }
             true
         }
@@ -339,6 +353,12 @@ mod tests {
     fn maps_tool_names_into_the_governed_namespace() {
         assert_eq!(action_id_for("Bash"), "claude-code__bash");
         assert_eq!(action_id_for("WebFetch"), "claude-code__webfetch");
+        // MCP tools keep their full name under the same namespace — the whole Claude Code lane,
+        // native + attached MCP servers, one action-id scheme.
+        assert_eq!(
+            action_id_for("mcp__github__create_issue"),
+            "claude-code__mcp__github__create_issue"
+        );
     }
 
     #[test]
@@ -349,6 +369,35 @@ mod tests {
         assert!(!outcome_success(Some(&json!({"error": "boom"}))));
         assert!(!outcome_success(Some(&json!({"is_error": true}))));
         assert!(outcome_success(Some(&json!({"stdout": "ok"}))));
+        // MCP CallToolResult convention (camelCase) — a failed MCP call must not sign as success.
+        assert!(!outcome_success(Some(&json!({"isError": true}))));
+        assert!(outcome_success(Some(&json!({"isError": false, "content": []}))));
+    }
+
+    /// Per-server MCP gating is just a prefix glob over the mapped action id — no new policy
+    /// machinery. This is Rung 0a of the PATH→WATCHER ladder: the hook is the whole-Claude-Code
+    /// lane, and servers attached directly to Claude Code are governable per server.
+    #[test]
+    fn an_enforcing_policy_gates_mcp_servers_individually() {
+        let p: Policy = serde_yaml::from_str(
+            "rules:\n  - { action: \"claude-code__mcp__github__*\", allow: true, require_approval: true }\n  - { action: \"claude-code__mcp__*\", allow: false }\n  - { action: \"claude-code__*\", allow: true }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            p.check(&action_id_for("mcp__github__create_issue")),
+            Decision::RequiresApproval,
+            "named server is approval-gated"
+        );
+        assert_eq!(
+            p.check(&action_id_for("mcp__shady_exfil__send")),
+            Decision::Deny,
+            "unlisted MCP servers are denied"
+        );
+        assert_eq!(
+            p.check(&action_id_for("Bash")),
+            Decision::Allow,
+            "native tools ride the trailing namespace rule"
+        );
     }
 
     #[test]
