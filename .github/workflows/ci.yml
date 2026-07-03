@@ -82,6 +82,10 @@ jobs:
         working-directory: apps/note-app/src-tauri
         run: cargo test -p kriya --locked
 
+      - name: test kriya MCP client + broker + remote HTTP transport
+        working-directory: crates/kriya
+        run: cargo test --features mcp-http
+
       - name: cargo check note-app backend
         working-directory: apps/note-app/src-tauri
         run: cargo check --locked

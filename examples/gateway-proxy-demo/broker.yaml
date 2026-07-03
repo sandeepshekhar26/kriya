@@ -14,7 +14,7 @@
 #   } } }
 
 upstreams:
-  # Each entry: a stable `name` (its namespace) + the `command`/`args` to spawn the real server.
+  # LOCAL (stdio) upstream: a stable `name` (its namespace) + the `command`/`args` to spawn.
   - name: notes
     command: node
     args: ["mock-mcp-server.js"]
@@ -23,6 +23,14 @@ upstreams:
   # - name: github
   #   command: npx
   #   args: ["-y", "@modelcontextprotocol/server-github"]
+
+  # REMOTE (HTTP/SSE) upstream (W2-2): a hosted MCP server reached by `url` instead of a spawned
+  # process — the servers a client adds directly (no local proc). Needs a gateway built with
+  # `--features mcp-http` (the shipped Console bundle is). Optional `headers` add auth, etc.
+  # - name: linear
+  #   url: "https://mcp.linear.app/mcp"
+  #   headers:
+  #     Authorization: "Bearer ${LINEAR_TOKEN}"   # substitute the real token; no env expansion yet
 
 # Optional governance knobs (same as `proxy`; CLI flags override these). With none set, the default
 # is a per-namespace deny-by-default: read-shaped names allow, destructive/spend names require
