@@ -103,10 +103,19 @@ pub struct Signer {
     key: SigningKey,
     public_hex: String,
     log_path: PathBuf,
-    /// Hash of the last receipt line written to `log_path` — the chain head (R20). Seeded from the
-    /// log's last line at construction so a new process continues the chain. Behind a `Mutex` so the
-    /// chain stays consistent if multiple run threads share one signer.
-    last_hash: Mutex<Option<String>>,
+    /// The chain head (R20): hash of the last line written to `log_path` plus the log's byte length
+    /// as of that observation. Seeded at construction so a new process continues the chain; behind a
+    /// `Mutex` for threads sharing one signer. The length is the cheap staleness probe for
+    /// CONCURRENT writers (W1-6): under the file lock in [`Signer::record`], a length mismatch means
+    /// another process appended since we last looked, and the head is re-seeded from disk before
+    /// chaining — so parallel hook invocations extend one chain instead of forking it.
+    chain: Mutex<ChainHead>,
+}
+
+/// See [`Signer::chain`].
+struct ChainHead {
+    hash: Option<String>,
+    len: u64,
 }
 
 impl Default for Signer {
@@ -126,12 +135,12 @@ impl Signer {
         let bytes: [u8; 32] = rand::random();
         let key = SigningKey::from_bytes(&bytes);
         let public_hex = hex::encode(key.verifying_key().to_bytes());
-        let last_hash = Mutex::new(seed_last_hash(&log_path));
+        let chain = Mutex::new(seed_chain_head(&log_path));
         Self {
             key,
             public_hex,
             log_path,
-            last_hash,
+            chain,
         }
     }
 
@@ -145,12 +154,12 @@ impl Signer {
         let seed = load_or_create_seed(key_path)?;
         let key = SigningKey::from_bytes(&seed);
         let public_hex = hex::encode(key.verifying_key().to_bytes());
-        let last_hash = Mutex::new(seed_last_hash(&log_path));
+        let chain = Mutex::new(seed_chain_head(&log_path));
         Ok(Self {
             key,
             public_hex,
             log_path,
-            last_hash,
+            chain,
         })
     }
 
@@ -163,6 +172,15 @@ impl Signer {
     }
 
     /// Sign a receipt and append it to the audit log. Returns the signed receipt.
+    ///
+    /// Concurrency (W1-6): the [seed tail → chain → append] window is serialized against OTHER
+    /// PROCESSES by an exclusive advisory lock on the log file (Unix `flock`, auto-released on fd
+    /// close — so a crashed writer never wedges the chain). Under the lock the on-disk length is
+    /// compared with our last observation and the head re-seeded if someone else appended — the
+    /// exact race parallel hook invocations hit (two fresh processes both seeded from the same
+    /// tail would otherwise both claim the same `prev_hash`, forking the chain into what a
+    /// verifier must read as tampering). Off-unix the lock is a no-op and the contract remains
+    /// single-writer-per-log-at-a-time.
     pub fn record(&self, mut receipt: Receipt) -> SignedReceipt {
         // Canonicalize before signing (R21): recursively sort `params` object keys so the signed
         // bytes never depend on a consumer's serde_json `preserve_order` feature. `serde_json::Value`
@@ -171,11 +189,26 @@ impl Signer {
         // offline `tools/verify-receipts` applies the identical sort before re-deriving the bytes.
         receipt.params = canonical_value(&receipt.params);
         // Hash-chain (R20): link this receipt to the previous LINE so whole-receipt deletion or
-        // truncation is detectable. Hold the lock across the file write so the on-disk order always
-        // matches the chain order, even if multiple run threads share this signer.
-        let mut last = self.last_hash.lock().unwrap_or_else(|e| e.into_inner());
-        receipt.prev_hash = last.clone(); // None on the genesis receipt
-                                          // Canonical bytes = compact JSON of the unsigned (key-sorted, now chained) receipt.
+        // truncation is detectable. The in-process Mutex orders threads sharing this signer; the
+        // file lock below orders separate processes sharing the log.
+        let mut chain = self.chain.lock().unwrap_or_else(|e| e.into_inner());
+        let locked = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.log_path)
+            .ok()
+            .map(|f| {
+                lock_exclusive(&f);
+                // Staleness probe: a length change means another writer appended since our last
+                // observation — re-seed the head from the true on-disk tail before chaining.
+                let disk_len = f.metadata().map(|m| m.len()).unwrap_or(chain.len);
+                if disk_len != chain.len {
+                    *chain = seed_chain_head(&self.log_path);
+                }
+                f
+            });
+        receipt.prev_hash = chain.hash.clone(); // None on the genesis receipt
+                                                // Canonical bytes = compact JSON of the unsigned (key-sorted, now chained) receipt.
         let msg = serde_json::to_vec(&receipt).unwrap_or_default();
         let signature = hex::encode(self.key.sign(&msg).to_bytes());
         let signed = SignedReceipt {
@@ -184,15 +217,18 @@ impl Signer {
             signature,
         };
         let line = serde_json::to_string(&signed).unwrap_or_default();
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.log_path)
-        {
-            let _ = writeln!(f, "{line}");
+        if let Some(mut f) = locked {
+            if writeln!(f, "{line}").is_ok() {
+                // The exact line just written becomes the next receipt's `prev_hash`; advance the
+                // observed length by what we appended (we hold the lock, nothing interleaves).
+                chain.hash = Some(sha256_hex(line.as_bytes()));
+                chain.len += line.len() as u64 + 1;
+            }
+            // Lock released when `f` drops.
         }
-        // The hash of the exact line just written becomes the next receipt's `prev_hash`.
-        *last = Some(sha256_hex(line.as_bytes()));
+        // If the log was unopenable/unwritable the head deliberately does NOT advance: advancing
+        // it would make the next successful receipt chain to a line that never hit disk — a
+        // self-inflicted verifier break on top of a lost receipt.
         signed
     }
 }
@@ -280,15 +316,39 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
-/// Seed the chain head from an existing log's last non-empty line, so a new host process CONTINUES
-/// the chain (its first receipt links to the last line already on disk) instead of starting a fresh
-/// chain that a verifier would read as a head-truncation. `None` for an absent/empty log — a genuine
-/// genesis.
-fn seed_last_hash(log_path: &Path) -> Option<String> {
-    let content = std::fs::read_to_string(log_path).ok()?;
-    let last = content.lines().rev().find(|l| !l.trim().is_empty())?;
-    Some(sha256_hex(last.as_bytes()))
+/// Seed the chain head from an existing log: hash of the last non-empty line (so a new process
+/// CONTINUES the chain instead of starting a fresh one a verifier would read as head-truncation)
+/// plus the log's byte length (the staleness probe [`Signer::record`] uses under the file lock).
+/// `hash: None` + `len: 0` for an absent/empty log — a genuine genesis.
+fn seed_chain_head(log_path: &Path) -> ChainHead {
+    match std::fs::read_to_string(log_path) {
+        Ok(content) => ChainHead {
+            hash: content
+                .lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .map(|l| sha256_hex(l.as_bytes())),
+            len: content.len() as u64,
+        },
+        Err(_) => ChainHead { hash: None, len: 0 },
+    }
 }
+
+/// Exclusive advisory lock on the audit log (blocking). Unix `flock`: released automatically when
+/// the fd closes — including on process death, so a crashed hook invocation can never wedge the
+/// chain. Best-effort by design: on failure (exotic filesystems) behavior degrades to the previous
+/// unlocked append rather than dropping the receipt. Off-unix this is a no-op and the log's
+/// contract stays "one writer at a time".
+#[cfg(unix)]
+fn lock_exclusive(f: &std::fs::File) {
+    use std::os::unix::io::AsRawFd;
+    // SAFETY: flock on a valid, open fd; no memory is passed. Advisory only.
+    unsafe {
+        let _ = libc::flock(f.as_raw_fd(), libc::LOCK_EX);
+    }
+}
+#[cfg(not(unix))]
+fn lock_exclusive(_f: &std::fs::File) {}
 
 /// Recursively sort object keys in a JSON value so its serialization is deterministic regardless of
 /// serde_json's `preserve_order` feature (R21). Applied to receipt `params` before signing so the
@@ -713,5 +773,75 @@ mod tests {
         let probe = dir.join(format!("kriya-r27-probe-{}.tmp", uuid::Uuid::new_v4()));
         std::fs::write(&probe, b"ok").expect("default audit dir must be writable");
         let _ = std::fs::remove_file(&probe);
+    }
+
+    /// W1-6: many CONCURRENT signer instances over one log + one persisted key — the parallel
+    /// hook-invocation model (each instance owns its fd, so the flock path is exercised exactly as
+    /// it is between processes). The chain must come out fork-free: every line's `prev_hash` equals
+    /// the hash of the exact line before it, every line parses (no torn writes), every signature
+    /// verifies, and nothing is lost. Before the record()-time lock + re-seed, two writers seeded
+    /// from the same tail would both claim the same parent — a fork a verifier must flag.
+    #[test]
+    #[cfg(unix)]
+    fn concurrent_signers_extend_one_chain_without_forking() {
+        let dir = std::env::temp_dir().join(format!("kriya-flock-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = dir.join("hook.key");
+        let log = dir.join("claude-code.jsonl");
+
+        // Mint the shared identity first (parallel first-ever key creation is out of scope here).
+        drop(Signer::with_identity(&key, log.clone()).unwrap());
+
+        let n_threads = 4;
+        let per_thread = 25;
+        let handles: Vec<_> = (0..n_threads)
+            .map(|t| {
+                let key = key.clone();
+                let log = log.clone();
+                std::thread::spawn(move || {
+                    // A FRESH Signer per thread — like a fresh process, it seeds its chain head
+                    // once (possibly mid-hammering) and must reconcile under the lock thereafter.
+                    let s = Signer::with_identity(&key, log).unwrap();
+                    for i in 0..per_thread {
+                        let signed = s.record(Receipt::new(
+                            format!("t{t}-s{i}"),
+                            "claude-code__bash".into(),
+                            json!({ "thread": t, "seq": i }),
+                            true,
+                            now_ms(),
+                        ));
+                        assert!(verifies(&signed), "receipt t{t}-s{i} must verify");
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let text = std::fs::read_to_string(&log).unwrap();
+        let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(
+            lines.len(),
+            n_threads * per_thread,
+            "no receipt lost, no line torn"
+        );
+        let mut prev: Option<String> = None;
+        for (i, line) in lines.iter().enumerate() {
+            let v: serde_json::Value = serde_json::from_str(line)
+                .unwrap_or_else(|e| panic!("line {} is torn/unparseable: {e}", i + 1));
+            let declared = v
+                .get("prev_hash")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            assert_eq!(
+                declared,
+                prev,
+                "chain fork at line {} — a receipt claims a stale parent",
+                i + 1
+            );
+            prev = Some(sha256_hex(line.as_bytes()));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
