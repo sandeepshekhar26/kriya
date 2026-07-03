@@ -50,7 +50,9 @@ pub mod computeruse;
 // policy, one signer/audit, one actor). Composes the existing fronts (reach-in + computer-use)
 // behind a namespacing `RouterExecutor` and serves their union; it does NOT reimplement them.
 // Pulls in both reach-in and computer-use, so the feature enables them (see Cargo.toml).
-#[cfg(feature = "router")]
+// ALSO available under `mcp-client` alone (W2): the broker multiplexes N proxied MCP upstreams
+// through the same machinery, and the router core itself is pure composition — no FFI, no OS deps.
+#[cfg(any(feature = "router", feature = "mcp-client"))]
 pub mod router;
 
 #[cfg(target_os = "macos")]
@@ -88,6 +90,7 @@ pub use computeruse::macos::MacDesktopBackend;
 pub use computeruse::{ComputerUseServer, DesktopBackend};
 
 // Router v2 public surface: the multiplexing executor + the unified serve loop. Portable (no FFI of
-// its own) — the macOS backends come from the reach-in / computer-use fronts it composes.
-#[cfg(feature = "router")]
+// its own) — the macOS backends come from the reach-in / computer-use fronts it composes. Under
+// `mcp-client` it is the broker's engine (W2), multiplexing proxied MCP upstreams instead.
+#[cfg(any(feature = "router", feature = "mcp-client"))]
 pub use router::{Front, RouterExecutor, RouterServer};
