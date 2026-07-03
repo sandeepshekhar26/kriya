@@ -109,10 +109,13 @@ gating at the floor.
 > policy-gated + signed + on-device + **vendor-neutral** (governs *any* MCP agent, under the app
 > owner's rules) — not the ability to drive apps.
 
-### Govern Claude Code's native tools — `kriya-hook`
+### Govern the whole Claude Code lane — `kriya-hook`
 
-MCP covers Claude Code's connected servers; its **native** tools (`Bash`, `Edit`, `Write`, …) never
-touch MCP. `kriya-hook` closes that gap through Claude Code's own hooks seam:
+`kriya-hook` governs **everything Claude Code does through tools**: its native tools (`Bash`,
+`Edit`, `Write`, …) *and* every MCP server attached to it (`mcp__<server>__<tool>` calls). Servers
+added straight to Claude Code never pass a gateway — the hooks seam is the one place that sees them
+all, with zero per-server config (the snippet sets no `matcher`, so it fires for every tool). The
+gateway remains the seam for other MCP clients (Claude Desktop, Cursor, …):
 
 ```bash
 cargo install kriya --bin kriya-hook --no-default-features
@@ -131,7 +134,10 @@ cargo install kriya --bin kriya-hook --no-default-features
 
 `pre` is the **gate** (policy → optional human approval; a blocked call exits 2 with the reason, and
 the blocked *attempt* is itself a signed receipt), `post` is the **record** (an Ed25519, hash-chained
-receipt of what actually ran). Receipts land in `~/.kriya/audit/claude-code.jsonl` under a persistent
+receipt of what actually ran). MCP calls keep their full name — `mcp__github__create_issue` becomes
+the governed action `claude-code__mcp__github__create_issue` — so **per-server policy is one prefix
+glob** (`- { action: "claude-code__mcp__github__*", allow: true, require_approval: true }`).
+Receipts land in `~/.kriya/audit/claude-code.jsonl` under a persistent
 signing identity, the chain spans hook invocations, and the same offline verifiers — `kriya-audit`,
 [`tools/verify-receipts`](tools/verify-receipts/), the 5-language bindings — re-prove them without
 trusting this repo. The default policy is **record-only** (nothing blocks until you author rules);
