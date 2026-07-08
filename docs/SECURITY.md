@@ -156,6 +156,36 @@ Calling these out is part of being trustworthy:
    attacker who controls the host long enough could rewrite the *entire* chain from a fork point —
    **external anchoring** (periodically publishing the chain head off-box) would close that. Both are
    future work.
+4. ✅ **Why `kriya-hook`'s approval tier doesn't use Claude Code's native `permissionDecision:
+   "ask"` (B0, doc 22 §11).** It's a deliberate choice, not an oversight: `"ask"` has documented,
+   reproducible reliability gaps — it doesn't always fire in headless `claude -p` mode and can race
+   with tool execution there (anthropics/claude-code#40506, #36071), and has been observed silently
+   overridden by a broad `permissions.allow` rule elsewhere in a user's settings, letting the tool
+   run with **no prompt at all** (anthropics/claude-code#39344, #41151). `kriya-hook` instead uses
+   exit-code-2 blocking (still fully supported, unaffected by those gaps) plus its own
+   self-contained `ApprovalGate` (`tty`/`gui`) for the approval tier — a mechanism it controls
+   end-to-end rather than depending on Claude Code's interactive-prompt plumbing.
+5. ✅ **`TtyApproval` self-bounds at 300s (B0 fix).** Claude Code's own hook timeout (600s default
+   for command-type hooks) **fails OPEN** on expiry — a killed/timed-out hook is treated as no
+   decision, and the tool proceeds. (An earlier revision of `kriya-hook.rs`'s doc comment
+   incorrectly claimed the opposite; corrected after verifying against the current hooks
+   reference.) `TtyApproval::prompt_on_tty` previously blocked on an unbounded `/dev/tty` read, so
+   an unanswered prompt could silently resolve to "allowed" once Claude Code's external timeout
+   killed the hook. It now self-bounds at 300s (matching `GuiApproval`'s existing `osascript …
+   giving up after 300`) and denies on its own timeout — the decision is made inside this binary,
+   before either side's external timeout could make it by default.
+6. ✅ **Headless + subagent hook firing, empirically verified (B0).** Two real, disputed-upstream
+   behaviors that can't be unit-tested: does `PreToolUse`/`PostToolUse` fire reliably under
+   `claude -p` (upstream reports of unreliability: #40506, #36071), and does it fire for tool calls
+   made from *within* a Task-tool subagent (upstream dispute: #34692, reported broken on some
+   platforms as recently as days before this check). Verified locally with
+   `tools/verify-hook-firing.sh` against **Claude Code v2.1.186 on macOS**: both fired correctly —
+   headless mode fired `PreToolUse`/`PostToolUse` for a plain Bash call, and a subagent-originated
+   Bash call fired the hook with `agent_id` populated, correctly distinguishing it from the main
+   thread. This confirms current behavior **on this platform/version only** — #34692's history
+   shows platform-specific and version-specific regressions, so this is not a claim that every
+   version/OS combination behaves the same; re-run the script and update this line if the installed
+   `claude` version changes materially.
 
 The honest one-line guarantee today: *"under a pinned (optionally durable) key, no retained receipt
 was altered and none was silently deleted from the chain."*
