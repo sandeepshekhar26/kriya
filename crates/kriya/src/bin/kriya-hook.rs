@@ -68,8 +68,18 @@
 //!   receipts still make volume visible after the fact.
 //! - Approval modes: `deny` (default — a `require_approval` rule blocks unless changed), `tty`
 //!   (prompt on /dev/tty — terminal sessions only), `gui` (macOS dialog), `auto` (approve all —
-//!   demos only). Mind Claude Code's hook timeout: an unanswered prompt kills the hook, which
-//!   blocks the call — i.e. timeouts fail closed too.
+//!   demos only). **Claude Code's own hook timeout (600s default for command hooks) fails OPEN on
+//!   expiry** — a killed/timed-out hook is treated as no decision, and the tool proceeds. This is
+//!   the opposite of an earlier version of this comment, which incorrectly claimed timeouts fail
+//!   closed; verified against the current hooks reference. `tty`/`gui` mitigate this the only way
+//!   this binary can: both self-bound an unanswered prompt at 300s (well under Claude Code's own
+//!   ceiling) and deny on their own timeout, so the decision is made here, not by an external kill.
+//!   We deliberately do **not** use Claude Code's native `permissionDecision:"ask"` for the
+//!   approval tier — it has documented, reproducible reliability gaps (doesn't always fire in
+//!   headless `claude -p` mode, can race with tool execution there, and has been observed silently
+//!   overridden by a broad `permissions.allow` rule elsewhere in settings, letting the tool run
+//!   with no prompt at all) — `tty`/`gui` are the more reliable mechanism this binary controls
+//!   end-to-end.
 
 use std::io::Read;
 use std::path::PathBuf;
