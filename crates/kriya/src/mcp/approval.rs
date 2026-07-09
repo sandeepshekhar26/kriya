@@ -36,7 +36,8 @@ impl ApprovalGate for AutoApprove {
 /// Prompt a human on the controlling terminal and wait for a y/n. Opens `/dev/tty`
 /// directly rather than reading stdin, because in stdio transport stdin carries the
 /// JSON-RPC stream — so the operator answers out-of-band from the agent's traffic.
-/// Any failure to reach a tty (no terminal, EOF, non-unix) is treated as a denial.
+/// Any failure to reach a tty (no terminal, EOF, non-unix) is treated as a denial, and an
+/// unanswered prompt times out — also a denial — after 300s (matches `GuiApproval`'s own bound).
 pub struct TtyApproval;
 
 impl ApprovalGate for TtyApproval {
@@ -109,21 +110,50 @@ fn applescript_string(s: &str) -> String {
     out
 }
 
+/// Matches `prompt_via_osascript`'s own `giving up after 300` bound. A caller of `ApprovalGate`
+/// may itself be under an external timeout shorter than an indefinite wait (e.g. Claude Code's
+/// hook runner, which fails a killed/timed-out hook **open** — see `kriya-hook`'s module doc) —
+/// self-bounding here means an unanswered prompt denies itself well inside that ceiling instead
+/// of leaving the decision to whichever side gives up first.
+#[cfg(unix)]
+const TTY_APPROVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 #[cfg(unix)]
 fn prompt_on_tty(action_id: &str, params: &Value) -> std::io::Result<bool> {
     use std::fs::OpenOptions;
     use std::io::{BufRead, BufReader, Write};
+    use std::sync::mpsc;
 
     let tty = OpenOptions::new().read(true).write(true).open("/dev/tty")?;
     let mut writer = tty.try_clone()?;
     write!(
         writer,
-        "\n[kriya] APPROVAL REQUIRED — an external agent wants to run a guarded action:\n  action: {action_id}\n  params: {params}\n[kriya] approve? [y/N]: "
+        "\n[kriya] APPROVAL REQUIRED — an external agent wants to run a guarded action:\n  action: {action_id}\n  params: {params}\n[kriya] approve? [y/N] (times out after {}s): ",
+        TTY_APPROVAL_TIMEOUT.as_secs()
     )?;
     writer.flush()?;
 
-    let mut line = String::new();
-    BufReader::new(tty).read_line(&mut line)?;
-    let answer = line.trim();
-    Ok(answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes"))
+    // `read_line` has no native timeout, so read on a dedicated thread and race it against the
+    // deadline. On timeout the reader thread is left blocked on the read — harmless, since the
+    // process exits shortly after this function returns either way (the `pre` hook has nothing
+    // left to do once the decision is made).
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let result = BufReader::new(tty).read_line(&mut line).map(|_| line);
+        let _ = tx.send(result);
+    });
+
+    match rx.recv_timeout(TTY_APPROVAL_TIMEOUT) {
+        Ok(Ok(line)) => {
+            let answer = line.trim();
+            Ok(answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes"))
+        }
+        Ok(Err(e)) => Err(e),
+        // A timeout is a denial, not an IO error — the same outcome `prompt_via_osascript`
+        // produces on its own `giving up after 300` (`gave up:true` → deny), so both interactive
+        // gates fail the same direction on an unanswered prompt.
+        Err(mpsc::RecvTimeoutError::Timeout) => Ok(false),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Ok(false),
+    }
 }
