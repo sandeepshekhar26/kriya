@@ -48,15 +48,18 @@
 //!
 //! ## Honest boundary this binary cannot close (state it, don't hide it — `docs/TRUST.md` ethos)
 //!
-//! Unlike Claude Code (where an unanswered hook is killed and *that itself* blocks the call —
-//! timeouts fail closed), Hermes' own per-hook `timeout` (capped at 300s) fails **open** on
-//! expiry: a timed-out shell hook is logged and treated as "no directive", i.e. the tool call
-//! proceeds. A `require_approval` rule whose human never answers within the window is therefore
-//! an **allow**, not a deny, at the Hermes level — the opposite of `kriya-hook`'s Claude Code
-//! behavior. This binary cannot change Hermes' own timeout semantics; it can only make its own
-//! `ApprovalGate::request` resolve as fast as the operator responds and default to `deny` inside
-//! that window (unchanged from `kriya-hook`). Document this to anyone enabling `require_approval`
-//! policies against Hermes.
+//! Hermes' own per-hook `timeout` (capped at 300s) fails **open** on expiry: a timed-out shell
+//! hook is logged and treated as "no directive", i.e. the tool call proceeds. **Claude Code's own
+//! hook timeout fails open the same direction** — a killed/timed-out `PreToolUse` hook is treated
+//! as no decision too (see `kriya-hook.rs`'s doc comment; an earlier version of this comment
+//! incorrectly described Claude Code as failing closed here, by unverified analogy — corrected
+//! after checking the current hooks reference). So a `require_approval` rule whose human never
+//! answers within the window is an **allow**, not a deny, on **both** backends. This binary cannot
+//! change either host's own external timeout semantics; its only lever is making its own
+//! `ApprovalGate::request` resolve well inside that window and default to `deny` there — `tty`/
+//! `gui` both self-bound at 300s (matching Hermes' own cap), so the decision is made here before
+//! either side's external timeout would silently let the action through. Document this to anyone
+//! enabling `require_approval` policies against Hermes.
 
 use std::io::Read;
 use std::path::PathBuf;
