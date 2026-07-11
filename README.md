@@ -1,20 +1,27 @@
-# kriya — the on-device control plane for AI agents on your Mac
+# kriya — govern everything your AI agents do, and prove it
+
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Console](https://img.shields.io/badge/kriya%20Console-v0.2.3-orange)](https://kriyanative.com/download/)
+[![Verifier](https://img.shields.io/badge/kriya--audit-v0.1.0-blue)](https://github.com/sandeepshekhar26/kriya/releases/tag/audit-v0.1.0)
+[![Website](https://img.shields.io/badge/kriyanative.com-docs-8A2BE2)](https://kriyanative.com/docs/)
 
 > **Download one app.** It installs the governance gateway, walks you through the macOS permissions,
-> wires your MCP client, and shows live, signed proof of everything an agent does. **Nothing leaves
-> your machine.** Receipts land in a standard on-device location (`~/.kriya/audit/`) and the app
-> tails them automatically — open it and you're watching live governance, no import, no log-hunting.
+> wires your agents (Claude Code, Claude Desktop, Cursor, Hermes, …), and shows live, **signed proof
+> of everything an agent does** — re-verified on your own machine. Every call is checked against
+> deny-by-default policy, paused for human approval when it matters, and written to a tamper-evident,
+> Ed25519-signed receipt — zero integration code. Receipts land in `~/.kriya/audit/` and the app
+> tails them automatically.
 >
-> Works with any MCP agent (Claude Desktop, Cursor, …). Every call is checked against deny-by-default
-> policy, paused for human approval when it matters, and written to a signed, tamper-evident receipt —
-> zero integration code.
+> **You choose the boundary:** on one Mac, nothing leaves the machine — or scale the same guarantees
+> to a whole fleet from your own on-prem server, up to fully air-gapped. Never a vendor cloud.
 
 **Get it:**
-[⬇ Kriya Console for macOS](https://github.com/sandeepshekhar26/kriya/releases/tag/console-v0.1.0)
-(free, signed + notarized, universal) ·
+[⬇ kriya Console for macOS](https://kriyanative.com/download/)
+(free, signed + notarized, universal — v0.2.3) ·
 [⬇ `kriya-audit` verifier](https://github.com/sandeepshekhar26/kriya/releases/tag/audit-v0.1.0)
 (free, macOS + Linux) ·
-[Govern Claude Code in 5 minutes](https://kriyanative.com/docs/claude-code/)
+[Govern Claude Code in 5 minutes](https://kriyanative.com/docs/claude-code/) ·
+[Govern Hermes](https://kriyanative.com/docs/hermes/)
 
 **Don't trust us — check (60 seconds):**
 
@@ -302,8 +309,10 @@ local-first finance app with **no HTTP API** — in ~37 lines, without changing 
 | [`kriya`](crates/kriya/) | Rust agent host — step loop, swappable inference, permissions, budget, signed audit, memory, **governed MCP-server mode** |
 | [`kriya` (Python)](bindings/python/) | **Python binding** — `register_action` / `wrap_action` + the `Host` stdio driver, for PyQt/PySide/Tk apps, FreeCAD/Blender plugins, data & quant tools (`pip install kriya`) |
 
-**Binaries:** `kriya-mcp` (governed MCP server — external agents drive your app through the gates) ·
-`kriya-host` (the stdio sidecar) · [`tools/verify-receipts`](tools/verify-receipts/) (offline audit-log verifier).
+**Binaries:** `kriya-gateway` (wrap any MCP server, zero changes) · `kriya-hook` (govern Claude
+Code's whole tool lane) · `kriya-hermes-hook` (Hermes' native tools) · `kriya-mcp` (governed MCP
+server — external agents drive your app through the gates) · `kriya-host` (the stdio sidecar) ·
+[`tools/verify-receipts`](tools/verify-receipts/) (offline audit-log verifier).
 
 **Reference apps:** [`apps/note-app`](apps/note-app/) and [`apps/task-manager`](apps/task-manager/)
 — two domains on the one shared host crate.
@@ -364,11 +373,21 @@ on-device.**
 
 The paid tier never changes how governance works — it consumes the same Ed25519-signed receipts and
 the same policy the free monitor already verifies and enforces. Tamper-evident audit plus
-correlated, exportable evidence is what **EU AI Act** (enforcement opens Aug 2026) and **SOC 2** ask
-for when an agent touches real data — on-device, where cloud MCP gateways structurally can't reach.
+correlated, exportable evidence is what **CMMC Level 2** (in new DoD contracts from Nov 10, 2026),
+**SOC 2**, and **EU AI Act** record-keeping ask for when an agent touches real data — on-device,
+where cloud MCP gateways structurally can't reach.
 
-> Cross-app correlation across the apps on one machine has shipped. A cloud / cross-*machine* fleet
-> console is on the roadmap, not a current deliverable.
+**Going fleet-wide:** [kriyaD](https://kriyanative.com/products/kriyad/) — the customer-hosted
+control-plane server + fleet cockpit (air-gap, on-prem, or your VPC; never a vendor cloud) — ships
+today for design partners: fleet inventory + liveness, central policy authoring with an
+org-key-signed downlink devices verify before applying (anti-rollback included), policy drift
+re-verified locally from each device's own signed envelopes, and one org-wide, assessor-ready
+evidence export.
+
+<p align="center">
+  <img src="https://kriyanative.com/assets/products/console-fleet-drift.png" alt="the kriya fleet cockpit — device table with liveness, inventory, and locally re-verified policy drift" width="760">
+  <br><em>The fleet cockpit: policy drift re-verified locally from each device's own signed envelopes — the server's word is only a hint.</em>
+</p>
 
 Enterprise & regulated deployments → [kriyanative.com](https://kriyanative.com) ·
 Sandeepshekhar26@gmail.com.
@@ -376,5 +395,7 @@ Sandeepshekhar26@gmail.com.
 ## Status
 
 Alpha. The pattern, the cross-shell runtime, and the full safety layer work end-to-end — typed
-actions, governed MCP-server mode, the Electron/Node sidecar, the `wrapAction` bolt-on, and the
-Actual Budget flagship are all shipped. APIs may still change before a stable release. MIT licensed.
+actions, governed MCP-server mode, the gateway proxy, the Claude Code + Hermes hooks, the
+Electron/Node sidecar, the `wrapAction` bolt-on, and the Actual Budget flagship are all shipped, and
+the notarized Console (v0.2.3) ships on top of them. APIs may still change before a stable release.
+MIT licensed.
