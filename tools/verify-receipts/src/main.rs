@@ -255,10 +255,19 @@ fn verify_log(content: &str) -> (u32, u32, u32) {
         //    signature check above. Unchained receipts (genesis, or pre-R20 logs) carry no prev_hash
         //    → not chain-checked (backward compatible).
         if let Ok(signed) = serde_json::from_str::<SignedReceipt>(line) {
+            // A retention epoch-checkpoint (doc 24 §6-P2) is a SIGNED, legitimate sealed chain point:
+            // it seals a pruned prefix, so at the head of the log its `prev_hash` records the prior
+            // head H whose line was intentionally pruned. Accept it as a seal rather than flagging a
+            // truncation — the checkpoint is itself signed (verified above) and its `prior_head_hash`
+            // param records H. (The kriya crate names this `RETENTION_CHECKPOINT`.)
+            let is_checkpoint = signed.receipt.action_id == "kriya.retention.checkpoint";
             match (&signed.receipt.prev_hash, &prev_line_hash) {
                 (Some(claimed), Some(actual)) if claimed != actual => {
                     println!("CHAIN-BREAK {action_id} {step_id}  [prev_hash != previous line — a preceding receipt was deleted, reordered, or altered]");
                     chain_breaks += 1;
+                }
+                (Some(_), None) if is_checkpoint => {
+                    println!("RETENTION-SEAL {action_id} {step_id}  [retention checkpoint — the prior prefix was pruned per policy; H recorded]");
                 }
                 (Some(_), None) => {
                     println!("CHAIN-BREAK {action_id} {step_id}  [first line claims a predecessor — the head of the log was truncated]");
@@ -494,5 +503,68 @@ mod tests {
         // Truncate the HEAD: the new first line claims a predecessor that is gone.
         let head_cut = format!("{l2}\n{l3}\n");
         assert_eq!(verify_log(&head_cut).2, 1, "head truncation must break the chain");
+    }
+
+    // ── retention epoch-checkpoint (doc 24 §6-P2) ────────────────────────────────────────────────
+
+    #[test]
+    fn retention_checkpoint_at_head_is_a_sealed_chain_point_not_a_break() {
+        let key = SigningKey::from_bytes(&KEY_A);
+        // The pruned prefix (two receipts) — present only to compute the prior head hash H.
+        let base = make_receipt();
+        let old1 = sign_chained(&key, &base, None, "old1");
+        let old2 = sign_chained(&key, &base, Some(sha256_hex(old1.as_bytes())), "old2");
+        let prior_head = sha256_hex(old2.as_bytes()); // H = hash of the last pruned line
+
+        // The checkpoint seals to H; its params record prior_head_hash = H.
+        let cp = Receipt {
+            step_id: "checkpoint".into(),
+            action_id: "kriya.retention.checkpoint".into(),
+            params: json!({
+                "policy": "io-30d",
+                "prior_head_hash": prior_head,
+                "pruned_before_ts_ms": 1_000_u64,
+                "pruned_count": 2
+            }),
+            success: true,
+            ts_ms: 2_000,
+            actor: None,
+            prev_hash: Some(prior_head.clone()),
+        };
+        let cp_line = serde_json::to_string(&sign_receipt(&key, &cp)).unwrap();
+
+        // A kriya.io.* receipt re-chained onto the checkpoint.
+        let io = Receipt {
+            step_id: "io1".into(),
+            action_id: "kriya.io.egress.mcp.allow".into(),
+            params: json!({
+                "decision": "allow",
+                "dest_host": "api.vendor.com",
+                "hash_scheme": "wire-bytes"
+            }),
+            success: true,
+            ts_ms: 3_000,
+            actor: None,
+            prev_hash: Some(sha256_hex(cp_line.as_bytes())),
+        };
+        let io_line = serde_json::to_string(&sign_receipt(&key, &io)).unwrap();
+
+        // The SEALED log: checkpoint (head) + the retained kriya.io.* receipt. Both verify; the
+        // checkpoint seal is NOT counted as a truncation break.
+        let sealed = format!("{cp_line}\n{io_line}\n");
+        let (ok, fail, breaks) = verify_log(&sealed);
+        assert_eq!((ok, fail), (2, 0), "checkpoint + kriya.io receipt both verify");
+        assert_eq!(
+            breaks, 0,
+            "a retention checkpoint at the head is a sealed chain point, not a chain break"
+        );
+
+        // A NON-checkpoint receipt at the head with a dangling prev_hash is still a truncation break.
+        let bogus = sign_chained(&key, &base, Some(prior_head), "bogus");
+        assert_eq!(
+            verify_log(&format!("{bogus}\n")).2,
+            1,
+            "only a retention checkpoint earns the seal exemption"
+        );
     }
 }
