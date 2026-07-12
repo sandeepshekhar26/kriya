@@ -84,6 +84,19 @@ pub struct Policy {
     /// `false` (off, fully backward compatible).
     #[serde(default)]
     on_device: bool,
+    /// Optional **egress destination tier** (doc 24 §7.3 / EG-2). When present, governed-lane
+    /// egress (the gateway/broker HTTP upstreams, the hook's WebFetch lane) is checked against
+    /// operator-authored host patterns → `allow | approval | deny`, with per-destination byte
+    /// budgets. Absent by default → egress governance OFF, byte-identical to pre-EG-2 behaviour.
+    /// This is a governed-lane control, not a host-level network control: a spawned subprocess
+    /// bypasses it (see the module doc + TRUST.md).
+    #[serde(default)]
+    egress: Option<EgressPolicy>,
+    /// Optional **retention design** (doc 24 §6-P2): the max-age classes that a retention pruner
+    /// honours before sealing the pruned prefix behind a signed epoch-checkpoint receipt. Absent
+    /// by default → receipts are retained indefinitely (the pre-EG-2 behaviour).
+    #[serde(default)]
+    retention: Option<Retention>,
 }
 
 impl Default for Policy {
@@ -115,6 +128,8 @@ impl Default for Policy {
             budget: Budget::default(),
             retry: None,
             on_device: false,
+            egress: None,
+            retention: None,
         }
     }
 }
@@ -150,6 +165,18 @@ impl Policy {
     /// Whether the on-device guarantee (R13) is in force for this policy.
     pub fn on_device(&self) -> bool {
         self.on_device
+    }
+
+    /// The egress destination tier (doc 24 §7.3), if the policy configures one. `None` → egress
+    /// governance is off for this policy and every governed call proceeds unchecked (the io ledger
+    /// is likewise silent), byte-identical to pre-EG-2.
+    pub fn egress(&self) -> Option<&EgressPolicy> {
+        self.egress.as_ref()
+    }
+
+    /// The retention design (doc 24 §6-P2), if configured.
+    pub fn retention(&self) -> Option<&Retention> {
+        self.retention.as_ref()
     }
 
     pub fn check(&self, action_id: &str) -> Decision {
@@ -281,6 +308,8 @@ pub fn default_broker_policy(namespaces: &[String]) -> Policy {
         },
         retry: None,
         on_device: false,
+        egress: None,
+        retention: None,
     }
 }
 
@@ -328,6 +357,8 @@ pub fn default_proxy_policy() -> Policy {
         },
         retry: None,
         on_device: false,
+        egress: None,
+        retention: None,
     }
 }
 
@@ -339,6 +370,254 @@ fn matches(pattern: &str, action_id: &str) -> bool {
         return action_id.starts_with(prefix);
     }
     pattern == action_id
+}
+
+// ─── Egress destination tier (doc 24 §7.3 / EG-2) ────────────────────────────────────────────────
+//
+// Operators author **human-readable host patterns** in the policy YAML (decided in doc 24 §7.3 — do
+// not revisit):
+//
+// ```yaml
+// egress:
+//   unlisted: deny            # deny-by-default (default: allow — the permissive posture §7.3)
+//   fail_closed: true         # "no receipt, no egress" (B3); default false
+//   rules:
+//     - host: "*.vendor.com"
+//       tier: allow
+//       budget: { window_secs: 60, max_bytes: 1048576 }
+//     - host: "api.partner.com"
+//       tier: approval
+//     - host: "*"
+//       tier: deny
+// ```
+//
+// **Landmine L1 (permissions.rs `matches()` is PREFIX-only):** a host wildcard is a *leading* `*.`
+// (a suffix match on the domain), so feeding `*.notion.com` to the action matcher would strip the
+// trailing char (there is none to strip) and fall through to an exact compare — silently never
+// matching. Egress matching therefore uses [`host_matches`], a dedicated suffix matcher; the
+// reversed-host encoding named in doc 24 §7.3/L1 is one valid way to reuse `matches()`, a direct
+// suffix matcher is another — either way the L1 silent-fail case is proven impossible by the test
+// matrix below. Operators never see or write reversed hosts.
+
+/// One egress destination rule as authored in the policy YAML.
+#[derive(Debug, Clone, Deserialize)]
+struct EgressRule {
+    /// A human-readable host pattern: `*` (any), `*.vendor.com` (the vendor.com domain — its
+    /// subdomains and the apex), or an exact host `api.vendor.com`.
+    host: String,
+    /// What to do with a call to this destination. Default `allow` (listing a host without a tier
+    /// means "allow it").
+    #[serde(default = "default_tier")]
+    tier: EgressTier,
+    /// Optional per-destination byte budget (B2 — anti slow-drip exfil). Observed *payload* bytes
+    /// (L2), never wire/TLS bytes.
+    #[serde(default)]
+    budget: Option<ByteBudget>,
+}
+
+fn default_tier() -> EgressTier {
+    EgressTier::Allow
+}
+
+/// The three egress tiers — the same three the action policy already has, applied by destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EgressTier {
+    Allow,
+    Approval,
+    Deny,
+}
+
+/// A per-destination byte budget: no more than `max_bytes` of observed outbound payload in any
+/// trailing `window_secs` window. Exceeding it denies the call that would breach — a signed
+/// `kriya.io.*.deny` receipt, not a silent drop (B2).
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct ByteBudget {
+    pub window_secs: u64,
+    pub max_bytes: u64,
+}
+
+/// What happens to a host no rule matches. `deny` is deny-by-default (the safe allowlist posture,
+/// which also arms the broker's startup allowlist check); `allow` is the permissive default §7.3
+/// documents as a "documented deviation" printed in every export; `defer` parks the unlisted call
+/// at the approval gate instead of hard-denying it (B4 defer semantics).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UnlistedPosture {
+    #[default]
+    Allow,
+    Deny,
+    Defer,
+}
+
+/// The compiled egress tier for a policy. Deserialized from the policy YAML's `egress:` section.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct EgressPolicy {
+    #[serde(default)]
+    rules: Vec<EgressRule>,
+    /// The posture for a host no rule matches. Default `allow` (§7.3 — the tier ships OFF/permissive
+    /// and every export prints the mode); set `deny` for deny-by-default.
+    #[serde(default)]
+    unlisted: UnlistedPosture,
+    /// Fail-closed receipt-precondition mode (B3): if the `kriya.io.*` receipt cannot be written,
+    /// the egress is DENIED. Default `false` (fail-open — the honest documented default).
+    #[serde(default)]
+    fail_closed: bool,
+    /// Whether to record **ingress** digests (a keyed hash + size of tool responses / inbound
+    /// content). Its OWN switch, **default OFF even when egress is ON** (doc 24 §6-P3): computing a
+    /// hash reads every content byte, which is a processing activity in its own right, and an
+    /// unsalted hash of guessable content is content disclosure — so ingress hashing is keyed
+    /// (HMAC) and off unless the operator opts in.
+    #[serde(default)]
+    record_ingress: bool,
+}
+
+/// The outcome of evaluating one destination against the egress tier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EgressDecision {
+    /// Proceed. `rule` is the operator-authored pattern that matched (for the `policy_rule` param),
+    /// `None` for the permissive-unlisted case.
+    Allow { rule: Option<String> },
+    /// Route through the approval gate (an `approval`-tier host, or `defer` on an unlisted host).
+    Approval { rule: Option<String> },
+    /// Block at the decision point. `reason` is human-readable for the receipt + the agent.
+    Deny {
+        rule: Option<String>,
+        reason: String,
+    },
+}
+
+impl EgressPolicy {
+    /// Decide what to do with a call to `host` (already lowercased/trimmed is fine — the matcher
+    /// normalizes). First matching rule wins; an unmatched host falls to the `unlisted` posture.
+    pub fn evaluate(&self, host: &str) -> EgressDecision {
+        for r in &self.rules {
+            if host_matches(&r.host, host) {
+                return match r.tier {
+                    EgressTier::Allow => EgressDecision::Allow {
+                        rule: Some(r.host.clone()),
+                    },
+                    EgressTier::Approval => EgressDecision::Approval {
+                        rule: Some(r.host.clone()),
+                    },
+                    EgressTier::Deny => EgressDecision::Deny {
+                        rule: Some(r.host.clone()),
+                        reason: format!("egress to {host} denied by rule '{}'", r.host),
+                    },
+                };
+            }
+        }
+        match self.unlisted {
+            UnlistedPosture::Allow => EgressDecision::Allow { rule: None },
+            UnlistedPosture::Deny => EgressDecision::Deny {
+                rule: None,
+                reason: format!("egress to {host} is not on the allowlist (deny-by-default)"),
+            },
+            UnlistedPosture::Defer => EgressDecision::Approval { rule: None },
+        }
+    }
+
+    /// The byte budget in force for `host`, plus the pattern that carries it (the budget-counter
+    /// key). The first matching rule that declares a `budget:` wins.
+    pub fn budget_for(&self, host: &str) -> Option<(String, ByteBudget)> {
+        self.rules
+            .iter()
+            .find(|r| host_matches(&r.host, host) && r.budget.is_some())
+            .map(|r| (r.host.clone(), r.budget.expect("is_some checked")))
+    }
+
+    /// Whether fail-closed receipt-precondition mode (B3) is on.
+    pub fn fail_closed(&self) -> bool {
+        self.fail_closed
+    }
+
+    /// Whether ingress digest recording is on (its own switch, default OFF — doc 24 §6-P3).
+    pub fn record_ingress(&self) -> bool {
+        self.record_ingress
+    }
+
+    /// A short, export-safe label for the posture — printed in every egress-bearing export so an
+    /// assessor's first question ("was the ledger permissive during the window?") is answered
+    /// before it is asked (§6-H10).
+    pub fn mode_label(&self) -> &'static str {
+        match self.unlisted {
+            UnlistedPosture::Allow => "allow-unlisted",
+            UnlistedPosture::Deny => "deny-by-default",
+            UnlistedPosture::Defer => "defer-unlisted",
+        }
+    }
+
+    /// Whether the tier is deny-by-default (arms the broker startup allowlist check).
+    pub fn is_deny_by_default(&self) -> bool {
+        self.unlisted == UnlistedPosture::Deny
+    }
+}
+
+/// Match an operator-authored **host pattern** against a concrete host — the internal compile
+/// detail that maps human-readable patterns onto matching without the L1 prefix-only trap.
+///
+/// - `*` → any host
+/// - `*.vendor.com` → the vendor.com domain: any subdomain (`a.vendor.com`, `a.b.vendor.com`) and the apex (`vendor.com`)
+/// - `api.vendor.com` → exact match only
+///
+/// Case-insensitive; leading/trailing whitespace ignored. Unlike the action [`matches`] (prefix
+/// glob only), a leading `*.` is a genuine suffix match — the exact case L1 warns silently fails
+/// under the action matcher.
+fn host_matches(pattern: &str, host: &str) -> bool {
+    let pattern = pattern.trim().to_ascii_lowercase();
+    let host = host.trim().to_ascii_lowercase();
+    if pattern == "*" {
+        return true;
+    }
+    if let Some(suffix) = pattern.strip_prefix("*.") {
+        // The vendor.com domain: subdomains AND the apex. An empty suffix ("*.") is malformed → no
+        // match rather than matching everything.
+        return !suffix.is_empty() && (host == suffix || host.ends_with(&format!(".{suffix}")));
+    }
+    pattern == host
+}
+
+/// Extract the host from an upstream/tool URL without pulling in a URL-parsing dependency. Shared
+/// by the HTTP transport (the captured `dest_host`), the broker's egress resolver, and the hook's
+/// WebFetch lane, so the ledger and the allowlist agree on the destination string. Lives here (an
+/// always-compiled module) so the hook — built without `mcp-client` — can reach it too.
+/// `https://user@api.vendor.com:443/mcp` → `api.vendor.com`.
+pub fn url_host(url: &str) -> String {
+    let after_scheme = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    let host_port = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
+    // Strip the port. IPv6 literals (`[::1]:port`) keep their brackets' contents; the common
+    // hostname/IPv4 case splits on the first colon.
+    if let Some(stripped) = host_port.strip_prefix('[') {
+        return stripped.split(']').next().unwrap_or(stripped).to_string();
+    }
+    host_port
+        .split(':')
+        .next()
+        .unwrap_or(host_port)
+        .to_ascii_lowercase()
+}
+
+/// The **retention design** (doc 24 §6-P2): the max-age classes a retention pruner honours before
+/// sealing the pruned prefix behind a signed epoch-checkpoint receipt (see
+/// [`crate::audit::RETENTION_CHECKPOINT`]). `kriya.io.*` receipts get a **shorter** default class
+/// than policy/approval receipts — I/O metadata is the most privacy-sensitive and least
+/// evidence-durable class (§4.5). Both fields optional; absent → that class is retained
+/// indefinitely.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Retention {
+    /// Max age in days for `kriya.io.*` receipts. Shorter than [`Self::default_days`] by design.
+    #[serde(default)]
+    pub io_days: Option<u32>,
+    /// Max age in days for policy/approval/action receipts.
+    #[serde(default)]
+    pub default_days: Option<u32>,
 }
 
 #[cfg(test)]
@@ -583,5 +862,197 @@ budget:
         );
         let warns = p.warnings();
         assert!(warns.is_empty(), "expected clean, got: {warns:?}");
+    }
+
+    // ─── Egress tier (doc 24 §7.3 / EG-2) ────────────────────────────────────────────────────────
+
+    /// **Landmine L1, the mandatory matrix.** A leading-wildcard host pattern (`*.notion.com`) must
+    /// match subdomains and the apex — the exact case that silently fails when fed to the PREFIX-only
+    /// action matcher. This test both proves `host_matches` is correct AND documents *why* egress
+    /// could not simply reuse `matches()`.
+    #[test]
+    fn l1_host_matcher_handles_leading_wildcards_that_prefix_matching_silently_drops() {
+        // The landmine, made explicit: the action matcher strips a TRAILING `*`; a host wildcard is
+        // LEADING, so `matches` finds no trailing `*`, falls to exact compare, and never matches.
+        assert!(
+            !matches("*.notion.com", "api.notion.com"),
+            "documents L1: the action prefix matcher silently never matches a leading-wildcard host"
+        );
+
+        // The correct suffix matcher: subdomains AND the apex match; look-alikes do NOT.
+        assert!(host_matches("*.notion.com", "api.notion.com"));
+        assert!(host_matches("*.notion.com", "a.b.notion.com"));
+        assert!(host_matches("*.notion.com", "notion.com"), "apex matches");
+        assert!(
+            !host_matches("*.notion.com", "evilnotion.com"),
+            "a look-alike registrable domain must NOT match"
+        );
+        assert!(
+            !host_matches("*.notion.com", "notion.com.evil.com"),
+            "a suffix-injection host must NOT match"
+        );
+
+        // `*` matches anything; exact matches exactly; matching is case-insensitive.
+        assert!(host_matches("*", "anything.example"));
+        assert!(host_matches("api.vendor.com", "API.Vendor.COM"));
+        assert!(!host_matches("api.vendor.com", "www.vendor.com"));
+        // A malformed bare `*.` matches nothing (never an accidental match-all).
+        assert!(!host_matches("*.", "vendor.com"));
+    }
+
+    fn egress_from(yaml: &str) -> EgressPolicy {
+        policy_from(yaml)
+            .egress()
+            .expect("egress section present")
+            .clone()
+    }
+
+    #[test]
+    fn egress_tiers_allow_approval_deny_by_destination() {
+        let e = egress_from(
+            r#"
+rules:
+  - action: "*"
+    allow: true
+egress:
+  unlisted: deny
+  rules:
+    - host: "*.vendor.com"
+      tier: allow
+    - host: "api.partner.com"
+      tier: approval
+    - host: "blocked.example"
+      tier: deny
+"#,
+        );
+        assert_eq!(
+            e.evaluate("api.vendor.com"),
+            EgressDecision::Allow {
+                rule: Some("*.vendor.com".into())
+            }
+        );
+        assert_eq!(
+            e.evaluate("api.partner.com"),
+            EgressDecision::Approval {
+                rule: Some("api.partner.com".into())
+            }
+        );
+        assert!(matches!(
+            e.evaluate("blocked.example"),
+            EgressDecision::Deny { .. }
+        ));
+        // Unlisted under deny-by-default → Deny (arms the broker startup allowlist check).
+        assert!(matches!(
+            e.evaluate("random.host"),
+            EgressDecision::Deny { .. }
+        ));
+        assert!(e.is_deny_by_default());
+        assert_eq!(e.mode_label(), "deny-by-default");
+    }
+
+    #[test]
+    fn egress_unlisted_posture_defaults_to_allow_and_supports_defer() {
+        // No `unlisted:` → permissive (§7.3: the tier ships OFF/allow, mode printed in the export).
+        let permissive = egress_from(
+            r#"
+rules: [{action: "*", allow: true}]
+egress:
+  rules:
+    - host: "blocked.example"
+      tier: deny
+"#,
+        );
+        assert_eq!(
+            permissive.evaluate("anything.else"),
+            EgressDecision::Allow { rule: None }
+        );
+        assert_eq!(permissive.mode_label(), "allow-unlisted");
+
+        // `defer` parks an unlisted call at the approval gate instead of hard-denying (B4).
+        let defer = egress_from(
+            r#"
+rules: [{action: "*", allow: true}]
+egress:
+  unlisted: defer
+"#,
+        );
+        assert_eq!(
+            defer.evaluate("new.host"),
+            EgressDecision::Approval { rule: None }
+        );
+        assert_eq!(defer.mode_label(), "defer-unlisted");
+    }
+
+    #[test]
+    fn egress_byte_budget_is_looked_up_by_matching_pattern() {
+        let e = egress_from(
+            r#"
+rules: [{action: "*", allow: true}]
+egress:
+  rules:
+    - host: "*.vendor.com"
+      tier: allow
+      budget: { window_secs: 60, max_bytes: 1048576 }
+    - host: "nobudget.example"
+      tier: allow
+"#,
+        );
+        let (pattern, budget) = e.budget_for("api.vendor.com").expect("budget matched");
+        assert_eq!(pattern, "*.vendor.com");
+        assert_eq!(budget.window_secs, 60);
+        assert_eq!(budget.max_bytes, 1_048_576);
+        assert!(e.budget_for("nobudget.example").is_none());
+        assert!(e.budget_for("unmatched.host").is_none());
+    }
+
+    #[test]
+    fn egress_fail_closed_flag_parses_and_defaults_off() {
+        let off = egress_from(
+            r#"
+rules: [{action: "*", allow: true}]
+egress:
+  rules: []
+"#,
+        );
+        assert!(!off.fail_closed(), "fail-open is the documented default");
+        // Ingress recording is its own switch, default OFF even when egress is configured (§6-P3).
+        assert!(!off.record_ingress(), "ingress digests are default OFF");
+        let on = egress_from(
+            r#"
+rules: [{action: "*", allow: true}]
+egress:
+  fail_closed: true
+  record_ingress: true
+"#,
+        );
+        assert!(on.fail_closed());
+        assert!(on.record_ingress());
+    }
+
+    #[test]
+    fn egress_absent_by_default_is_backward_compatible() {
+        // A policy with no egress section → no egress governance, unchanged behaviour.
+        let p = policy_from(r#"rules: [{action: "*", allow: false}]"#);
+        assert!(p.egress().is_none());
+    }
+
+    #[test]
+    fn retention_parses_with_shorter_io_class() {
+        // Absent → indefinite retention (pre-EG-2).
+        let none = policy_from(r#"rules: [{action: "*", allow: false}]"#);
+        assert!(none.retention().is_none());
+        // io class is shorter than the default class by design (doc 24 §4.5 / §6-P2).
+        let p = policy_from(
+            r#"
+rules: [{action: "*", allow: false}]
+retention:
+  io_days: 30
+  default_days: 365
+"#,
+        );
+        let r = p.retention().expect("retention configured");
+        assert_eq!(r.io_days, Some(30));
+        assert_eq!(r.default_days, Some(365));
+        assert!(r.io_days.unwrap() < r.default_days.unwrap());
     }
 }

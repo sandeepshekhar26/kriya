@@ -82,14 +82,17 @@
 //!   end-to-end.
 
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use kriya::audit::{default_audit_dir, now_ms, Actor, Receipt, Signer};
 #[cfg(target_os = "macos")]
 use kriya::mcp::GuiApproval;
-use kriya::mcp::{ApprovalGate, AutoApprove, DenyApproval, TtyApproval};
-use kriya::permissions::{Decision, Policy};
+use kriya::mcp::{
+    ApprovalGate, AutoApprove, DenyApproval, HashScheme, IoDecision, IoDirection, IoKind, IoRecord,
+    TtyApproval,
+};
+use kriya::permissions::{url_host, Decision, Policy};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -232,10 +235,13 @@ fn signer_for(args: &Args) -> Result<Signer, String> {
     Signer::with_identity(&key_path, log_path)
 }
 
-fn record(signer: &Signer, actor: &Actor, action_id: &str, params: Value, success: bool) {
+/// Sign the action receipt and return its `step_id` so a correlated `kriya.io.*` receipt can carry
+/// it as `corr` (doc 24 §4.2 — correlation by `corr`, never adjacency, L5).
+fn record(signer: &Signer, actor: &Actor, action_id: &str, params: Value, success: bool) -> String {
+    let step_id = uuid::Uuid::new_v4().to_string();
     signer.record(
         Receipt::new(
-            uuid::Uuid::new_v4().to_string(),
+            step_id.clone(),
             action_id.to_string(),
             params,
             success,
@@ -243,6 +249,244 @@ fn record(signer: &Signer, actor: &Actor, action_id: &str, params: Value, succes
         )
         .with_actor(Some(actor.clone())),
     );
+    step_id
+}
+
+/// Resolve the governed-lane egress destination for a Claude Code tool, if one is knowable.
+/// Returns `(kind, dest_host, server)`:
+/// - `mcp__<server>__<tool>` → an `mcp` destination carrying the server NAME (its endpoint is not
+///   claimable, so no host — doc 24 §6-H6).
+/// - a tool whose `tool_input` has a `url` (WebFetch) → an `http` destination with the parsed host.
+/// - **Bash → `None`**: a shell command has no single extractable destination — never invent one
+///   (doc 24 §4.1). Edit/Write/Read and a URL-less WebSearch likewise → `None`.
+fn egress_target_for(
+    tool_name: &str,
+    tool_input: &Value,
+) -> Option<(IoKind, Option<String>, Option<String>)> {
+    if let Some(rest) = tool_name.strip_prefix("mcp__") {
+        let server = rest.split("__").next().unwrap_or(rest).to_string();
+        return Some((IoKind::Mcp, None, Some(server)));
+    }
+    if tool_name.eq_ignore_ascii_case("bash") {
+        return None; // never extract a URL from a shell command (doc 24 §4.1)
+    }
+    if let Some(url) = tool_input.get("url").and_then(Value::as_str) {
+        return Some((IoKind::Http, Some(url_host(url)), None));
+    }
+    None
+}
+
+/// Emit a `kriya.io.egress.<kind>.<decision>` receipt for a hook-lane tool call. Records
+/// **payload bytes** (the serialized `tool_input` size) — NEVER network bytes — and a content hash
+/// over the CANONICAL key-sorted serialization (`hash_scheme: canonical-json`), a different
+/// definition than the gateway lane's wire bytes and labeled as such (doc 24 §4.2 rule 6 / L6).
+/// Hash + size only, never content (L9).
+#[allow(clippy::too_many_arguments)]
+fn emit_io_egress(
+    signer: &Signer,
+    actor: &Actor,
+    kind: IoKind,
+    dest_host: Option<String>,
+    server: Option<String>,
+    tool_input: &Value,
+    decision: IoDecision,
+    reason: Option<String>,
+    corr: &str,
+) {
+    let canon = canonical_json_string(tool_input);
+    let io = IoRecord {
+        direction: IoDirection::Egress,
+        dest_host,
+        dest_kind: kind,
+        method: None,
+        bytes_out: Some(canon.len() as u64),
+        bytes_in: None,
+        bytes_in_is_partial: false,
+        content_sha256: Some(sha256_hex(canon.as_bytes())),
+        hash_scheme: HashScheme::CanonicalJson,
+        decision,
+        policy_rule: None,
+        approved_by: None,
+        reason,
+        server,
+    };
+    signer.record(
+        Receipt::new(
+            uuid::Uuid::new_v4().to_string(),
+            io.action_id(),
+            io.params(Some(corr)),
+            decision != IoDecision::Deny,
+            now_ms(),
+        )
+        .with_actor(Some(actor.clone())),
+    );
+}
+
+/// Emit a `kriya.io.ingress.<kind>.allow` receipt: a **KEYED** hash + size of the tool response
+/// (doc 24 §6-P3). The hash is HMAC-SHA256 under a device-local salt over the canonical
+/// serialization, so a receipt-holder without the salt cannot dictionary-attack guessable content —
+/// an unsalted hash of guessable content is content disclosure. Hash + size only, never content (L9).
+fn emit_io_ingress(
+    signer: &Signer,
+    actor: &Actor,
+    kind: IoKind,
+    server: Option<String>,
+    tool_response: &Value,
+    salt: &[u8],
+    corr: &str,
+) {
+    let canon = canonical_json_string(tool_response);
+    let io = IoRecord {
+        direction: IoDirection::Ingress,
+        dest_host: None,
+        dest_kind: kind,
+        method: None,
+        bytes_out: None,
+        bytes_in: Some(canon.len() as u64),
+        bytes_in_is_partial: false,
+        content_sha256: Some(hmac_sha256_hex(salt, canon.as_bytes())),
+        hash_scheme: HashScheme::CanonicalJson,
+        decision: IoDecision::Allow,
+        policy_rule: None,
+        approved_by: None,
+        reason: None,
+        server,
+    };
+    signer.record(
+        Receipt::new(
+            uuid::Uuid::new_v4().to_string(),
+            io.action_id(),
+            io.params(Some(corr)),
+            true,
+            now_ms(),
+        )
+        .with_actor(Some(actor.clone())),
+    );
+}
+
+/// Lowercase-hex SHA-256.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(bytes))
+}
+
+/// HMAC-SHA256 (lowercase hex) — RFC 2104, built on `sha2` so the hook adds no HMAC dependency. The
+/// keyed ingress hash (doc 24 §6-P3).
+fn hmac_sha256_hex(key: &[u8], msg: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    const BLOCK: usize = 64;
+    let mut k = [0u8; BLOCK];
+    if key.len() > BLOCK {
+        let d = Sha256::digest(key);
+        k[..d.len()].copy_from_slice(&d);
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0x36u8; BLOCK];
+    let mut opad = [0x5cu8; BLOCK];
+    for i in 0..BLOCK {
+        ipad[i] ^= k[i];
+        opad[i] ^= k[i];
+    }
+    let inner = {
+        let mut h = Sha256::new();
+        h.update(ipad);
+        h.update(msg);
+        h.finalize()
+    };
+    let mut outer = Sha256::new();
+    outer.update(opad);
+    outer.update(inner);
+    hex::encode(outer.finalize())
+}
+
+/// Canonical key-sorted JSON serialization — the commitment `content_sha256` is taken over on the
+/// hook lane. Matches `kriya::audit`'s param canonicalization so the definition is consistent.
+fn canonical_json_string(v: &Value) -> String {
+    serde_json::to_string(&canonical_value(v)).unwrap_or_default()
+}
+
+fn canonical_value(v: &Value) -> Value {
+    match v {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let mut out = serde_json::Map::new();
+            for k in keys {
+                out.insert(k.clone(), canonical_value(&map[k]));
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(canonical_value).collect()),
+        other => other.clone(),
+    }
+}
+
+/// Load (or create + persist, 0600) the device-local HMAC salt for keyed ingress hashing. Co-located
+/// with the hook's signing key. Best-effort: an unwritable location returns an in-memory salt so
+/// ingress recording still functions within the run.
+fn load_or_create_ingress_salt(args: &Args) -> [u8; 32] {
+    let path = match &args.signing_key {
+        Some(p) => p.with_file_name("ingress-hmac.salt"),
+        None => default_audit_dir()
+            .parent()
+            .map(|p| p.join("keys"))
+            .unwrap_or_else(|| PathBuf::from(".kriya-keys"))
+            .join("ingress-hmac.salt"),
+    };
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Ok(bytes) = hex::decode(text.trim()) {
+            if let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) {
+                return arr;
+            }
+        }
+    }
+    let salt: [u8; 32] = rand::random();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if std::fs::write(&path, hex::encode(salt)).is_ok() {
+        restrict_salt_perms(&path);
+    }
+    salt
+}
+
+#[cfg(unix)]
+fn restrict_salt_perms(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+}
+#[cfg(not(unix))]
+fn restrict_salt_perms(_path: &Path) {}
+
+/// Emit a `kriya.io.egress.*.deny` receipt for a blocked hook-lane tool call, when the destination
+/// is knowable and the policy carries an egress tier (doc 24 L10 — the deny is receipted at the
+/// decision point). No-op otherwise.
+fn maybe_record_io_deny(
+    signer: &Signer,
+    actor: &Actor,
+    policy: &Policy,
+    tool_name: &str,
+    tool_input: &Value,
+    reason: &str,
+    corr: &str,
+) {
+    if policy.egress().is_none() {
+        return;
+    }
+    if let Some((kind, host, server)) = egress_target_for(tool_name, tool_input) {
+        emit_io_egress(
+            signer,
+            actor,
+            kind,
+            host,
+            server,
+            tool_input,
+            IoDecision::Deny,
+            Some(reason.to_string()),
+            corr,
+        );
+    }
 }
 
 fn main() -> ExitCode {
@@ -291,51 +535,102 @@ fn main() -> ExitCode {
         }
     };
 
+    // Both modes need the policy: `pre` for the decision, `post` for whether to record io receipts.
+    let policy = match load_policy(args.policy.as_ref()) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "kriya-hook: {e} — {}",
+                if args.mode == "pre" {
+                    "blocking (fail closed)"
+                } else {
+                    "skipping io (fail open)"
+                }
+            );
+            return fail_mode_exit(&args.mode);
+        }
+    };
+
     match args.mode.as_str() {
-        "pre" => {
-            let policy = match load_policy(args.policy.as_ref()) {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("kriya-hook: {e} — blocking (fail closed)");
-                    return ExitCode::from(2);
-                }
-            };
-            match policy.check(&action_id) {
-                Decision::Allow => ExitCode::SUCCESS, // the post hook records the outcome
-                Decision::RequiresApproval => {
-                    let gate = match approval_gate(&args.approval) {
-                        Ok(g) => g,
-                        Err(e) => {
-                            eprintln!("kriya-hook: {e} — blocking (fail closed)");
-                            return ExitCode::from(2);
-                        }
-                    };
-                    if gate.request(&action_id, &params) {
-                        ExitCode::SUCCESS
-                    } else {
-                        record(&signer, &actor, &action_id, params, false);
-                        eprintln!(
-                            "kriya-hook: '{action_id}' requires human approval and was not approved \
-                             (kriya policy; approval mode: {}). A signed receipt of the blocked \
-                             attempt was recorded.",
-                            args.approval
-                        );
-                        ExitCode::from(2)
+        "pre" => match policy.check(&action_id) {
+            Decision::Allow => ExitCode::SUCCESS, // the post hook records the outcome
+            Decision::RequiresApproval => {
+                let gate = match approval_gate(&args.approval) {
+                    Ok(g) => g,
+                    Err(e) => {
+                        eprintln!("kriya-hook: {e} — blocking (fail closed)");
+                        return ExitCode::from(2);
                     }
-                }
-                Decision::Deny => {
-                    record(&signer, &actor, &action_id, params, false);
+                };
+                if gate.request(&action_id, &params) {
+                    ExitCode::SUCCESS
+                } else {
+                    let step_id = record(&signer, &actor, &action_id, params.clone(), false);
+                    maybe_record_io_deny(
+                        &signer,
+                        &actor,
+                        &policy,
+                        tool_name,
+                        &params,
+                        "requires human approval; not granted",
+                        &step_id,
+                    );
                     eprintln!(
-                        "kriya-hook: '{action_id}' is denied by kriya policy. A signed receipt of \
-                         the blocked attempt was recorded."
+                        "kriya-hook: '{action_id}' requires human approval and was not approved \
+                         (kriya policy; approval mode: {}). A signed receipt of the blocked \
+                         attempt was recorded.",
+                        args.approval
                     );
                     ExitCode::from(2)
                 }
             }
-        }
+            Decision::Deny => {
+                let step_id = record(&signer, &actor, &action_id, params.clone(), false);
+                maybe_record_io_deny(
+                    &signer,
+                    &actor,
+                    &policy,
+                    tool_name,
+                    &params,
+                    "denied by kriya policy",
+                    &step_id,
+                );
+                eprintln!(
+                    "kriya-hook: '{action_id}' is denied by kriya policy. A signed receipt of \
+                     the blocked attempt was recorded."
+                );
+                ExitCode::from(2)
+            }
+        },
         "post" => {
             let success = outcome_success(payload.tool_response.as_ref());
-            record(&signer, &actor, &action_id, params, success);
+            let step_id = record(&signer, &actor, &action_id, params.clone(), success);
+            // kriya.io.* receipts (doc 24 §7.3): recorded only when the policy opts in via an
+            // `egress:` section, and only for a tool whose destination is knowable (WebFetch host,
+            // mcp server) — Bash and file tools produce none (doc 24 §4.1).
+            if let Some(egress) = policy.egress() {
+                if let Some((kind, host, server)) = egress_target_for(tool_name, &params) {
+                    emit_io_egress(
+                        &signer,
+                        &actor,
+                        kind,
+                        host,
+                        server.clone(),
+                        &params,
+                        IoDecision::Allow,
+                        None,
+                        &step_id,
+                    );
+                    // Ingress digests ride their OWN switch, default OFF (doc 24 §6-P3): a keyed
+                    // (HMAC) hash + size of the response, never its content.
+                    if egress.record_ingress() {
+                        if let Some(resp) = payload.tool_response.as_ref() {
+                            let salt = load_or_create_ingress_salt(&args);
+                            emit_io_ingress(&signer, &actor, kind, server, resp, &salt, &step_id);
+                        }
+                    }
+                }
+            }
             let _ = payload.session_id; // reserved: session correlation lands with envelope work
             ExitCode::SUCCESS
         }
@@ -371,6 +666,98 @@ mod tests {
         );
     }
 
+    // ─── EG-2: hook-lane io destinations + keyed ingress (doc 24 §4.1 / §6-P3) ───────────────────
+
+    #[test]
+    fn egress_target_extraction_by_tool() {
+        // WebFetch → an http destination with the parsed host.
+        let (kind, host, server) =
+            egress_target_for("WebFetch", &json!({"url": "https://api.vendor.com/v1"})).unwrap();
+        assert_eq!(kind, IoKind::Http);
+        assert_eq!(host.as_deref(), Some("api.vendor.com"));
+        assert!(server.is_none());
+
+        // mcp__<server>__<tool> → an mcp destination carrying the SERVER NAME, no host.
+        let (kind, host, server) =
+            egress_target_for("mcp__github__create_issue", &json!({})).unwrap();
+        assert_eq!(kind, IoKind::Mcp);
+        assert!(host.is_none(), "an mcp endpoint is not a claimable host");
+        assert_eq!(server.as_deref(), Some("github"));
+
+        // Bash → NEVER extract a URL, even if the command contains one.
+        assert!(
+            egress_target_for("Bash", &json!({"command": "curl https://evil.example"})).is_none(),
+            "Bash must never yield an egress destination"
+        );
+        // Edit/Write and a url-less WebSearch → no destination.
+        assert!(egress_target_for("Edit", &json!({"file_path": "/x"})).is_none());
+        assert!(egress_target_for("WebSearch", &json!({"query": "kriya"})).is_none());
+    }
+
+    #[test]
+    fn ingress_hash_is_keyed_so_it_is_not_a_content_disclosure() {
+        // The SAME content under two different device salts must hash differently — a receipt-holder
+        // without the salt cannot dictionary-attack guessable content (doc 24 §6-P3).
+        let content = b"did this agent read salary.xlsx?";
+        let a = hmac_sha256_hex(&[7u8; 32], content);
+        let b = hmac_sha256_hex(&[9u8; 32], content);
+        assert_ne!(a, b, "different salts → different keyed hashes");
+        assert_eq!(a.len(), 64, "sha256 hex");
+        // Deterministic under a fixed salt.
+        assert_eq!(a, hmac_sha256_hex(&[7u8; 32], content));
+        // Differs from a plain (unkeyed) SHA-256 of the same content.
+        assert_ne!(a, sha256_hex(content));
+    }
+
+    #[test]
+    fn ingress_receipt_serializes_only_a_keyed_digest_and_size_never_the_content() {
+        // L9 sentinel: build an ingress receipt exactly as `emit_io_ingress` does and prove the
+        // sensitive content NEVER appears in the receipt params — only the keyed HMAC digest + size.
+        let sensitive = json!({ "secret": "AKIAIOSFODNN7EXAMPLE", "path": "salary.xlsx" });
+        let canon = canonical_json_string(&sensitive);
+        let io = IoRecord {
+            direction: IoDirection::Ingress,
+            dest_host: None,
+            dest_kind: IoKind::Http,
+            method: None,
+            bytes_out: None,
+            bytes_in: Some(canon.len() as u64),
+            bytes_in_is_partial: false,
+            content_sha256: Some(hmac_sha256_hex(&[3u8; 32], canon.as_bytes())),
+            hash_scheme: HashScheme::CanonicalJson,
+            decision: IoDecision::Allow,
+            policy_rule: None,
+            approved_by: None,
+            reason: None,
+            server: None,
+        };
+        let params = io.params(Some("corr-x")).to_string();
+        assert!(
+            !params.contains("AKIAIOSFODNN7EXAMPLE"),
+            "the secret must never serialize: {params}"
+        );
+        assert!(
+            !params.contains("salary.xlsx"),
+            "content must never serialize: {params}"
+        );
+        assert!(
+            params.contains("content_sha256"),
+            "only the keyed digest is present"
+        );
+        assert!(
+            params.contains(&format!("\"bytes_in\":{}", canon.len())),
+            "size is present"
+        );
+    }
+
+    #[test]
+    fn canonical_json_is_key_sorted_and_stable() {
+        let a = canonical_json_string(&json!({"z": 1, "a": {"y": 2, "b": 3}}));
+        let b = canonical_json_string(&json!({"a": {"b": 3, "y": 2}, "z": 1}));
+        assert_eq!(a, b, "key order must not change the commitment");
+        assert_eq!(a, r#"{"a":{"b":3,"y":2},"z":1}"#);
+    }
+
     #[test]
     fn outcome_success_derivation() {
         assert!(outcome_success(None), "no response info → ran → success");
@@ -381,7 +768,9 @@ mod tests {
         assert!(outcome_success(Some(&json!({"stdout": "ok"}))));
         // MCP CallToolResult convention (camelCase) — a failed MCP call must not sign as success.
         assert!(!outcome_success(Some(&json!({"isError": true}))));
-        assert!(outcome_success(Some(&json!({"isError": false, "content": []}))));
+        assert!(outcome_success(Some(
+            &json!({"isError": false, "content": []})
+        )));
     }
 
     /// Per-server MCP gating is just a prefix glob over the mapped action id — no new policy

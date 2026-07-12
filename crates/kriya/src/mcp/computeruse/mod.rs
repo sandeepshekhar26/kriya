@@ -448,6 +448,9 @@ impl ComputerUseServer {
             DispatchOutcome::BudgetExceeded(reason) => {
                 CallToolResult::err(format!("blocked: {reason}"))
             }
+            DispatchOutcome::EgressDenied(reason) => {
+                CallToolResult::err(format!("blocked: {reason}"))
+            }
             DispatchOutcome::Executed { outcome, .. } => {
                 if outcome.success {
                     CallToolResult {
@@ -490,6 +493,7 @@ fn log_outcome(action_id: &str, outcome: &DispatchOutcome) {
         DispatchOutcome::Denied => "DENIED by policy".to_string(),
         DispatchOutcome::NotApproved => "BLOCKED — approval not granted".to_string(),
         DispatchOutcome::BudgetExceeded(r) => format!("BLOCKED — {r}"),
+        DispatchOutcome::EgressDenied(r) => format!("BLOCKED — egress: {r}"),
         DispatchOutcome::Executed { outcome, receipt } => format!(
             "performed ({}) · receipt sig={}…",
             if outcome.success { "ok" } else { "failed" },

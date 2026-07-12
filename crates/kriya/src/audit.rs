@@ -40,6 +40,14 @@ impl Actor {
 /// and the console as an attestation rather than an app action.
 pub const ATTESTATION_ON_DEVICE: &str = "kriya.attestation.on_device";
 
+/// Reserved `action_id` for a **retention epoch-checkpoint** receipt (doc 24 §6-P2 / EG-2). Signed
+/// like any receipt and part of the chain, it seals a pruned prefix: its `params` attest
+/// `{pruned_before_ts_ms, policy, prior_head_hash, pruned_count}` — "receipts before T were pruned
+/// per policy P; the prior head hash was H." Verifiers accept it as a legitimate sealed chain point
+/// (not a head-truncation break), so compliant deletion (GDPR erasure, retention limits) stays
+/// tamper-evident instead of reading as tampering. See [`prune_and_seal`].
+pub const RETENTION_CHECKPOINT: &str = "kriya.retention.checkpoint";
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Receipt {
     pub step_id: String,
@@ -171,7 +179,11 @@ impl Signer {
         &self.log_path
     }
 
-    /// Sign a receipt and append it to the audit log. Returns the signed receipt.
+    /// Sign a receipt and append it to the audit log. Returns the signed receipt — infallibly, for
+    /// the fail-OPEN default: a receipt that could not be persisted is still returned (and the
+    /// failure is swallowed), so a lost log line never takes down the caller. Callers that need to
+    /// know whether the line durably hit disk — the fail-CLOSED "no receipt, no egress" mode
+    /// (doc 24 B3) — use [`Signer::record_persisted`] instead.
     ///
     /// Concurrency (W1-6): the [seed tail → chain → append] window is serialized against OTHER
     /// PROCESSES by an exclusive advisory lock on the log file (Unix `flock`, auto-released on fd
@@ -181,12 +193,27 @@ impl Signer {
     /// tail would otherwise both claim the same `prev_hash`, forking the chain into what a
     /// verifier must read as tampering). Off-unix the lock is a no-op and the contract remains
     /// single-writer-per-log-at-a-time.
-    pub fn record(&self, mut receipt: Receipt) -> SignedReceipt {
+    pub fn record(&self, receipt: Receipt) -> SignedReceipt {
+        // Fail-open: on a write failure return the signed receipt anyway (the historical contract).
+        match self.record_persisted(receipt) {
+            Ok(signed) => signed,
+            Err(e) => e.signed,
+        }
+    }
+
+    /// Sign a receipt and append it, reporting whether the **append write succeeded**. `Ok` iff the
+    /// `writeln!` returned Ok (note: not `fsync`-durable — a crash before the OS flushes could still
+    /// lose it); `Err(NotPersisted)` (still carrying the signed receipt) when the log was
+    /// unopenable/unwritable. This is the seam for fail-closed receipt-precondition mode (doc 24 B3):
+    /// the governor signs the `kriya.io.*` receipt through this before performing the egress, and a
+    /// non-persisted receipt denies the egress — the receipt becomes a control, not just a record.
+    // The Err intentionally carries the whole signed receipt (so the fail-OPEN wrapper can still
+    // surface it), which is what makes the error type "large" — by design, not an oversight.
+    #[allow(clippy::result_large_err)]
+    pub fn record_persisted(&self, mut receipt: Receipt) -> Result<SignedReceipt, NotPersisted> {
         // Canonicalize before signing (R21): recursively sort `params` object keys so the signed
-        // bytes never depend on a consumer's serde_json `preserve_order` feature. `serde_json::Value`
-        // maps are already key-ordered in the current builds, so this is byte-identical today — it
-        // just makes the guarantee explicit and robust if a dependency ever flips that feature. The
-        // offline `tools/verify-receipts` applies the identical sort before re-deriving the bytes.
+        // bytes never depend on a consumer's serde_json `preserve_order` feature. The offline
+        // `tools/verify-receipts` applies the identical sort before re-deriving the bytes.
         receipt.params = canonical_value(&receipt.params);
         // Hash-chain (R20): link this receipt to the previous LINE so whole-receipt deletion or
         // truncation is detectable. The in-process Mutex orders threads sharing this signer; the
@@ -197,15 +224,14 @@ impl Signer {
             .append(true)
             .open(&self.log_path)
             .ok()
-            .map(|f| {
-                lock_exclusive(&f);
+            .inspect(|f| {
+                lock_exclusive(f);
                 // Staleness probe: a length change means another writer appended since our last
                 // observation — re-seed the head from the true on-disk tail before chaining.
                 let disk_len = f.metadata().map(|m| m.len()).unwrap_or(chain.len);
                 if disk_len != chain.len {
                     *chain = seed_chain_head(&self.log_path);
                 }
-                f
             });
         receipt.prev_hash = chain.hash.clone(); // None on the genesis receipt
                                                 // Canonical bytes = compact JSON of the unsigned (key-sorted, now chained) receipt.
@@ -217,20 +243,225 @@ impl Signer {
             signature,
         };
         let line = serde_json::to_string(&signed).unwrap_or_default();
-        if let Some(mut f) = locked {
+        let persisted = if let Some(mut f) = locked {
             if writeln!(f, "{line}").is_ok() {
                 // The exact line just written becomes the next receipt's `prev_hash`; advance the
                 // observed length by what we appended (we hold the lock, nothing interleaves).
                 chain.hash = Some(sha256_hex(line.as_bytes()));
                 chain.len += line.len() as u64 + 1;
+                true
+            } else {
+                false
             }
             // Lock released when `f` drops.
+        } else {
+            // Unopenable: the head deliberately does NOT advance — advancing it would make the next
+            // successful receipt chain to a line that never hit disk (a self-inflicted verifier
+            // break on top of a lost receipt).
+            false
+        };
+        if persisted {
+            Ok(signed)
+        } else {
+            Err(NotPersisted {
+                reason: format!("audit log {} could not be written", self.log_path.display()),
+                signed,
+            })
         }
-        // If the log was unopenable/unwritable the head deliberately does NOT advance: advancing
-        // it would make the next successful receipt chain to a line that never hit disk — a
-        // self-inflicted verifier break on top of a lost receipt.
-        signed
     }
+
+    /// Sign a receipt **without appending** — for callers that assemble their own file (the
+    /// retention [`prune_and_seal`] re-chains retained receipts onto a checkpoint). `prev_hash` is
+    /// taken from the receipt as passed (the caller sets the chain link); `params` are canonicalized
+    /// exactly as [`Signer::record`] does, so a re-signed line is byte-identical to a natively
+    /// recorded one.
+    pub fn sign_only(&self, mut receipt: Receipt) -> SignedReceipt {
+        receipt.params = canonical_value(&receipt.params);
+        let msg = serde_json::to_vec(&receipt).unwrap_or_default();
+        let signature = hex::encode(self.key.sign(&msg).to_bytes());
+        SignedReceipt {
+            receipt,
+            public_key: self.public_hex.clone(),
+            signature,
+        }
+    }
+}
+
+/// A receipt was signed but could not be durably written to the audit log. Carries the signed
+/// receipt (so a fail-open caller can still surface it) plus a human-readable reason.
+#[derive(Debug, Clone)]
+pub struct NotPersisted {
+    pub signed: SignedReceipt,
+    pub reason: String,
+}
+
+/// The result of a retention prune (doc 24 §6-P2).
+#[derive(Debug, Clone)]
+pub struct PruneReport {
+    /// How many receipts were pruned (the sealed prefix).
+    pub pruned: usize,
+    /// How many survived and were re-chained onto the checkpoint.
+    pub retained: usize,
+    /// The hash of the last pruned line — the "prior head hash H" the checkpoint attests.
+    pub prior_head_hash: Option<String>,
+    /// The checkpoint receipt's `step_id`, when one was written.
+    pub checkpoint_step_id: Option<String>,
+}
+
+/// Prune every receipt older than `cutoff_ts_ms` from `log_path` and seal the pruned prefix behind
+/// a signed [`RETENTION_CHECKPOINT`] receipt — compliant deletion that stays verifiable (doc 24
+/// §6-P2). Without this, deleting old receipts is indistinguishable from tampering, because it
+/// breaks the hash chain; the checkpoint records "receipts before T pruned per policy P; prior head
+/// hash H" so a verifier accepts the seal instead of flagging a truncation.
+///
+/// The pruned set is the leading, time-ordered run of receipts with `ts_ms < cutoff_ts_ms` (the log
+/// is append-ordered, so this is a clean "everything before T" epoch). Survivors are **re-chained
+/// onto the checkpoint** (re-signed by `signer`) so the chain is unbroken from the checkpoint
+/// forward. `signer`'s key MUST match every retained receipt's `public_key`: a prune never silently
+/// re-attributes a receipt to a different signer — a mismatch is a hard error and the log is left
+/// untouched. A no-op (nothing older than the cutoff) writes nothing.
+pub fn prune_and_seal(
+    log_path: &Path,
+    cutoff_ts_ms: u128,
+    policy_label: &str,
+    signer: &Signer,
+) -> Result<PruneReport, String> {
+    let content = std::fs::read_to_string(log_path)
+        .map_err(|e| format!("reading {}: {e}", log_path.display()))?;
+    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+
+    // The log is append-ordered by time, so the pruned set is the leading run of lines older than
+    // the cutoff; stop at the first line at/after the cutoff (or unparseable — treat as retained).
+    let split = lines
+        .iter()
+        .position(|l| line_ts(l).map(|ts| ts >= cutoff_ts_ms).unwrap_or(true))
+        .unwrap_or(lines.len());
+    if split == 0 {
+        return Ok(PruneReport {
+            pruned: 0,
+            retained: lines.len(),
+            prior_head_hash: None,
+            checkpoint_step_id: None,
+        });
+    }
+    let (pruned, retained) = lines.split_at(split);
+    let prior_head_hash = sha256_hex(pruned[pruned.len() - 1].as_bytes());
+
+    // The checkpoint receipt, sealed to the prior head H and attesting the prune.
+    let step_id = uuid::Uuid::new_v4().to_string();
+    let mut checkpoint = Receipt::new(
+        step_id.clone(),
+        RETENTION_CHECKPOINT.to_string(),
+        serde_json::json!({
+            "pruned_before_ts_ms": cutoff_ts_ms as u64,
+            "policy": policy_label,
+            "prior_head_hash": prior_head_hash,
+            "pruned_count": pruned.len(),
+        }),
+        true,
+        now_ms(),
+    );
+    checkpoint.prev_hash = Some(prior_head_hash.clone());
+    let checkpoint_signed = signer.sign_only(checkpoint);
+    let checkpoint_line = serde_json::to_string(&checkpoint_signed)
+        .map_err(|e| format!("serializing checkpoint: {e}"))?;
+
+    // Re-chain the survivors onto the checkpoint (re-signed by this signer; same key required).
+    let mut out_lines = vec![checkpoint_line.clone()];
+    let mut prev = sha256_hex(checkpoint_line.as_bytes());
+    for l in retained {
+        let (receipt, public_key) =
+            parse_stored_receipt(l).map_err(|e| format!("re-chaining retained receipt: {e}"))?;
+        if public_key != signer.public_key() {
+            return Err(format!(
+                "retained receipt {} was signed by a different key — refusing to re-attribute it to the pruning signer",
+                receipt.step_id
+            ));
+        }
+        let mut r = receipt;
+        r.prev_hash = Some(prev.clone());
+        let signed = signer.sign_only(r);
+        let line = serde_json::to_string(&signed)
+            .map_err(|e| format!("serializing retained receipt: {e}"))?;
+        prev = sha256_hex(line.as_bytes());
+        out_lines.push(line);
+    }
+
+    // Rewrite via a temp file + rename so a crash mid-prune never leaves a half-written log.
+    let tmp = log_path.with_extension("jsonl.prune-tmp");
+    let body = out_lines.join("\n") + "\n";
+    std::fs::write(&tmp, body).map_err(|e| format!("writing pruned log: {e}"))?;
+    std::fs::rename(&tmp, log_path).map_err(|e| format!("replacing log: {e}"))?;
+
+    // Re-seed the signer's in-memory chain head from the rewritten log so the NEXT `record()` chains
+    // onto the last RETAINED line — never onto the pruned (now-gone) head. record()'s length-probe
+    // would usually catch the change, but the pruned-vs-re-chained lengths can coincidentally match,
+    // so reset explicitly rather than rely on the heuristic.
+    if let Ok(mut chain) = signer.chain.lock() {
+        *chain = seed_chain_head(log_path);
+    }
+
+    Ok(PruneReport {
+        pruned: pruned.len(),
+        retained: retained.len(),
+        prior_head_hash: Some(prior_head_hash),
+        checkpoint_step_id: Some(step_id),
+    })
+}
+
+/// The `ts_ms` of a stored receipt line (for the retention cutoff split). `None` if unparseable.
+fn line_ts(line: &str) -> Option<u128> {
+    serde_json::from_str::<Value>(line)
+        .ok()?
+        .get("ts_ms")
+        .and_then(Value::as_u64)
+        .map(|t| t as u128)
+}
+
+/// Reconstruct the unsigned [`Receipt`] + `public_key` from a stored line. `Receipt` is
+/// Serialize-only (its declaration order is the load-bearing signed order), so we read the wire
+/// JSON by hand rather than deriving Deserialize on the frozen schema.
+fn parse_stored_receipt(line: &str) -> Result<(Receipt, String), String> {
+    let v: Value = serde_json::from_str(line).map_err(|e| format!("parse: {e}"))?;
+    let step_id = v
+        .get("step_id")
+        .and_then(Value::as_str)
+        .ok_or("no step_id")?
+        .to_string();
+    let action_id = v
+        .get("action_id")
+        .and_then(Value::as_str)
+        .ok_or("no action_id")?
+        .to_string();
+    let params = v.get("params").cloned().unwrap_or(Value::Null);
+    let success = v
+        .get("success")
+        .and_then(Value::as_bool)
+        .ok_or("no success")?;
+    let ts_ms = v.get("ts_ms").and_then(Value::as_u64).ok_or("no ts_ms")? as u128;
+    let actor = match v.get("actor") {
+        Some(a) if a.is_object() => Some(Actor {
+            agent: a
+                .get("agent")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            user: a
+                .get("user")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        }),
+        _ => None,
+    };
+    let public_key = v
+        .get("public_key")
+        .and_then(Value::as_str)
+        .ok_or("no public_key")?
+        .to_string();
+    let mut r = Receipt::new(step_id, action_id, params, success, ts_ms);
+    r.actor = actor;
+    Ok((r, public_key))
 }
 
 pub fn now_ms() -> u128 {
@@ -843,5 +1074,147 @@ mod tests {
             prev = Some(sha256_hex(line.as_bytes()));
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── EG-2: fail-closed record + retention checkpoint (doc 24 §6-P2, B3) ──────────────────────
+
+    #[test]
+    fn record_persisted_reports_write_success_and_failure() {
+        // A writable log: record_persisted succeeds and the line hits disk.
+        let s = signer();
+        let ok = s.record_persisted(Receipt::new("s".into(), "a".into(), json!({}), true, 1));
+        assert!(ok.is_ok(), "a writable log must persist");
+        assert!(verifies(&ok.unwrap()));
+
+        // An UNWRITABLE log (the path is a directory) — the append can never open it. Fail-closed
+        // mode reads this Err as "no receipt" and denies the egress (doc 24 B3).
+        let dir = std::env::temp_dir().join(format!("kriya-b3-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let blocked = Signer::with_log_path(dir.clone()); // log_path IS a directory
+        let err =
+            blocked.record_persisted(Receipt::new("s".into(), "a".into(), json!({}), true, 1));
+        assert!(
+            err.is_err(),
+            "an unwritable log must be reported, not swallowed"
+        );
+        // The infallible wrapper still returns the signed receipt (fail-open default).
+        let signed = blocked.record(Receipt::new("s".into(), "a".into(), json!({}), true, 1));
+        assert!(!signed.signature.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prune_and_seal_produces_a_verifiable_sealed_chain() {
+        // A durable key so the retained receipts can be re-chained onto the checkpoint by the SAME
+        // signer (a prune never re-attributes across keys).
+        let dir = std::env::temp_dir().join(format!("kriya-retention-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = dir.join("s.key");
+        let log = dir.join("audit.jsonl");
+        let s = Signer::with_identity(&key, log.clone()).unwrap();
+
+        // Four receipts at t = 100, 200, 300, 400.
+        for (i, ts) in [100u128, 200, 300, 400].into_iter().enumerate() {
+            s.record(Receipt::new(
+                format!("s{i}"),
+                "kriya.io.egress.mcp.allow".into(),
+                json!({"seq": i}),
+                true,
+                ts,
+            ));
+        }
+        let pruned_head = {
+            let lines: Vec<String> = std::fs::read_to_string(&log)
+                .unwrap()
+                .lines()
+                .map(str::to_string)
+                .collect();
+            sha256_hex(lines[1].as_bytes()) // the ts=200 line is the last pruned
+        };
+
+        // Prune everything before t = 300 (seals the first two).
+        let report = prune_and_seal(&log, 300, "io-30d", &s).expect("prune");
+        assert_eq!(report.pruned, 2);
+        assert_eq!(report.retained, 2);
+        assert_eq!(
+            report.prior_head_hash.as_deref(),
+            Some(pruned_head.as_str())
+        );
+
+        // The sealed log: checkpoint first (sealing to H), then the two survivors re-chained onto it.
+        let lines: Vec<String> = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(str::to_string)
+            .collect();
+        assert_eq!(lines.len(), 3, "checkpoint + 2 retained");
+
+        let cp: SignedReceipt = {
+            // Parse the checkpoint via the verify helper's shape by round-tripping the fields.
+            let v: Value = serde_json::from_str(&lines[0]).unwrap();
+            assert_eq!(v["action_id"], RETENTION_CHECKPOINT);
+            assert_eq!(
+                v["prev_hash"],
+                Value::String(pruned_head.clone()),
+                "checkpoint seals to prior head H"
+            );
+            assert_eq!(
+                v["params"]["prior_head_hash"],
+                Value::String(pruned_head.clone())
+            );
+            assert_eq!(v["params"]["pruned_count"], json!(2));
+            reparse_signed(&lines[0])
+        };
+        assert!(verifies(&cp), "the checkpoint itself must verify");
+
+        // Every line verifies, and the chain is contiguous FROM the checkpoint forward.
+        let mut prev = sha256_hex(lines[0].as_bytes());
+        for l in &lines[1..] {
+            let signed = reparse_signed(l);
+            assert!(verifies(&signed), "re-chained retained receipt must verify");
+            let v: Value = serde_json::from_str(l).unwrap();
+            assert_eq!(
+                v["prev_hash"],
+                Value::String(prev.clone()),
+                "retained receipt chains onto the checkpoint"
+            );
+            prev = sha256_hex(l.as_bytes());
+        }
+
+        // A second prune with nothing older is a clean no-op.
+        let noop = prune_and_seal(&log, 50, "io-30d", &s).expect("noop prune");
+        assert_eq!(noop.pruned, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Re-hydrate a stored line into the local `SignedReceipt` shape so the test's `verifies` helper
+    /// can re-derive its canonical bytes. Mirrors what `parse_stored_receipt` does internally.
+    fn reparse_signed(line: &str) -> SignedReceipt {
+        let v: Value = serde_json::from_str(line).unwrap();
+        let actor = v.get("actor").and_then(|a| {
+            Some(Actor::new(
+                a.get("agent")?.as_str()?,
+                a.get("user")?.as_str()?,
+            ))
+        });
+        let mut r = Receipt::new(
+            v["step_id"].as_str().unwrap().to_string(),
+            v["action_id"].as_str().unwrap().to_string(),
+            v["params"].clone(),
+            v["success"].as_bool().unwrap(),
+            v["ts_ms"].as_u64().unwrap() as u128,
+        );
+        r.actor = actor;
+        r.prev_hash = v
+            .get("prev_hash")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        SignedReceipt {
+            receipt: r,
+            public_key: v["public_key"].as_str().unwrap().to_string(),
+            signature: v["signature"].as_str().unwrap().to_string(),
+        }
     }
 }
