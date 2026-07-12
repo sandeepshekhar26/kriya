@@ -71,7 +71,8 @@ use kriya::audit::{default_audit_dir, now_ms, Actor, Receipt, Signer, ATTESTATIO
 #[cfg(target_os = "macos")]
 use kriya::mcp::GuiApproval;
 use kriya::mcp::{
-    ApprovalGate, AutoApprove, DenyApproval, Governor, McpClient, McpProxyExecutor, ProxyServer,
+    ApprovalGate, AutoApprove, DenyApproval, EgressControl, EgressTarget, Governor, HashScheme,
+    IoDecision, IoDirection, IoKind, IoRecord, McpClient, McpProxyExecutor, ProxyServer,
     TtyApproval,
 };
 // Front 2 (reach-in) types — only when built with `--features reach-in`. The real driver is macOS.
@@ -88,9 +89,14 @@ use kriya::mcp::{ComputerUseExecutor, ComputerUseServer, DesktopBackend};
 // the real `run_router` (it assembles the macOS reach-in + computer-use backends).
 #[cfg(all(feature = "router", target_os = "macos"))]
 use kriya::mcp::{Front, RouterServer};
-use kriya::permissions::{default_broker_policy, default_proxy_policy, Policy};
+use kriya::permissions::{
+    default_broker_policy, default_proxy_policy, url_host, EgressDecision, Policy,
+};
 // Broker (W2): the router core multiplexes N proxied MCP upstreams under one governor. Available
-// under `mcp-client` (no OS deps) — same gate as the proxy this binary already requires.
+// under `mcp-client` (no OS deps) — same gate as the proxy this binary already requires. Guarded to
+// the negation of the import above so building with BOTH `router` and `mcp-client` on macOS (the
+// Console's sidecar build) doesn't double-import `Front`/`RouterServer`.
+#[cfg(not(all(feature = "router", target_os = "macos")))]
 use kriya::mcp::{Front, RouterServer};
 use serde::Deserialize;
 
@@ -593,6 +599,45 @@ fn connect_remote_upstream(
 /// still work and take precedence over the config's same-named fields. With no `--policy`, the
 /// default is a **per-namespace** deny-by-default (reads allow, destructive/spend approve, else
 /// deny) — the flat proxy default would never match the namespaced names.
+/// Sign a `kriya.io.egress.mcp.deny` receipt for a remote upstream refused at boot by the egress
+/// allowlist (doc 24 §7.3 / L10). Written at the decision point — a denied upstream never connects,
+/// so without this the `deny` rows would never exist.
+fn record_egress_deny(
+    signer: &Signer,
+    actor: &Option<Actor>,
+    host: &str,
+    server: &str,
+    rule: Option<String>,
+    reason: String,
+) {
+    let io = IoRecord {
+        direction: IoDirection::Egress,
+        dest_host: Some(host.to_string()),
+        dest_kind: IoKind::Mcp,
+        method: None,
+        bytes_out: None,
+        bytes_in: None,
+        bytes_in_is_partial: false,
+        content_sha256: None,
+        hash_scheme: HashScheme::WireBytes,
+        decision: IoDecision::Deny,
+        policy_rule: rule,
+        approved_by: None,
+        reason: Some(reason),
+        server: Some(server.to_string()),
+    };
+    signer.record(
+        Receipt::new(
+            uuid::Uuid::new_v4().to_string(),
+            io.action_id(),
+            io.params(None),
+            false,
+            now_ms(),
+        )
+        .with_actor(actor.clone()),
+    );
+}
+
 fn run_broker(mut it: impl Iterator<Item = String>) -> std::io::Result<()> {
     let mut config: Option<PathBuf> = None;
     let mut policy: Option<PathBuf> = None;
@@ -637,11 +682,16 @@ fn run_broker(mut it: impl Iterator<Item = String>) -> std::io::Result<()> {
              (see: kriya-gateway broker --help)",
         )
     });
-    let text = std::fs::read_to_string(&cfg_path)
-        .unwrap_or_else(|e| usage_and_exit(&format!("cannot read broker config {cfg_path:?}: {e}")));
-    let cfg: BrokerConfig = serde_yaml::from_str(&text)
-        .unwrap_or_else(|e| usage_and_exit(&format!("broker config {cfg_path:?} is malformed: {e}")));
-    eprintln!("[kriya-gateway] loaded broker config: {}", cfg_path.display());
+    let text = std::fs::read_to_string(&cfg_path).unwrap_or_else(|e| {
+        usage_and_exit(&format!("cannot read broker config {cfg_path:?}: {e}"))
+    });
+    let cfg: BrokerConfig = serde_yaml::from_str(&text).unwrap_or_else(|e| {
+        usage_and_exit(&format!("broker config {cfg_path:?} is malformed: {e}"))
+    });
+    eprintln!(
+        "[kriya-gateway] loaded broker config: {}",
+        cfg_path.display()
+    );
 
     if cfg.upstreams.is_empty() {
         usage_and_exit(&format!(
@@ -654,7 +704,9 @@ fn run_broker(mut it: impl Iterator<Item = String>) -> std::io::Result<()> {
     let approval = approval.or(cfg.approval).unwrap_or_else(|| "deny".into());
     let actor_name = actor.or(cfg.actor);
     let user = user.or(cfg.user);
-    let name = name.or(cfg.name).unwrap_or_else(|| "kriya-gateway (broker)".into());
+    let name = name
+        .or(cfg.name)
+        .unwrap_or_else(|| "kriya-gateway (broker)".into());
 
     // Namespaces are slugified upstream names; reject collisions up front (two upstreams sharing a
     // namespace would silently merge tool sets and cross-route — a correctness bug, not a warning).
@@ -686,11 +738,36 @@ fn run_broker(mut it: impl Iterator<Item = String>) -> std::io::Result<()> {
     let actor = build_actor(actor_name, user);
     write_startup_attestation(&signer, signing_key.is_some(), &actor);
 
+    // Egress governance (doc 24 §7.3): if the policy carries an `egress:` tier, remote upstreams are
+    // allowlisted by host. The per-call tier + byte-budget + `kriya.io.*` receipt is enforced by the
+    // governor via a resolver over this namespace→host map; the STARTUP check below additionally
+    // refuses to connect a deny-tier host at all (closing landmine L3 for denied hosts).
+    let egress_policy = policy.egress().cloned();
+    let mut egress_targets: std::collections::HashMap<String, (String, String)> =
+        std::collections::HashMap::new();
+
     // Spawn each upstream, handshake it, cache its tools, and wrap it as a Front whose executor is
     // an McpProxyExecutor over that upstream's own client. One RouterServer then governs them all.
     let mut fronts: Vec<Front> = Vec::new();
     let mut summaries: Vec<String> = Vec::new();
     for (up, ns) in cfg.upstreams.iter().zip(&namespaces) {
+        // Startup allowlist check (L10): with a deny-tier egress destination, a remote upstream
+        // refuses to CONNECT at boot — receipted as kriya.io.egress.mcp.deny at the decision point,
+        // BEFORE the un-ledgered handshake below ever reaches it. stdio upstreams have no host to
+        // allowlist and are unaffected.
+        if let (Some(url), Some(ep)) = (&up.url, &egress_policy) {
+            let host = url_host(url);
+            if let EgressDecision::Deny { rule, reason } = ep.evaluate(&host) {
+                record_egress_deny(&signer, &actor, &host, &up.name, rule, reason);
+                eprintln!(
+                    "[kriya-gateway] broker: upstream '{}' ({host}) DENIED by egress allowlist — not connected",
+                    up.name
+                );
+                summaries.push(format!("{ns} ('{}', DENIED by egress)", up.name));
+                continue;
+            }
+        }
+
         // A local stdio upstream (`command`) or a remote one (`url`) — exactly one. The connect
         // path differs; everything after (handshake → tools → Front) is identical, which is the
         // whole point of the McpClient backend enum (W2-2).
@@ -713,29 +790,65 @@ fn run_broker(mut it: impl Iterator<Item = String>) -> std::io::Result<()> {
             )),
         };
         {
+            // The initialize/tools/list handshake here is PRE-GOVERNOR egress (landmine L3). For a
+            // remote upstream it is un-ledgered protocol overhead — MCP session setup, not an agent
+            // tool call — and it only runs for a host the egress tier already ALLOWED (the deny
+            // check above gates connection). Every subsequent governed `tools/call` IS receipted as
+            // kriya.io.egress.mcp.* by the governor.
             let mut guard = client.lock().unwrap();
             if let Err(e) = guard.initialize() {
-                usage_and_exit(&format!("broker: upstream '{}' handshake failed: {e}", up.name));
+                usage_and_exit(&format!(
+                    "broker: upstream '{}' handshake failed: {e}",
+                    up.name
+                ));
             }
         }
         let tools = {
             let mut guard = client.lock().unwrap();
-            guard
-                .list_tools()
-                .unwrap_or_else(|e| usage_and_exit(&format!(
+            guard.list_tools().unwrap_or_else(|e| {
+                usage_and_exit(&format!(
                     "broker: upstream '{}' tools/list failed: {e}",
                     up.name
-                )))
+                ))
+            })
         };
         let count = tools.len();
         let executor = Box::new(McpProxyExecutor::new(client));
         fronts.push(Front::new(ns.clone(), tools, executor));
         let kind = if up.url.is_some() { "remote" } else { "stdio" };
         summaries.push(format!("{ns} ('{}', {kind}, {count} tools)", up.name));
+        // Record the resolver target for a connected remote upstream so the governor can map a
+        // `<ns>__<tool>` call to its host for the per-call egress tier + io receipt.
+        if let Some(url) = &up.url {
+            egress_targets.insert(ns.clone(), (url_host(url), up.name.clone()));
+        }
     }
 
-    let mut server =
-        RouterServer::from_parts(name, fronts, policy, signer.clone(), approval_gate, actor.clone());
+    // Wrap the namespace→host map + tier into the governor's egress control (doc 24 §7.3). Absent
+    // egress policy → None → the broker governs exactly as before.
+    let egress_control = egress_policy.map(|ep| {
+        EgressControl::new(ep, move |action_id: &str, _params: &serde_json::Value| {
+            let ns = action_id
+                .split_once("__")
+                .map(|(ns, _)| ns)
+                .unwrap_or(action_id);
+            egress_targets.get(ns).map(|(host, server)| EgressTarget {
+                host: host.clone(),
+                kind: IoKind::Mcp,
+                server: Some(server.clone()),
+            })
+        })
+    });
+
+    let mut server = RouterServer::from_parts_with_egress(
+        name,
+        fronts,
+        policy,
+        signer.clone(),
+        approval_gate,
+        actor.clone(),
+        egress_control,
+    );
 
     let actor_desc = match &actor {
         Some(a) => format!("{}/{}", a.agent, a.user),

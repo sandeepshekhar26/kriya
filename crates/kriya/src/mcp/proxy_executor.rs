@@ -31,11 +31,18 @@ impl McpProxyExecutor {
 
 impl ActionExecutor for McpProxyExecutor {
     fn execute(&mut self, action_id: &str, params: &Value) -> ActionOutcome {
-        match self.client.lock().unwrap().call_tool(action_id, params) {
-            Ok(result) => map_result(result),
+        let mut client = self.client.lock().unwrap();
+        let result = client.call_tool(action_id, params);
+        // Take the governed-lane io observation the transport captured on this call (the HTTP lane
+        // records dest_host + observed payload bytes + content hash; stdio records nothing — doc 24
+        // §4.3). The governor turns a present `io` into a `kriya.io.*` receipt.
+        let io = client.take_last_io();
+        drop(client);
+        match result {
+            Ok(result) => map_result(result).with_io(io),
             // A dead / unreachable downstream is a failed outcome the agent can read — and one the
             // governor still signs a (failure) receipt for — never a panic that kills the session.
-            Err(e) => ActionOutcome::failed(format!("downstream unavailable: {e}")),
+            Err(e) => ActionOutcome::failed(format!("downstream unavailable: {e}")).with_io(io),
         }
     }
 }
@@ -54,12 +61,14 @@ fn map_result(result: CallToolResult) -> ActionOutcome {
             success: true,
             data,
             error: None,
+            io: None,
         }
     } else {
         ActionOutcome {
             success: false,
             data,
             error: Some(content_text(&result.content)),
+            io: None,
         }
     }
 }
