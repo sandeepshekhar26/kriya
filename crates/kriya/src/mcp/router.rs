@@ -42,7 +42,7 @@ use crate::permissions::{Decision, Policy};
 
 use super::approval::ApprovalGate;
 use super::executor::{ActionExecutor, ActionOutcome};
-use super::governor::{DispatchOutcome, Governor};
+use super::governor::{DispatchOutcome, EgressControl, Governor};
 use super::jsonrpc::{
     error_code, CallToolParams, CallToolResult, ListToolsResult, Request, Response, Tool,
 };
@@ -149,9 +149,30 @@ impl RouterServer {
         approval: Box<dyn ApprovalGate>,
         actor: Option<Actor>,
     ) -> Self {
+        Self::from_parts_with_egress(name, fronts, policy, signer, approval, actor, None)
+    }
+
+    /// Like [`from_parts`](Self::from_parts) but installs egress governance (doc 24 §7.3) on the
+    /// single governor. The broker supplies an [`EgressControl`] whose resolver maps a namespaced
+    /// `<upstream>__<tool>` action to that upstream's host, so a governed call to a remote MCP
+    /// upstream is allowlisted, budgeted, and receipted as `kriya.io.*`. `None` → no egress
+    /// governance, identical to `from_parts`.
+    pub fn from_parts_with_egress(
+        name: impl Into<String>,
+        fronts: Vec<Front>,
+        policy: Arc<Policy>,
+        signer: Arc<Signer>,
+        approval: Box<dyn ApprovalGate>,
+        actor: Option<Actor>,
+        egress: Option<EgressControl>,
+    ) -> Self {
         let (tools, executors) = Self::namespace_and_split(fronts);
         let executor = Box::new(RouterExecutor::new(executors));
-        let governor = Governor::new(policy.clone(), signer, approval, executor).with_actor(actor);
+        let mut governor =
+            Governor::new(policy.clone(), signer, approval, executor).with_actor(actor);
+        if let Some(e) = egress {
+            governor = governor.with_egress(e);
+        }
         Self {
             name: name.into(),
             governor,
@@ -343,6 +364,9 @@ impl RouterServer {
             DispatchOutcome::BudgetExceeded(reason) => {
                 CallToolResult::err(format!("blocked: {reason}"))
             }
+            DispatchOutcome::EgressDenied(reason) => {
+                CallToolResult::err(format!("blocked: {reason}"))
+            }
             DispatchOutcome::Executed { outcome, .. } => {
                 if outcome.success {
                     CallToolResult {
@@ -389,6 +413,7 @@ fn log_outcome(action_id: &str, outcome: &DispatchOutcome) {
         DispatchOutcome::Denied => "DENIED by policy".to_string(),
         DispatchOutcome::NotApproved => "BLOCKED — approval not granted".to_string(),
         DispatchOutcome::BudgetExceeded(r) => format!("BLOCKED — {r}"),
+        DispatchOutcome::EgressDenied(r) => format!("BLOCKED — egress: {r}"),
         DispatchOutcome::Executed { outcome, receipt } => format!(
             "performed ({}) · receipt sig={}…",
             if outcome.success { "ok" } else { "failed" },

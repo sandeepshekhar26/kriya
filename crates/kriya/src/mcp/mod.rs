@@ -59,9 +59,10 @@ pub mod router;
 pub use approval::GuiApproval;
 pub use approval::{ApprovalGate, AutoApprove, DenyApproval, TtyApproval};
 pub use executor::{
-    ActionExecutor, ActionOutcome, FnExecutor, PersistentProcessExecutor, ProcessExecutor,
+    ActionExecutor, ActionOutcome, FnExecutor, HashScheme, IoDecision, IoDirection, IoKind,
+    IoRecord, PersistentProcessExecutor, ProcessExecutor,
 };
-pub use governor::{DispatchOutcome, Governor};
+pub use governor::{DispatchOutcome, EgressControl, EgressTarget, Governor};
 pub use server::Server;
 
 #[cfg(feature = "mcp-client")]

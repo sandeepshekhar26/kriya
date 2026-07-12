@@ -19,6 +19,9 @@ use std::process::{Child, Command, Stdio};
 
 use serde_json::{json, Value};
 
+use super::executor::IoRecord;
+#[cfg(feature = "mcp-http")]
+use super::executor::{HashScheme, IoDecision, IoDirection, IoKind};
 use super::jsonrpc::{CallToolResult, InitializeResult, ListToolsResult, Tool, PROTOCOL_VERSION};
 
 /// The proxy's *own* downstream request ids live in a disjoint range from the client ids it
@@ -45,6 +48,10 @@ pub struct McpClient {
 /// original Front-1 path) or HTTP (a REMOTE MCP server over Streamable HTTP + SSE — the broker's
 /// W2-2 path). Both expose the same request/notify surface so [`McpProxyExecutor`] and the broker
 /// are identical regardless of transport.
+// The HTTP transport carries a `ureq::Agent` + per-request io capture, so it is chunkier than the
+// stdio variant. One `Backend` lives per client for the session's lifetime — boxing it would trade a
+// real indirection for a lint with no runtime benefit.
+#[allow(clippy::large_enum_variant)]
 enum Backend {
     Stdio(Transport<Box<dyn BufRead + Send>, Box<dyn Write + Send>>),
     #[cfg(feature = "mcp-http")]
@@ -159,6 +166,20 @@ impl McpClient {
             Backend::Stdio(t) => t.notify(method, params),
             #[cfg(feature = "mcp-http")]
             Backend::Http(h) => h.notify(method, params),
+        }
+    }
+
+    /// Take the governed-lane io observation captured on the most recent request, if the backend
+    /// records one. The HTTP transport captures `{dest_host, observed payload bytes, content hash}`
+    /// (doc 24 §4.1); the stdio backend records **nothing** — a stdio child's own outbound sockets
+    /// are invisible to kriya, which sees only the frame that crossed its pipe (doc 24 §4.3). The
+    /// [`super::proxy_executor::McpProxyExecutor`] calls this right after `call_tool` and attaches
+    /// it to the `ActionOutcome` so the governor can emit a `kriya.io.*` receipt.
+    pub fn take_last_io(&mut self) -> Option<IoRecord> {
+        match &mut self.backend {
+            Backend::Stdio(_) => None,
+            #[cfg(feature = "mcp-http")]
+            Backend::Http(h) => h.last_io.take(),
         }
     }
 }
@@ -278,6 +299,9 @@ impl<R: BufRead, W: Write> Transport<R, W> {
 #[cfg(feature = "mcp-http")]
 struct HttpTransport {
     url: String,
+    /// The destination host parsed once from `url` — the governed-lane egress dest_host (doc 24
+    /// §4.1). kriya is the TLS client here, so the request body is plaintext in hand.
+    host: String,
     /// Extra headers sent on every request (auth, etc.).
     extra_headers: Vec<(String, String)>,
     /// The MCP session id the server assigns on `initialize`, echoed on later requests. `None`
@@ -285,6 +309,10 @@ struct HttpTransport {
     session_id: Option<String>,
     next_id: u64,
     agent: ureq::Agent,
+    /// The io observation from the most recent request — taken by the proxy executor and attached
+    /// to the `ActionOutcome` for the governor to receipt. Overwritten each request; only the value
+    /// read immediately after a governed `tools/call` is consumed.
+    last_io: Option<IoRecord>,
 }
 
 #[cfg(feature = "mcp-http")]
@@ -292,10 +320,12 @@ impl HttpTransport {
     fn new(url: &str, extra_headers: Vec<(String, String)>) -> Self {
         Self {
             url: url.to_string(),
+            host: crate::permissions::url_host(url),
             extra_headers,
             session_id: None,
             next_id: PROXY_ID_BASE,
             agent: ureq::agent(),
+            last_io: None,
         }
     }
 
@@ -328,8 +358,31 @@ impl HttpTransport {
         if let Some(p) = params {
             msg["params"] = p;
         }
+        // Capture the OUTBOUND observation from the exact request body BEFORE sending — the bytes
+        // that will leave, hashed as exact wire strings (kriya is the TLS client, so this is the
+        // plaintext body). These are *observed payload bytes*, never wire/TLS/header/keep-alive
+        // bytes (doc 24 L2/L4). Set now so the bytes are recorded even if the reply later errors;
+        // `bytes_in` is filled in after the response is read. `decision` is a placeholder the
+        // governor overrides from its tier decision.
+        let body = msg.to_string();
+        self.last_io = Some(IoRecord {
+            direction: IoDirection::Egress,
+            dest_host: Some(self.host.clone()),
+            dest_kind: IoKind::Mcp,
+            method: Some(method.to_string()),
+            bytes_out: Some(body.len() as u64),
+            bytes_in: None,
+            bytes_in_is_partial: false,
+            content_sha256: Some(sha256_hex(body.as_bytes())),
+            hash_scheme: HashScheme::WireBytes,
+            decision: IoDecision::Allow,
+            policy_rule: None,
+            approved_by: None,
+            reason: None,
+            server: None,
+        });
 
-        let resp = match self.post().send_string(&msg.to_string()) {
+        let resp = match self.post().send_string(&body) {
             Ok(r) => r,
             Err(ureq::Error::Status(code, r)) => {
                 let body = r.into_string().unwrap_or_default();
@@ -347,11 +400,22 @@ impl HttpTransport {
         }
 
         if resp.content_type().contains("event-stream") {
-            read_sse_for_id(resp, id, method)
+            // SSE: count the bytes CONSUMED up to the correlated reply and flag the count partial —
+            // an early-return stream is never fully drained, so `bytes_in` is a lower bound (L2).
+            let (value, consumed) =
+                sse_find_result_counted(BufReader::new(resp.into_reader()), id, method)?;
+            if let Some(io) = self.last_io.as_mut() {
+                io.bytes_in = Some(consumed);
+                io.bytes_in_is_partial = true;
+            }
+            Ok(value)
         } else {
             let body = resp
                 .into_string()
                 .map_err(|e| format!("remote {method}: reading body: {e}"))?;
+            if let Some(io) = self.last_io.as_mut() {
+                io.bytes_in = Some(body.len() as u64);
+            }
             let v: Value = serde_json::from_str(&body)
                 .map_err(|e| format!("remote {method}: reply is not JSON: {e}"))?;
             extract_result(&v, id, method)
@@ -366,29 +430,26 @@ impl HttpTransport {
         match self.post().send_string(&msg.to_string()) {
             // The spec returns 202 Accepted (a 2xx, so ureq gives Ok) with no body — ignore it.
             Ok(_) => Ok(()),
-            Err(ureq::Error::Status(code, _)) => {
-                Err(format!("remote notify {method} HTTP {code}"))
-            }
+            Err(ureq::Error::Status(code, _)) => Err(format!("remote notify {method} HTTP {code}")),
             Err(e) => Err(format!("remote notify {method} failed: {e}")),
         }
     }
 }
 
-/// Read an SSE response stream, returning the `result` of the first JSON-RPC message whose id
-/// matches `id`. Interleaved notifications / server-initiated requests (other or absent ids) are
-/// skipped — the same correlation discipline the stdio transport applies.
-#[cfg(feature = "mcp-http")]
-fn read_sse_for_id(resp: ureq::Response, id: u64, method: &str) -> Result<Value, String> {
-    sse_find_result(BufReader::new(resp.into_reader()), id, method)
-}
-
 /// The SSE event-loop, generic over the byte source so it is unit-testable with an in-memory
 /// stream (no `ureq::Response`). Correlates the first `data:` event that parses to a JSON-RPC
-/// message with the matching `id`.
+/// message with the matching `id`, and returns the stream bytes CONSUMED to reach it. That count is
+/// a lower bound — the stream is not drained after the correlated reply — so the caller flags
+/// `bytes_in` partial (doc 24 L2).
 #[cfg(feature = "mcp-http")]
-fn sse_find_result<R: BufRead>(reader: R, id: u64, method: &str) -> Result<Value, String> {
+fn sse_find_result_counted<R: BufRead>(
+    reader: R,
+    id: u64,
+    method: &str,
+) -> Result<(Value, u64), String> {
     let mut data = String::new();
-    let mut check = |data: &str| -> Option<Result<Value, String>> {
+    let mut consumed: u64 = 0;
+    let check = |data: &str| -> Option<Result<Value, String>> {
         if data.is_empty() {
             return None;
         }
@@ -399,6 +460,7 @@ fn sse_find_result<R: BufRead>(reader: R, id: u64, method: &str) -> Result<Value
     };
     for line in reader.lines() {
         let line = line.map_err(|e| format!("remote {method}: SSE read: {e}"))?;
+        consumed += line.len() as u64 + 1; // +1 approximates the newline the line iterator strips
         if let Some(rest) = line.strip_prefix("data:") {
             if !data.is_empty() {
                 data.push('\n');
@@ -407,7 +469,7 @@ fn sse_find_result<R: BufRead>(reader: R, id: u64, method: &str) -> Result<Value
         } else if line.is_empty() {
             // Blank line ends one SSE event — try to correlate, then reset for the next event.
             if let Some(found) = check(&data) {
-                return found;
+                return found.map(|v| (v, consumed));
             }
             data.clear();
         }
@@ -415,11 +477,27 @@ fn sse_find_result<R: BufRead>(reader: R, id: u64, method: &str) -> Result<Value
     }
     // A stream that ended without a terminating blank line: try the trailing event.
     if let Some(found) = check(&data) {
-        return found;
+        return found.map(|v| (v, consumed));
     }
     Err(format!(
         "remote {method}: SSE stream ended before a reply for id {id}"
     ))
+}
+
+/// Back-compat wrapper returning just the correlated value (the unit tests drive this directly).
+#[cfg(all(test, feature = "mcp-http"))]
+fn sse_find_result<R: BufRead>(reader: R, id: u64, method: &str) -> Result<Value, String> {
+    sse_find_result_counted(reader, id, method).map(|(v, _)| v)
+}
+
+/// Lowercase-hex SHA-256 — the content commitment for a captured egress observation (over the exact
+/// wire request body; `hash_scheme: wire-bytes`).
+#[cfg(feature = "mcp-http")]
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
 }
 
 /// Pull `result` out of a JSON-RPC response value (or map a JSON-RPC error to `Err`). Shared by the
@@ -427,7 +505,9 @@ fn sse_find_result<R: BufRead>(reader: R, id: u64, method: &str) -> Result<Value
 #[cfg(feature = "mcp-http")]
 fn extract_result(v: &Value, id: u64, method: &str) -> Result<Value, String> {
     if v.get("id") != Some(&json!(id)) {
-        return Err(format!("remote {method}: reply id mismatch (expected {id})"));
+        return Err(format!(
+            "remote {method}: reply id mismatch (expected {id})"
+        ));
     }
     if let Some(err) = v.get("error") {
         let code = err.get("code").and_then(Value::as_i64).unwrap_or(0);
@@ -672,5 +752,25 @@ mod tests {
         let stream = "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"tail\"}";
         let got = sse_find_result(Cursor::new(stream), 1, "ping").unwrap();
         assert_eq!(got, json!("tail"));
+    }
+
+    /// L2: the SSE reader counts the bytes CONSUMED up to the correlated reply — the `bytes_in` the
+    /// transport records is that count, flagged partial (the stream is never fully drained).
+    #[cfg(feature = "mcp-http")]
+    #[test]
+    fn sse_counted_reports_bytes_consumed_up_to_the_reply() {
+        let stream = concat!(
+            "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{}}\n",
+            "\n",
+            "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n",
+            "\n",
+        );
+        let (val, consumed) =
+            sse_find_result_counted(Cursor::new(stream), 1, "tools/call").unwrap();
+        assert_eq!(val, json!({ "ok": true }));
+        assert!(
+            consumed > 0 && consumed <= stream.len() as u64 + 4,
+            "observed payload bytes are counted as a lower bound: {consumed}"
+        );
     }
 }

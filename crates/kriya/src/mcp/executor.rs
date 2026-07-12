@@ -10,11 +10,20 @@ use serde_json::Value;
 
 /// What running an action produced. `data` is whatever the handler returned (typically the
 /// refreshed app state) and is surfaced to the calling agent; `error` is set on failure.
+///
+/// `io` carries a **governed-lane I/O observation** (doc 24 §4.1) when the executor is one that
+/// actually crossed a network/connector lane — the HTTP upstream transport captures the
+/// destination + observed payload bytes + a content hash and hands it up here. It is crate-internal
+/// (NOT the wire receipt schema): the [`super::governor::Governor`] turns a present `io` into a
+/// standalone signed receipt in the reserved `kriya.io.*` vocabulary. `None` on every executor that
+/// isn't an egress lane — so nothing about the existing in-process / reach-in / computer-use fronts
+/// changes.
 #[derive(Debug, Clone)]
 pub struct ActionOutcome {
     pub success: bool,
     pub data: Value,
     pub error: Option<String>,
+    pub io: Option<IoRecord>,
 }
 
 impl ActionOutcome {
@@ -23,6 +32,7 @@ impl ActionOutcome {
             success: true,
             data,
             error: None,
+            io: None,
         }
     }
 
@@ -31,7 +41,206 @@ impl ActionOutcome {
             success: false,
             data: Value::Null,
             error: Some(error.into()),
+            io: None,
         }
+    }
+
+    /// Attach a governed-lane I/O observation. Chainable on top of [`ActionOutcome::ok`]/`failed`;
+    /// the governor reads it to emit the `kriya.io.*` receipt.
+    pub fn with_io(mut self, io: Option<IoRecord>) -> Self {
+        self.io = io;
+        self
+    }
+}
+
+/// One governed I/O event captured alongside an action — the raw material for a `kriya.io.*`
+/// receipt (doc 24 §4.1/§4.2). **Crate-internal**, never the wire schema: the receipt itself rides
+/// the frozen `SignedReceipt` shape with a reserved `action_id` and these fields as its `params`.
+///
+/// The honest ceiling is baked into the field docs: bytes are *observed payload bytes* (never
+/// wire/TLS/header bytes — doc 24 L2/L4), `content_sha256` is a *commitment to observed content
+/// under the named scheme* and is deliberately **not** recomputable from these fields (L7), and a
+/// `deny` record is written at the decision point, before/instead of execution (L10).
+#[derive(Debug, Clone)]
+pub struct IoRecord {
+    /// `egress` (agent → outside) or `ingress` (outside → agent) — one of the two closed values.
+    pub direction: IoDirection,
+    /// The destination host on a lane where "destination" is a host (the gateway HTTP upstream, a
+    /// WebFetch URL). `None` where it is not (a stdio child's argv, an `mcp` server whose endpoint
+    /// isn't claimable — doc 24 §4.3): kriya sees only what crossed its own pipe.
+    pub dest_host: Option<String>,
+    /// The closed four-value kind — never a fifth (doc 24 §4.2 rule 5 / §6-H6).
+    pub dest_kind: IoKind,
+    /// The MCP method / HTTP verb when meaningful (`tools/call`, `GET`), else `None`.
+    pub method: Option<String>,
+    /// Observed *payload* bytes sent — request-body length, never wire/TLS/header bytes (L2/L4).
+    pub bytes_out: Option<u64>,
+    /// Observed *payload* bytes received. On an SSE stream this is the bytes consumed up to the
+    /// correlated reply, with [`Self::bytes_in_is_partial`] set (L2).
+    pub bytes_in: Option<u64>,
+    /// `true` when `bytes_in` is a lower bound (SSE early-return; chunked with no trustworthy
+    /// length). The receipt label is always "observed payload bytes"; this flag says how partial.
+    pub bytes_in_is_partial: bool,
+    /// Hex SHA-256 / HMAC committing to the observed content under [`Self::hash_scheme`]. A
+    /// commitment to observed content, NOT recomputable from these fields (L7).
+    pub content_sha256: Option<String>,
+    /// Which bytes `content_sha256` commits to — required on every emitted receipt (L6 / §4.2 r6).
+    pub hash_scheme: HashScheme,
+    /// The policy decision that produced this record (L10 for `deny`).
+    pub decision: IoDecision,
+    /// The operator-authored policy pattern the destination matched (`*.vendor.com`), when a rule
+    /// matched — carried as the receipt's `policy_rule` param so the destination is echoed only as a
+    /// string the operator already authored.
+    pub policy_rule: Option<String>,
+    /// The operator identity that approved an `approve`-tier egress → the receipt's `approved_by`.
+    pub approved_by: Option<String>,
+    /// A short, human-readable reason on a `deny` (allowlist, byte budget, fail-closed).
+    pub reason: Option<String>,
+    /// The server NAME for an `mcp` dest_kind whose endpoint is not claimable (the hook lane) —
+    /// carried in a *separate* param, never conflated with a host (doc 24 §6-H6).
+    pub server: Option<String>,
+}
+
+/// Egress (agent → outside) or ingress (outside → agent). The first facet of a `kriya.io.*` id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IoDirection {
+    Egress,
+    Ingress,
+}
+
+impl IoDirection {
+    pub fn facet(self) -> &'static str {
+        match self {
+            IoDirection::Egress => "egress",
+            IoDirection::Ingress => "ingress",
+        }
+    }
+}
+
+/// The closed four-value destination kind — the second facet of a `kriya.io.*` id. Pinning it to
+/// exactly these four (never a fifth like "mcp-connector") is what keeps redaction structural and
+/// policy prefix-globs total (doc 24 §4.2 rule 5 / §6-H6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IoKind {
+    Mcp,
+    Http,
+    Model,
+    File,
+}
+
+impl IoKind {
+    pub fn facet(self) -> &'static str {
+        match self {
+            IoKind::Mcp => "mcp",
+            IoKind::Http => "http",
+            IoKind::Model => "model",
+            IoKind::File => "file",
+        }
+    }
+}
+
+/// What `content_sha256` commits to. The gateway lane hashes exact wire strings; the hook lane
+/// hashes the canonical key-sorted serialization — two different definitions under one field, so
+/// the receipt must say which (doc 24 §4.2 rule 6 / L6), or the IPE guarantee reverses under
+/// sampling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HashScheme {
+    WireBytes,
+    CanonicalJson,
+}
+
+impl HashScheme {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HashScheme::WireBytes => "wire-bytes",
+            HashScheme::CanonicalJson => "canonical-json",
+        }
+    }
+}
+
+/// The decision facet of a `kriya.io.*` id: `allow` (no gate), `approve` (approval-gated + granted),
+/// `deny` (blocked: allowlist / byte budget / fail-closed / refused approval).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IoDecision {
+    Allow,
+    Deny,
+    Approve,
+}
+
+impl IoDecision {
+    pub fn facet(self) -> &'static str {
+        match self {
+            IoDecision::Allow => "allow",
+            IoDecision::Deny => "deny",
+            IoDecision::Approve => "approve",
+        }
+    }
+}
+
+impl IoRecord {
+    /// The reserved `action_id` this record signs under: `kriya.io.<direction>.<kind>.<decision>`
+    /// — one of the 24 enumerated ids (2 × 4 × 3). The closed facets are what make the id
+    /// prefix-globbable by policy and structurally redactable by the console minimizer.
+    pub fn action_id(&self) -> String {
+        format!(
+            "kriya.io.{}.{}.{}",
+            self.direction.facet(),
+            self.dest_kind.facet(),
+            self.decision.facet()
+        )
+    }
+
+    /// Build the receipt `params` for this record: `corr` (the correlated action `step_id`, absent
+    /// on a decision-point deny that never produced an action receipt) plus every present io field.
+    /// Correlation is by `corr`, never adjacency (doc 24 L5).
+    pub fn params(&self, corr: Option<&str>) -> Value {
+        let mut m = serde_json::Map::new();
+        if let Some(c) = corr {
+            m.insert("corr".into(), Value::String(c.to_string()));
+        }
+        if let Some(h) = &self.dest_host {
+            m.insert("dest_host".into(), Value::String(h.clone()));
+        }
+        m.insert(
+            "dest_kind".into(),
+            Value::String(self.dest_kind.facet().to_string()),
+        );
+        if let Some(s) = &self.server {
+            m.insert("server".into(), Value::String(s.clone()));
+        }
+        if let Some(meth) = &self.method {
+            m.insert("method".into(), Value::String(meth.clone()));
+        }
+        if let Some(b) = self.bytes_out {
+            m.insert("bytes_out".into(), Value::from(b));
+        }
+        if let Some(b) = self.bytes_in {
+            m.insert("bytes_in".into(), Value::from(b));
+            if self.bytes_in_is_partial {
+                m.insert("bytes_in_is_partial".into(), Value::Bool(true));
+            }
+        }
+        if let Some(h) = &self.content_sha256 {
+            m.insert("content_sha256".into(), Value::String(h.clone()));
+        }
+        m.insert(
+            "hash_scheme".into(),
+            Value::String(self.hash_scheme.as_str().to_string()),
+        );
+        if let Some(r) = &self.policy_rule {
+            m.insert("policy_rule".into(), Value::String(r.clone()));
+        }
+        if let Some(a) = &self.approved_by {
+            m.insert("approved_by".into(), Value::String(a.clone()));
+        }
+        if let Some(r) = &self.reason {
+            m.insert("reason".into(), Value::String(r.clone()));
+        }
+        m.insert(
+            "decision".into(),
+            Value::String(self.decision.facet().to_string()),
+        );
+        Value::Object(m)
     }
 }
 
