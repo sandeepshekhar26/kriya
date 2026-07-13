@@ -42,7 +42,7 @@ use crate::permissions::{Decision, Policy};
 
 use super::approval::ApprovalGate;
 use super::executor::{ActionExecutor, ActionOutcome};
-use super::governor::{DispatchOutcome, EgressControl, Governor};
+use super::governor::{DispatchOutcome, EgressControl, Governor, IngressControl};
 use super::jsonrpc::{
     error_code, CallToolParams, CallToolResult, ListToolsResult, Request, Response, Tool,
 };
@@ -166,12 +166,37 @@ impl RouterServer {
         actor: Option<Actor>,
         egress: Option<EgressControl>,
     ) -> Self {
+        Self::from_parts_with_egress_and_ingress(
+            name, fronts, policy, signer, approval, actor, egress, None,
+        )
+    }
+
+    /// Like [`from_parts_with_egress`](Self::from_parts_with_egress) but additionally installs
+    /// ingress governance (doc 24 §11 B12) on the single governor. The broker supplies an
+    /// [`IngressControl`] whose resolver maps a namespaced `<upstream>__<tool>` action back to that
+    /// upstream's name, so a governed call's RESPONSE is classified by the upstream's trust class
+    /// and receipted as `kriya.io.ingress.*`. `None` → no ingress governance, identical to
+    /// `from_parts_with_egress`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_parts_with_egress_and_ingress(
+        name: impl Into<String>,
+        fronts: Vec<Front>,
+        policy: Arc<Policy>,
+        signer: Arc<Signer>,
+        approval: Box<dyn ApprovalGate>,
+        actor: Option<Actor>,
+        egress: Option<EgressControl>,
+        ingress: Option<IngressControl>,
+    ) -> Self {
         let (tools, executors) = Self::namespace_and_split(fronts);
         let executor = Box::new(RouterExecutor::new(executors));
         let mut governor =
             Governor::new(policy.clone(), signer, approval, executor).with_actor(actor);
         if let Some(e) = egress {
             governor = governor.with_egress(e);
+        }
+        if let Some(i) = ingress {
+            governor = governor.with_ingress(i);
         }
         Self {
             name: name.into(),

@@ -72,8 +72,8 @@ use kriya::audit::{default_audit_dir, now_ms, Actor, Receipt, Signer, ATTESTATIO
 use kriya::mcp::GuiApproval;
 use kriya::mcp::{
     ApprovalGate, AutoApprove, DenyApproval, EgressControl, EgressTarget, Governor, HashScheme,
-    IoDecision, IoDirection, IoKind, IoRecord, McpClient, McpProxyExecutor, ProxyServer,
-    TtyApproval,
+    IngressControl, IoDecision, IoDirection, IoKind, IoRecord, McpClient, McpProxyExecutor,
+    ProxyServer, TtyApproval,
 };
 // Front 2 (reach-in) types — only when built with `--features reach-in`. The real driver is macOS.
 #[cfg(all(feature = "reach-in", target_os = "macos"))]
@@ -87,10 +87,12 @@ use kriya::mcp::MacDesktopBackend;
 use kriya::mcp::{ComputerUseExecutor, ComputerUseServer, DesktopBackend};
 // Router v2 (router feature) — ONE endpoint over many fronts under ONE governor. macOS-only build of
 // the real `run_router` (it assembles the macOS reach-in + computer-use backends).
+use kriya::mcp::jsonrpc::Tool;
 #[cfg(all(feature = "router", target_os = "macos"))]
 use kriya::mcp::{Front, RouterServer};
 use kriya::permissions::{
-    default_broker_policy, default_proxy_policy, url_host, EgressDecision, Policy,
+    default_broker_policy, default_proxy_policy, url_host, ConnectorRegistryPolicy, EgressDecision,
+    Policy,
 };
 // Broker (W2): the router core multiplexes N proxied MCP upstreams under one governor. Available
 // under `mcp-client` (no OS deps) — same gate as the proxy this binary already requires. Guarded to
@@ -560,12 +562,13 @@ fn connect_remote_upstream(
     name: &str,
     url: &str,
     headers: &std::collections::BTreeMap<String, String>,
+    ssrf_guard: bool,
 ) -> Arc<Mutex<McpClient>> {
     let hdrs: Vec<(String, String)> = headers
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    match McpClient::connect_http(url, hdrs) {
+    match McpClient::connect_http(url, hdrs, ssrf_guard) {
         Ok(c) => Arc::new(Mutex::new(c)),
         Err(e) => usage_and_exit(&format!(
             "broker: failed to connect remote upstream '{name}' ({url}): {e}"
@@ -578,6 +581,7 @@ fn connect_remote_upstream(
     name: &str,
     _url: &str,
     _headers: &std::collections::BTreeMap<String, String>,
+    _ssrf_guard: bool,
 ) -> Arc<Mutex<McpClient>> {
     usage_and_exit(&format!(
         "broker: upstream '{name}' is remote (`url:`), but this build has no HTTP support — \
@@ -625,6 +629,7 @@ fn record_egress_deny(
         approved_by: None,
         reason: Some(reason),
         server: Some(server.to_string()),
+        flags: Vec::new(),
     };
     signer.record(
         Receipt::new(
@@ -636,6 +641,145 @@ fn record_egress_deny(
         )
         .with_actor(actor.clone()),
     );
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
+/// Canonical key-sorted JSON serialization — matches `kriya::audit`'s param canonicalization (and
+/// `kriya-hook`'s own private copy) so a hash taken here is stable regardless of struct field
+/// declaration order.
+fn canonical_json_string(v: &serde_json::Value) -> String {
+    serde_json::to_string(&canonical_value(v)).unwrap_or_default()
+}
+
+fn canonical_value(v: &serde_json::Value) -> serde_json::Value {
+    match v {
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let mut out = serde_json::Map::new();
+            for k in keys {
+                out.insert(k.clone(), canonical_value(&map[k]));
+            }
+            serde_json::Value::Object(out)
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(canonical_value).collect())
+        }
+        other => other.clone(),
+    }
+}
+
+/// SHA-256 hex of a tool's canonical (key-sorted) JSON description — the B10 connector-registry
+/// drift signal (doc 24 §11 B10). Computed identically wherever a tool needs comparing: here at
+/// discovery time, and by whatever authors an `approved:` entry (the Console's "approve connector"
+/// flow) — both sides must hash `name` + `description` + `input_schema` the same way for a match to
+/// mean anything.
+fn connector_tool_hash(tool: &Tool) -> String {
+    let v = serde_json::to_value(tool).unwrap_or_default();
+    sha256_hex(canonical_json_string(&v).as_bytes())
+}
+
+/// Sign a `kriya.io.egress.mcp.deny` receipt for a connector tool the registry disabled at discovery
+/// time (doc 24 §11 B10) — either never approved, or approved but its description has drifted from
+/// the hash it was approved under (the tool-poisoning signal). No `dest_host`: this is about a
+/// specific TOOL, not a destination (doc 24 §4.3's "not claimable" case) — `server` carries the
+/// connector namespace instead.
+fn record_connector_disabled(
+    signer: &Signer,
+    actor: &Option<Actor>,
+    namespace: &str,
+    tool: &str,
+    reason: String,
+) {
+    let io = IoRecord {
+        direction: IoDirection::Egress,
+        dest_host: None,
+        dest_kind: IoKind::Mcp,
+        method: None,
+        bytes_out: None,
+        bytes_in: None,
+        bytes_in_is_partial: false,
+        content_sha256: None,
+        hash_scheme: HashScheme::WireBytes,
+        decision: IoDecision::Deny,
+        policy_rule: None,
+        approved_by: None,
+        reason: Some(format!("{reason} (tool={namespace}__{tool})")),
+        server: Some(namespace.to_string()),
+        flags: Vec::new(),
+    };
+    signer.record(
+        Receipt::new(
+            uuid::Uuid::new_v4().to_string(),
+            io.action_id(),
+            io.params(None),
+            false,
+            now_ms(),
+        )
+        .with_actor(actor.clone()),
+    );
+}
+
+/// B10: filter `tools` down to those the connector registry allows — approved, with a matching
+/// live description hash. An absent/disabled registry passes every tool through unchanged (opt-in,
+/// never silently restrictive by default). A tool that's new (never approved) or drifted (approved
+/// once, description since changed) is dropped from what the router even registers — "disabled"
+/// means structurally absent (never listed, never callable), not merely deny-on-call — and this IS
+/// the decision point, so it's receipted here (a dropped tool is never seen again this session).
+fn filter_connector_registry(
+    tools: Vec<Tool>,
+    namespace: &str,
+    registry: Option<&ConnectorRegistryPolicy>,
+    signer: &Signer,
+    actor: &Option<Actor>,
+) -> Vec<Tool> {
+    let Some(reg) = registry.filter(|r| r.enabled) else {
+        return tools;
+    };
+    tools
+        .into_iter()
+        .filter(|tool| {
+            match reg
+                .approved
+                .iter()
+                .find(|a| a.upstream == namespace && a.tool == tool.name)
+            {
+                None => {
+                    record_connector_disabled(
+                        signer,
+                        actor,
+                        namespace,
+                        &tool.name,
+                        "connector tool not in the approved registry — disabled until approved (B10)"
+                            .to_string(),
+                    );
+                    false
+                }
+                Some(approved) => {
+                    if connector_tool_hash(tool) == approved.description_hash {
+                        true
+                    } else {
+                        record_connector_disabled(
+                            signer,
+                            actor,
+                            namespace,
+                            &tool.name,
+                            "connector tool description drifted from its approved hash — disabled \
+                             until re-approved (B10)"
+                                .to_string(),
+                        );
+                        false
+                    }
+                }
+            }
+        })
+        .collect()
 }
 
 fn run_broker(mut it: impl Iterator<Item = String>) -> std::io::Result<()> {
@@ -779,7 +923,13 @@ fn run_broker(mut it: impl Iterator<Item = String>) -> std::io::Result<()> {
                     up.name
                 )),
             },
-            (None, Some(url)) => connect_remote_upstream(&up.name, url, &up.headers),
+            (None, Some(url)) => {
+                let ssrf_guard = policy
+                    .detection()
+                    .and_then(|d| d.ssrf_guard)
+                    .is_some_and(|g| g.enabled);
+                connect_remote_upstream(&up.name, url, &up.headers, ssrf_guard)
+            }
             (Some(_), Some(_)) => usage_and_exit(&format!(
                 "broker: upstream '{}' sets both `command` and `url` — pick one",
                 up.name
@@ -812,6 +962,17 @@ fn run_broker(mut it: impl Iterator<Item = String>) -> std::io::Result<()> {
                 ))
             })
         };
+        // B10 connector registry (doc 24 §11): drop any tool that's new or drifted BEFORE it's ever
+        // registered with the router — disabled means the router never learns it exists.
+        let tools = filter_connector_registry(
+            tools,
+            &up.name,
+            policy
+                .detection()
+                .and_then(|d| d.connector_registry.as_ref()),
+            &signer,
+            &actor,
+        );
         let count = tools.len();
         let executor = Box::new(McpProxyExecutor::new(client));
         fronts.push(Front::new(ns.clone(), tools, executor));
@@ -840,7 +1001,20 @@ fn run_broker(mut it: impl Iterator<Item = String>) -> std::io::Result<()> {
         })
     });
 
-    let mut server = RouterServer::from_parts_with_egress(
+    // Wrap the per-server trust classes into the governor's ingress control (doc 24 §11 B12). The
+    // resolver maps a namespaced `<upstream>__<tool>` action back to its upstream name — the same
+    // convention `egress_control`'s resolver above uses to go the other way (name → host). Absent
+    // policy → None → the broker governs exactly as before.
+    let ingress_control = policy
+        .detection()
+        .and_then(|d| d.mcp_response.clone())
+        .map(|mrp| {
+            IngressControl::new(mrp, |action_id: &str| {
+                action_id.split_once("__").map(|(ns, _)| ns.to_string())
+            })
+        });
+
+    let mut server = RouterServer::from_parts_with_egress_and_ingress(
         name,
         fronts,
         policy,
@@ -848,6 +1022,7 @@ fn run_broker(mut it: impl Iterator<Item = String>) -> std::io::Result<()> {
         approval_gate,
         actor.clone(),
         egress_control,
+        ingress_control,
     );
 
     let actor_desc = match &actor {
@@ -1577,5 +1752,164 @@ mod tests {
             "computer_use.jsonl"
         );
         assert_eq!(p.parent().unwrap(), default_audit_dir());
+    }
+
+    // ---- B10: connector registry + drift detection (doc 24 §11 / EG-P) ----------------------
+
+    fn mk_tool(name: &str, description: &str) -> Tool {
+        Tool {
+            name: name.to_string(),
+            description: description.to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    fn signer_with_log() -> (Signer, std::path::PathBuf) {
+        let log = std::env::temp_dir().join(format!("kriya-b10-{}.jsonl", uuid::Uuid::new_v4()));
+        (Signer::with_log_path(log.clone()), log)
+    }
+
+    fn io_lines(log: &std::path::Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(log)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .filter(|v| {
+                v["action_id"]
+                    .as_str()
+                    .map(|a| a.starts_with("kriya.io."))
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn connector_tool_hash_changes_when_the_description_drifts() {
+        let a = connector_tool_hash(&mk_tool("delete_all", "deletes everything in scope"));
+        let b = connector_tool_hash(&mk_tool(
+            "delete_all",
+            "deletes everything in scope, now with more",
+        ));
+        assert_ne!(
+            a, b,
+            "a changed description must change the hash (that's the whole point)"
+        );
+        // Deterministic: hashing the SAME tool twice gives the SAME hash.
+        let a2 = connector_tool_hash(&mk_tool("delete_all", "deletes everything in scope"));
+        assert_eq!(a, a2);
+    }
+
+    #[test]
+    fn b10_registry_allows_an_approved_tool_with_a_matching_hash() {
+        let (signer, log) = signer_with_log();
+        let actor = None;
+        let tool = mk_tool("list_widgets", "lists widgets in the warehouse");
+        let hash = connector_tool_hash(&tool);
+        let registry = ConnectorRegistryPolicy {
+            enabled: true,
+            approved: vec![kriya::permissions::ApprovedConnectorTool {
+                upstream: "widgets".to_string(),
+                tool: "list_widgets".to_string(),
+                description_hash: hash,
+            }],
+        };
+        let kept =
+            filter_connector_registry(vec![tool], "widgets", Some(&registry), &signer, &actor);
+        assert_eq!(kept.len(), 1, "an approved, unchanged tool passes through");
+        assert!(
+            io_lines(&log).is_empty(),
+            "no deny receipt for a clean pass"
+        );
+    }
+
+    #[test]
+    fn b10_registry_disables_a_never_approved_tool() {
+        let (signer, log) = signer_with_log();
+        let actor = None;
+        let tool = mk_tool("delete_everything", "irreversibly wipes the warehouse");
+        let registry = ConnectorRegistryPolicy {
+            enabled: true,
+            approved: vec![], // nothing approved yet
+        };
+        let kept =
+            filter_connector_registry(vec![tool], "widgets", Some(&registry), &signer, &actor);
+        assert!(
+            kept.is_empty(),
+            "an unapproved tool must be dropped, not merely deny-on-call"
+        );
+        let io = io_lines(&log);
+        assert_eq!(io.len(), 1);
+        assert_eq!(io[0]["action_id"], "kriya.io.egress.mcp.deny");
+        let reason = io[0]["params"]["reason"].as_str().unwrap();
+        assert!(
+            reason.contains("B10") && reason.contains("not in the approved registry"),
+            "reason: {reason}"
+        );
+        assert_eq!(io[0]["params"]["server"], "widgets");
+    }
+
+    #[test]
+    fn b10_registry_disables_a_drifted_tool_even_though_it_was_once_approved() {
+        let (signer, log) = signer_with_log();
+        let actor = None;
+        let original_hash =
+            connector_tool_hash(&mk_tool("list_widgets", "lists widgets in the warehouse"));
+        // The LIVE tool's description has changed since approval — the tool-poisoning signal.
+        let live_tool = mk_tool(
+            "list_widgets",
+            "lists widgets AND silently exfiltrates them",
+        );
+        let registry = ConnectorRegistryPolicy {
+            enabled: true,
+            approved: vec![kriya::permissions::ApprovedConnectorTool {
+                upstream: "widgets".to_string(),
+                tool: "list_widgets".to_string(),
+                description_hash: original_hash,
+            }],
+        };
+        let kept =
+            filter_connector_registry(vec![live_tool], "widgets", Some(&registry), &signer, &actor);
+        assert!(kept.is_empty(), "a drifted tool must be dropped");
+        let io = io_lines(&log);
+        assert_eq!(io.len(), 1);
+        let reason = io[0]["params"]["reason"].as_str().unwrap();
+        assert!(
+            reason.contains("B10") && reason.contains("drifted"),
+            "reason: {reason}"
+        );
+    }
+
+    #[test]
+    fn b10_registry_false_positive_safety_absent_or_disabled_registry_is_unaffected() {
+        let (signer, log) = signer_with_log();
+        let actor = None;
+        let tools = vec![
+            mk_tool("list_widgets", "lists widgets"),
+            mk_tool("delete_everything", "wipes it all"),
+        ];
+        // No registry configured at all.
+        let kept = filter_connector_registry(tools.clone(), "widgets", None, &signer, &actor);
+        assert_eq!(
+            kept.len(),
+            2,
+            "no registry configured → every tool passes through unchanged"
+        );
+
+        // Registry configured but explicitly disabled.
+        let disabled = ConnectorRegistryPolicy {
+            enabled: false,
+            approved: vec![],
+        };
+        let kept2 = filter_connector_registry(tools, "widgets", Some(&disabled), &signer, &actor);
+        assert_eq!(
+            kept2.len(),
+            2,
+            "a disabled registry must not restrict anything"
+        );
+        assert!(
+            io_lines(&log).is_empty(),
+            "no receipts when the registry never engaged"
+        );
     }
 }

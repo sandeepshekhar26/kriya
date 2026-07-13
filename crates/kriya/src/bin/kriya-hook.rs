@@ -309,6 +309,7 @@ fn emit_io_egress(
         approved_by: None,
         reason,
         server,
+        flags: Vec::new(),
     };
     signer.record(
         Receipt::new(
@@ -351,6 +352,7 @@ fn emit_io_ingress(
         approved_by: None,
         reason: None,
         server,
+        flags: Vec::new(),
     };
     signer.record(
         Receipt::new(
@@ -730,6 +732,7 @@ mod tests {
             approved_by: None,
             reason: None,
             server: None,
+            flags: Vec::new(),
         };
         let params = io.params(Some("corr-x")).to_string();
         assert!(

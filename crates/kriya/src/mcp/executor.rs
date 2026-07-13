@@ -99,6 +99,13 @@ pub struct IoRecord {
     /// The server NAME for an `mcp` dest_kind whose endpoint is not claimable (the hook lane) —
     /// carried in a *separate* param, never conflated with a host (doc 24 §6-H6).
     pub server: Option<String>,
+    /// Additive detection-pack signals (doc 24 §11 / EG-P) that rode ALONG with this record rather
+    /// than deciding it — e.g. an `AlertOrDeny::Alert` DNS-exfil match on an otherwise-allowed
+    /// egress. Each entry is a short self-describing tag (`"b5-dns-exfil:entropy=4.32"`); never a
+    /// raw matched value (B7's redact-or-deny keeps secret/PII values out of every flag string, by
+    /// construction — type+hash only, same rule as the rest of the receipt). Empty on the common
+    /// path; a `deny` decision never needs a flag because [`Self::reason`] already says why.
+    pub flags: Vec<String>,
 }
 
 /// Egress (agent → outside) or ingress (outside → agent). The first facet of a `kriya.io.*` id.
@@ -235,6 +242,12 @@ impl IoRecord {
         }
         if let Some(r) = &self.reason {
             m.insert("reason".into(), Value::String(r.clone()));
+        }
+        if !self.flags.is_empty() {
+            m.insert(
+                "flags".into(),
+                Value::Array(self.flags.iter().cloned().map(Value::String).collect()),
+            );
         }
         m.insert(
             "decision".into(),
