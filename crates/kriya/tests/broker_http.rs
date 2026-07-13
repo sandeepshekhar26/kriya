@@ -103,7 +103,12 @@ fn spawn_http_mcp_server(n_requests: usize) -> (String, std::thread::JoinHandle<
     (url, handle)
 }
 
-fn write_http(stream: &mut std::net::TcpStream, status: &str, body: Option<&str>, session: Option<&str>) {
+fn write_http(
+    stream: &mut std::net::TcpStream,
+    status: &str,
+    body: Option<&str>,
+    session: Option<&str>,
+) {
     let mut head = format!("HTTP/1.1 {status}\r\nConnection: close\r\n");
     if let Some(s) = session {
         head.push_str(&format!("Mcp-Session-Id: {s}\r\n"));
@@ -154,7 +159,7 @@ fn broker_governs_a_remote_http_upstream_and_signs_it() {
 
     // Connect the REMOTE upstream over HTTP and wrap it exactly as the broker binary does.
     let client = Arc::new(Mutex::new(
-        McpClient::connect_http(&url, vec![]).expect("connect http upstream"),
+        McpClient::connect_http(&url, vec![], false).expect("connect http upstream"),
     ));
     let tools = {
         let mut g = client.lock().unwrap();
@@ -175,14 +180,26 @@ fn broker_governs_a_remote_http_upstream_and_signs_it() {
 
     // Read is allowed and routed to the remote server.
     let read = call(&mut server, "widgets__list_widgets", json!({}));
-    assert!(read["result"].get("isError").is_none(), "allowed remote read: {read}");
-    assert!(read["result"]["content"][0]["text"].as_str().unwrap().contains("ran list_widgets"));
+    assert!(
+        read["result"].get("isError").is_none(),
+        "allowed remote read: {read}"
+    );
+    assert!(read["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("ran list_widgets"));
 
     // Destructive is approval-gated (AutoApprove clears it), routed to the remote, and the remote
     // ONLY answered because the session id captured on initialize was echoed on this call.
     let del = call(&mut server, "widgets__delete_widget", json!({ "id": "w1" }));
-    assert!(del["result"].get("isError").is_none(), "approved remote delete (session echoed): {del}");
-    assert!(del["result"]["content"][0]["text"].as_str().unwrap().contains("ran delete_widget"));
+    assert!(
+        del["result"].get("isError").is_none(),
+        "approved remote delete (session echoed): {del}"
+    );
+    assert!(del["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("ran delete_widget"));
 
     // The one broker chain holds exactly the two executed remote calls, both verifying.
     let text = std::fs::read_to_string(&log).unwrap();

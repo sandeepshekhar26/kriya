@@ -33,7 +33,11 @@ use serde_json::Value;
 
 use crate::audit::{now_ms, Actor, Receipt, SignedReceipt, Signer};
 use crate::budget::BudgetTracker;
-use crate::permissions::{Decision, EgressDecision, Policy};
+use crate::permissions::{
+    canary_match, evaluate_operation_rails, max_subdomain_entropy, scan_secrets_pii,
+    ssrf_disallowed_reason, AlertOrDeny, Decision, EgressDecision, McpResponsePolicy, Policy,
+    RailOutcome, RedactOrDeny, TrustClass,
+};
 
 use super::approval::ApprovalGate;
 use super::executor::{
@@ -128,6 +132,96 @@ impl EgressControl {
     }
 }
 
+/// Ingress governance (doc 24 §11 B12) wired onto a [`Governor`]. `policy` holds the per-server
+/// trust classes; `resolver` maps an action id to the server name whose RESPONSE it carries. The
+/// broker supplies `<namespace>__<tool>` splitting; `Governor` itself stays agnostic of that naming
+/// convention, exactly like [`EgressControl`]'s resolver keeps host-resolution out of `Governor`.
+/// Absent on a `Governor` → byte-identical to pre-EG-P.
+pub struct IngressControl {
+    policy: McpResponsePolicy,
+    #[allow(clippy::type_complexity)]
+    resolver: Box<dyn Fn(&str) -> Option<String> + Send>,
+}
+
+impl IngressControl {
+    pub fn new(
+        policy: McpResponsePolicy,
+        resolver: impl Fn(&str) -> Option<String> + Send + 'static,
+    ) -> Self {
+        Self {
+            policy,
+            resolver: Box::new(resolver),
+        }
+    }
+}
+
+/// B12 core: resolve the response's server via `ingress.resolver`, classify it, and decide what
+/// happens to `outcome`. `None` if the resolver can't name a server for this action (an action id
+/// outside the lane ingress governance was installed for) or the policy is disabled — ingress
+/// governance is opt-in and silent-absent otherwise. `Block` replaces `outcome`'s content with a
+/// synthetic denial IN PLACE, before the action receipt captures it — but preserves `outcome.io` (the
+/// OUTBOUND capture egress emission still needs) rather than wiping it. Returns
+/// `Some((server, decision, flags))` for the receipt [`Governor::emit_io_ingress`] emits right after.
+fn apply_ingress(
+    ingress: &IngressControl,
+    action_id: &str,
+    outcome: &mut ActionOutcome,
+) -> Option<(String, IoDecision, Vec<String>)> {
+    if !ingress.policy.enabled {
+        return None;
+    }
+    let server = (ingress.resolver)(action_id)?;
+    match ingress.policy.class_for(&server) {
+        TrustClass::Trusted => Some((server, IoDecision::Allow, Vec::new())),
+        TrustClass::Scan => {
+            let body = serde_json::to_string(&outcome.data).unwrap_or_default();
+            let hits = scan_secrets_pii(&body);
+            let flags = if hits.is_empty() {
+                Vec::new()
+            } else {
+                vec![format!("b7-secret-pii:{}", hits.join(","))]
+            };
+            Some((server, IoDecision::Allow, flags))
+        }
+        TrustClass::Block => {
+            let preserved_io = outcome.io.take();
+            *outcome = ActionOutcome::failed(
+                "response blocked: server trust class is 'block' (B12)".to_string(),
+            )
+            .with_io(preserved_io);
+            Some((server, IoDecision::Deny, Vec::new()))
+        }
+    }
+}
+
+/// B6 governor-level pre-check: resolve `host` and reject if EVERY resolved address is a forbidden
+/// SSRF/rebinding target (loopback/RFC1918/link-local — which subsumes the 169.254.169.254 cloud-
+/// metadata endpoint — /IPv6 unique-local). `None` (proceed) on a resolution failure: that's not
+/// itself an SSRF signal, just a host that will fail naturally at the transport layer. `None` is also
+/// returned if ANY resolved address is ordinary and routable — a genuine rebinding attack (a
+/// forbidden address swapped in between THIS check and the actual connect) is not this function's
+/// job to close; that TOCTOU-proof enforcement is the transport-level resolver pin in
+/// `mcp::client::HttpTransport`, which validates the exact IP it connects to. This is a best-effort,
+/// receipt-quality check on top of that, not a replacement for it.
+fn check_ssrf_target(host: &str) -> Option<String> {
+    use std::net::ToSocketAddrs;
+    let addrs: Vec<_> = (host, 0u16).to_socket_addrs().ok()?.collect();
+    if addrs.is_empty() {
+        return None;
+    }
+    let mut reasons = Vec::new();
+    for addr in &addrs {
+        match ssrf_disallowed_reason(addr.ip()) {
+            Some(reason) => reasons.push(format!("{} ({reason})", addr.ip())),
+            None => return None,
+        }
+    }
+    Some(format!(
+        "SSRF/rebinding guard: '{host}' resolves only to forbidden target(s): {} (B6)",
+        reasons.join(", ")
+    ))
+}
+
 /// The egress gate's decision for one dispatch.
 enum EgressGate {
     /// No egress governance applies (no control installed, or the action resolves to no
@@ -152,6 +246,11 @@ struct EgressCtx {
     /// True when the io receipt was ALREADY signed pre-execute (fail-closed mode) — don't emit a
     /// second one post-execute.
     pre_signed: bool,
+    /// Additive detection-pack signals (doc 24 §11 / EG-P) from an `AlertOrDeny::Alert`/
+    /// `RedactOrDeny::Redact` detector match that didn't block this call — carried into the emitted
+    /// `kriya.io.*` receipt's `flags` param. Empty on the common (no detector configured, or nothing
+    /// matched) path.
+    flags: Vec<String>,
 }
 
 /// Wires the gates around a pluggable [`ActionExecutor`] + [`ApprovalGate`]. Holds the
@@ -168,6 +267,8 @@ pub struct Governor {
     actor: Option<Actor>,
     /// Optional egress governance (doc 24 §7.3). `None` → byte-identical to pre-EG-2.
     egress: Option<EgressControl>,
+    /// Optional ingress governance (doc 24 §11 B12). `None` → byte-identical to pre-EG-P.
+    ingress: Option<IngressControl>,
 }
 
 impl Governor {
@@ -186,6 +287,7 @@ impl Governor {
             executor,
             actor: None,
             egress: None,
+            ingress: None,
         }
     }
 
@@ -198,6 +300,12 @@ impl Governor {
     /// Install egress governance (doc 24 §7.3). Chainable on `new`/`with_actor`.
     pub fn with_egress(mut self, egress: EgressControl) -> Self {
         self.egress = Some(egress);
+        self
+    }
+
+    /// Install ingress governance (doc 24 §11 B12). Chainable on `new`/`with_actor`/`with_egress`.
+    pub fn with_ingress(mut self, ingress: IngressControl) -> Self {
+        self.ingress = Some(ingress);
         self
     }
 
@@ -237,7 +345,17 @@ impl Governor {
         };
 
         // 4. Execute the cleared action.
-        let outcome = self.executor.execute(action_id, params);
+        let mut outcome = self.executor.execute(action_id, params);
+
+        // 4b. Ingress trust-class enforcement (doc 24 §11 B12) — the RESPONSE side of a governed
+        //     MCP call, independent of egress (applies to stdio upstreams too, which have no host
+        //     to egress-govern at all). `Block` replaces `outcome`'s content in place, BEFORE the
+        //     action receipt below captures it — so a fully-untrusted server's content never
+        //     reaches the action receipt or the caller.
+        let ingress_result = self
+            .ingress
+            .as_ref()
+            .and_then(|ig| apply_ingress(ig, action_id, &mut outcome));
 
         // 5. Sign + append the action receipt (frozen schema), success or failure. The signing key
         //    never leaves the host, so the agent can propose and run an action but cannot forge its
@@ -261,12 +379,28 @@ impl Governor {
             }
         }
 
+        // 7. The `kriya.io.ingress.mcp.*` receipt (B12), correlated the same way. Unlike an egress
+        //    deny, an ingress deny still has an action receipt (the call DID execute — that's how a
+        //    response existed to classify), so it always carries `corr`.
+        if let Some((server, decision, flags)) = ingress_result {
+            self.emit_io_ingress(&server, decision, &flags, &action_step_id);
+        }
+
         DispatchOutcome::Executed { outcome, receipt }
     }
 
     /// Evaluate the egress tier for an action's destination. Signs a `kriya.io.*.deny` receipt at
     /// the decision point on any block (L10). In fail-closed mode signs the allow receipt as a
     /// precondition (B3) and denies if it can't be persisted.
+    ///
+    /// Detection-pack order (doc 24 §11 / EG-P), and why: B9 canary tokens run FIRST and
+    /// unconditionally — a planted honeytoken is a compromise signal independent of where it's
+    /// headed, so it pre-empts even the destination-tier decision. Everything else (B6 SSRF/
+    /// rebinding, B5 DNS-exfil entropy, B8 operation rails, B7 secret/PII) runs AFTER the tier
+    /// clears (Allow, or Approval granted) — these are refinements on an otherwise-permitted call
+    /// (e.g. B5 exists specifically to catch abuse of an *already-allowed* wildcard host), not a
+    /// second independent allowlist, and running them post-tier avoids double-prompting when a
+    /// destination is already at the Approval tier.
     fn egress_gate(&self, action_id: &str, params: &Value, action_step_id: &str) -> EgressGate {
         let Some(control) = self.egress.as_ref() else {
             return EgressGate::Ungoverned;
@@ -274,6 +408,22 @@ impl Governor {
         let Some(target) = (control.resolver)(action_id, params) else {
             return EgressGate::Ungoverned;
         };
+
+        let detection = self.policy.detection();
+        let payload = serde_json::to_string(params).unwrap_or_default();
+
+        // B9 canary tokens — always-deny, checked before the tier decision (doc comment above).
+        if let Some(det) = detection {
+            if let Some(token) = canary_match(&payload, &det.canary_tokens) {
+                let reason = format!(
+                    "canary token match ({}…): outbound payload contains a planted honeytoken — \
+                     treated as compromise, deny (B9)",
+                    &token.chars().take(8).collect::<String>()
+                );
+                self.sign_io_deny(&target, None, reason.clone());
+                return EgressGate::Denied(reason);
+            }
+        }
 
         // Tier decision by destination host.
         let (decision, policy_rule) = match control.policy.evaluate(&target.host) {
@@ -298,10 +448,109 @@ impl Governor {
             }
         };
 
+        // B6 SSRF/rebinding guard — governor-level pre-check for a clean, attributed deny receipt.
+        // The TOCTOU-proof enforcement is the transport-level resolver pin in
+        // `mcp::client::HttpTransport`, gated by the SAME flag (see `SsrfGuardPolicy`'s doc comment
+        // — a local dev/test upstream on loopback is a legitimate target, so neither layer defaults
+        // on).
+        if detection
+            .and_then(|d| d.ssrf_guard)
+            .is_some_and(|g| g.enabled)
+        {
+            if let Some(reason) = check_ssrf_target(&target.host) {
+                self.sign_io_deny(&target, policy_rule.clone(), reason.clone());
+                return EgressGate::Denied(reason);
+            }
+        }
+
+        let mut flags: Vec<String> = Vec::new();
+
+        // B5 DNS-exfil / subdomain-entropy heuristic — catches abuse of an already-allowed wildcard
+        // host (e.g. `*.vendor.com`) via a high-entropy encoded subdomain label.
+        if let Some(dns) = detection
+            .and_then(|d| d.dns_exfil.as_ref())
+            .filter(|d| d.enabled)
+        {
+            if let Some(entropy) = max_subdomain_entropy(&target.host) {
+                if entropy >= dns.entropy_threshold {
+                    match dns.action {
+                        AlertOrDeny::Alert => {
+                            flags.push(format!("b5-dns-exfil:entropy={entropy:.2}"))
+                        }
+                        AlertOrDeny::Deny => {
+                            let reason = format!(
+                                "DNS-exfil heuristic: subdomain entropy {entropy:.2} >= threshold \
+                                 {:.2} on '{}' (B5)",
+                                dns.entropy_threshold, target.host
+                            );
+                            self.sign_io_deny(&target, policy_rule.clone(), reason.clone());
+                            return EgressGate::Denied(reason);
+                        }
+                    }
+                }
+            }
+        }
+
+        // B8 operation rails — a per-destination allowlist fence narrower than the host tier.
+        if let Some(det) = detection {
+            if !det.operation_rails.is_empty() {
+                match evaluate_operation_rails(&det.operation_rails, &target.host, params) {
+                    RailOutcome::NoRailApplies | RailOutcome::Allowed => {}
+                    RailOutcome::RequiresApproval => {
+                        let io_prompt = format!(
+                            "kriya.io.{}.{}.approve",
+                            IoDirection::Egress.facet(),
+                            target.kind.facet()
+                        );
+                        if !self.approval.request(&io_prompt, params) {
+                            self.sign_io_deny(
+                                &target,
+                                policy_rule.clone(),
+                                "operation rail approval not granted".to_string(),
+                            );
+                            return EgressGate::NotApproved;
+                        }
+                    }
+                    RailOutcome::Denied(reason) => {
+                        self.sign_io_deny(&target, policy_rule.clone(), reason.clone());
+                        return EgressGate::Denied(reason);
+                    }
+                    RailOutcome::ParseFailed => {
+                        let reason = format!(
+                            "operation rail configured for '{}' but the call's verb+path/mutation \
+                             could not be parsed — fail-closed (B8)",
+                            target.host
+                        );
+                        self.sign_io_deny(&target, policy_rule.clone(), reason.clone());
+                        return EgressGate::Denied(reason);
+                    }
+                }
+            }
+        }
+
+        // B7 secret/PII scan on the outbound payload.
+        if let Some(sp) = detection
+            .and_then(|d| d.secret_pii.as_ref())
+            .filter(|d| d.enabled)
+        {
+            let hits = scan_secrets_pii(&payload);
+            if !hits.is_empty() {
+                match sp.action {
+                    RedactOrDeny::Redact => flags.push(format!("b7-secret-pii:{}", hits.join(","))),
+                    RedactOrDeny::Deny => {
+                        let reason = format!(
+                            "secret/PII scan matched outbound payload: {} (B7)",
+                            hits.join(",")
+                        );
+                        self.sign_io_deny(&target, policy_rule.clone(), reason.clone());
+                        return EgressGate::Denied(reason);
+                    }
+                }
+            }
+        }
+
         // Byte budget (B2) — estimate outbound payload from the serialized request arguments.
-        let est = serde_json::to_vec(params)
-            .map(|v| v.len() as u64)
-            .unwrap_or(0);
+        let est = payload.len() as u64;
         if let Err(reason) = control.charge_budget(&target.host, est, now_ms()) {
             self.sign_io_deny(&target, policy_rule, reason.clone());
             return EgressGate::Denied(reason);
@@ -318,7 +567,15 @@ impl Governor {
         // the pre-execute record commits to the serialized-request estimate (canonical-json), not
         // the transport-observed wire bytes, so its `hash_scheme` says `canonical-json`.
         let pre_signed = if control.policy.fail_closed() {
-            let io = self.io_allow_record(&target, decision, &policy_rule, &approved_by, None, est);
+            let io = self.io_allow_record(
+                &target,
+                decision,
+                &policy_rule,
+                &approved_by,
+                None,
+                est,
+                &flags,
+            );
             let receipt = Receipt::new(
                 uuid::Uuid::new_v4().to_string(),
                 io.action_id(),
@@ -344,6 +601,7 @@ impl Governor {
             policy_rule,
             approved_by,
             pre_signed,
+            flags,
         }))
     }
 
@@ -358,6 +616,7 @@ impl Governor {
             &ctx.approved_by,
             transport_io,
             est,
+            &ctx.flags,
         );
         let receipt = Receipt::new(
             uuid::Uuid::new_v4().to_string(),
@@ -370,9 +629,47 @@ impl Governor {
         self.signer.record(receipt);
     }
 
+    /// Emit the `kriya.io.ingress.mcp.*` receipt for a governed MCP response (doc 24 §11 B12),
+    /// correlated to the action receipt by `corr` — unlike an egress deny, an ingress deny still has
+    /// a corresponding action receipt (the call executed; that's how a response existed to
+    /// classify), so `corr` is always present here, allow or deny.
+    fn emit_io_ingress(&self, server: &str, decision: IoDecision, flags: &[String], corr: &str) {
+        let io = IoRecord {
+            direction: IoDirection::Ingress,
+            dest_host: None,
+            dest_kind: IoKind::Mcp,
+            method: None,
+            bytes_out: None,
+            bytes_in: None,
+            bytes_in_is_partial: false,
+            content_sha256: None,
+            hash_scheme: HashScheme::WireBytes,
+            decision,
+            policy_rule: None,
+            approved_by: None,
+            reason: (decision == IoDecision::Deny)
+                .then(|| "server trust class is 'block' (B12)".to_string()),
+            server: Some(server.to_string()),
+            flags: flags.to_vec(),
+        };
+        let receipt = Receipt::new(
+            uuid::Uuid::new_v4().to_string(),
+            io.action_id(),
+            io.params(Some(corr)),
+            decision != IoDecision::Deny,
+            now_ms(),
+        )
+        .with_actor(self.actor.clone());
+        self.signer.record(receipt);
+    }
+
     /// Build the io record for an allowed/approved egress. With `transport_io` (fail-open,
     /// post-execute) it carries the observed wire bytes + `wire-bytes` scheme; without it
     /// (fail-closed, pre-execute) it commits to the serialized-request estimate + `canonical-json`.
+    // `flags` (EG-P) pushed this to 8 args over clippy's default 7. Both call sites already build
+    // every argument from an `EgressCtx`/local scope, so a bundling struct would be a pass-through
+    // wrapper with no real invariant of its own — not worth it for one private helper.
+    #[allow(clippy::too_many_arguments)]
     fn io_allow_record(
         &self,
         target: &EgressTarget,
@@ -381,6 +678,7 @@ impl Governor {
         approved_by: &Option<String>,
         transport_io: Option<&IoRecord>,
         est_bytes: u64,
+        flags: &[String],
     ) -> IoRecord {
         match transport_io {
             Some(t) => IoRecord {
@@ -398,6 +696,7 @@ impl Governor {
                 approved_by: approved_by.clone(),
                 reason: None,
                 server: target.server.clone(),
+                flags: flags.to_vec(),
             },
             None => IoRecord {
                 direction: IoDirection::Egress,
@@ -414,12 +713,16 @@ impl Governor {
                 approved_by: approved_by.clone(),
                 reason: None,
                 server: target.server.clone(),
+                flags: flags.to_vec(),
             },
         }
     }
 
     /// Sign a `kriya.io.*.deny` receipt at the decision point — a denied egress never executes, so
     /// without this the `deny` rows would never exist (L10). No `corr`: there is no action receipt.
+    /// No `flags`: a deny's [`IoRecord::reason`] already says why, so there is nothing a flag would
+    /// add (unlike an alert-mode match, which needs a flag precisely because it did NOT get a
+    /// `reason` — the call proceeded).
     fn sign_io_deny(&self, target: &EgressTarget, policy_rule: Option<String>, reason: String) {
         let io = IoRecord {
             direction: IoDirection::Egress,
@@ -436,6 +739,7 @@ impl Governor {
             approved_by: None,
             reason: Some(reason),
             server: target.server.clone(),
+            flags: Vec::new(),
         };
         let receipt = Receipt::new(
             uuid::Uuid::new_v4().to_string(),
@@ -674,6 +978,30 @@ budget:
             })
         });
         Governor::new(allow_all(), signer, approval, counting_executor(ran)).with_egress(control)
+    }
+
+    /// Like [`egress_governor`], but the ACTION policy (not just the egress control) is parsed from
+    /// `policy_yaml` — for the detection-pack tests (doc 24 §11 / EG-P), which need a `detection:`
+    /// block wired onto the `Policy` the `Governor` actually consults.
+    fn egress_governor_with_detection(
+        signer: Arc<Signer>,
+        policy_yaml: &str,
+        egress_yaml: &str,
+        host: &str,
+        ran: Arc<AtomicUsize>,
+        approval: Box<dyn ApprovalGate>,
+    ) -> Governor {
+        let policy: Arc<Policy> = Arc::new(serde_yaml::from_str(policy_yaml).unwrap());
+        let ep: EgressPolicy = serde_yaml::from_str(egress_yaml).unwrap();
+        let host = host.to_string();
+        let control = EgressControl::new(ep, move |_a: &str, _p: &Value| {
+            Some(EgressTarget {
+                host: host.clone(),
+                kind: IoKind::Mcp,
+                server: Some("test-upstream".into()),
+            })
+        });
+        Governor::new(policy, signer, approval, counting_executor(ran)).with_egress(control)
     }
 
     fn read_receipts(log: &std::path::Path) -> Vec<Value> {
@@ -973,5 +1301,627 @@ budget:
                 "every io receipt's corr must resolve to an action receipt's step_id, even interleaved"
             );
         }
+    }
+
+    // ---- Detection pack (doc 24 §11 / EG-P) ----------------------------------------------------
+
+    const ALLOW_VENDOR_WILDCARD: &str =
+        "rules:\n  - host: \"*.vendor.com\"\n    tier: allow\nunlisted: deny\n";
+
+    fn detection_policy_yaml(detection_block: &str) -> String {
+        format!(
+            "rules:\n  - action: \"*\"\n    allow: true\nbudget:\n  max_actions_per_minute: 1000\ndetection:\n{detection_block}"
+        )
+    }
+
+    // B5: DNS-exfil / subdomain-entropy heuristic.
+
+    #[test]
+    fn b5_dns_exfil_alert_mode_executes_and_flags_the_receipt() {
+        let (s, log) = signer_with_log();
+        let ran = Arc::new(AtomicUsize::new(0));
+        // Same fixture proven >= 4.0 bits/char in permissions::tests.
+        let exfil = "khbwy4dxovss4z3jf5xweidwmn2gk4dsn5wg65lsmvzq";
+        let mut g = egress_governor_with_detection(
+            s,
+            &detection_policy_yaml("  dns_exfil:\n    action: alert\n"),
+            ALLOW_VENDOR_WILDCARD,
+            &format!("{exfil}.vendor.com"),
+            ran.clone(),
+            Box::new(DenyApproval),
+        );
+        assert!(matches!(
+            g.dispatch("widgets__list", &json!({"q": 1})),
+            DispatchOutcome::Executed { .. }
+        ));
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            1,
+            "alert mode never blocks the call"
+        );
+        let io = io_lines(&log);
+        assert_eq!(io.len(), 1);
+        assert_eq!(io[0]["action_id"], "kriya.io.egress.mcp.allow");
+        let flags = io[0]["params"]["flags"]
+            .as_array()
+            .expect("flags array present");
+        assert!(
+            flags
+                .iter()
+                .any(|f| f.as_str().unwrap().starts_with("b5-dns-exfil:")),
+            "flags: {flags:?}"
+        );
+    }
+
+    #[test]
+    fn b5_dns_exfil_deny_mode_blocks_at_the_decision_point() {
+        let (s, log) = signer_with_log();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let exfil = "khbwy4dxovss4z3jf5xweidwmn2gk4dsn5wg65lsmvzq";
+        let mut g = egress_governor_with_detection(
+            s,
+            &detection_policy_yaml("  dns_exfil:\n    action: deny\n"),
+            ALLOW_VENDOR_WILDCARD,
+            &format!("{exfil}.vendor.com"),
+            ran.clone(),
+            Box::new(DenyApproval),
+        );
+        assert!(matches!(
+            g.dispatch("widgets__list", &json!({"q": 1})),
+            DispatchOutcome::EgressDenied(_)
+        ));
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            0,
+            "denied egress must NOT execute"
+        );
+        let io = io_lines(&log);
+        assert_eq!(io.len(), 1);
+        assert_eq!(io[0]["action_id"], "kriya.io.egress.mcp.deny");
+        assert!(
+            io[0]["params"]["reason"].as_str().unwrap().contains("B5"),
+            "reason: {:?}",
+            io[0]["params"]["reason"]
+        );
+    }
+
+    #[test]
+    fn b5_dns_exfil_false_positive_safety_ordinary_host_is_unaffected() {
+        let (s, log) = signer_with_log();
+        let ran = Arc::new(AtomicUsize::new(0));
+        // Strictest setting (deny) on an ORDINARY host — must still execute untouched.
+        let mut g = egress_governor_with_detection(
+            s,
+            &detection_policy_yaml("  dns_exfil:\n    action: deny\n"),
+            ALLOW_VENDOR_WILDCARD,
+            "api.vendor.com",
+            ran.clone(),
+            Box::new(DenyApproval),
+        );
+        assert!(matches!(
+            g.dispatch("widgets__list", &json!({"q": 1})),
+            DispatchOutcome::Executed { .. }
+        ));
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+        let io = io_lines(&log);
+        assert_eq!(io[0]["action_id"], "kriya.io.egress.mcp.allow");
+        assert!(
+            io[0]["params"].get("flags").is_none(),
+            "no flag on an ordinary host"
+        );
+    }
+
+    // B6: SSRF / private-IP / cloud-metadata / DNS-rebinding guard.
+
+    #[test]
+    fn b6_ssrf_guard_false_positive_safety_ordinary_public_address_is_unaffected() {
+        let (s, log) = signer_with_log();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let mut g = egress_governor_with_detection(
+            s,
+            &detection_policy_yaml("  ssrf_guard:\n    enabled: true\n"),
+            "unlisted: allow\nrules: []\n",
+            "93.184.216.34", // ordinary public address (example.com)
+            ran.clone(),
+            Box::new(DenyApproval),
+        );
+        assert!(matches!(
+            g.dispatch("widgets__list", &json!({"q": 1})),
+            DispatchOutcome::Executed { .. }
+        ));
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+        assert_eq!(io_lines(&log)[0]["action_id"], "kriya.io.egress.mcp.allow");
+    }
+
+    #[test]
+    fn b6_ssrf_guard_denies_loopback_target_at_the_decision_point() {
+        let (s, log) = signer_with_log();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let mut g = egress_governor_with_detection(
+            s,
+            &detection_policy_yaml("  ssrf_guard:\n    enabled: true\n"),
+            "unlisted: allow\nrules: []\n",
+            "127.0.0.1",
+            ran.clone(),
+            Box::new(DenyApproval),
+        );
+        assert!(matches!(
+            g.dispatch("widgets__list", &json!({"q": 1})),
+            DispatchOutcome::EgressDenied(_)
+        ));
+        assert_eq!(ran.load(Ordering::SeqCst), 0);
+        let io = io_lines(&log);
+        assert_eq!(io[0]["action_id"], "kriya.io.egress.mcp.deny");
+        assert!(io[0]["params"]["reason"].as_str().unwrap().contains("B6"));
+    }
+
+    #[test]
+    fn b6_ssrf_guard_denies_cloud_metadata_target() {
+        let (s, log) = signer_with_log();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let mut g = egress_governor_with_detection(
+            s,
+            &detection_policy_yaml("  ssrf_guard:\n    enabled: true\n"),
+            "unlisted: allow\nrules: []\n",
+            "169.254.169.254",
+            ran.clone(),
+            Box::new(DenyApproval),
+        );
+        assert!(matches!(
+            g.dispatch("widgets__list", &json!({"q": 1})),
+            DispatchOutcome::EgressDenied(_)
+        ));
+        assert_eq!(ran.load(Ordering::SeqCst), 0);
+        assert!(io_lines(&log)[0]["params"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("metadata"));
+    }
+
+    // B7: secret + PII scan/redact on outbound bodies.
+
+    #[test]
+    fn b7_secret_pii_redact_mode_executes_and_flags_the_type_only() {
+        let (s, log) = signer_with_log();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let mut g = egress_governor_with_detection(
+            s,
+            &detection_policy_yaml("  secret_pii:\n    action: redact\n"),
+            ALLOW_VENDOR_WILDCARD,
+            "api.vendor.com",
+            ran.clone(),
+            Box::new(DenyApproval),
+        );
+        assert!(matches!(
+            g.dispatch(
+                "widgets__list",
+                &json!({"body": "Authorization: AKIAIOSFODNN7EXAMPLE"})
+            ),
+            DispatchOutcome::Executed { .. }
+        ));
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            1,
+            "redact mode never blocks the call"
+        );
+        let io = io_lines(&log);
+        let flags = io[0]["params"]["flags"].as_array().expect("flags present");
+        assert!(flags
+            .iter()
+            .any(|f| f.as_str().unwrap().contains("aws_access_key")));
+        assert!(!io[0].to_string().contains("AKIAIOSFODNN7EXAMPLE"));
+    }
+
+    #[test]
+    fn b7_secret_pii_deny_mode_blocks_at_the_decision_point() {
+        let (s, log) = signer_with_log();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let mut g = egress_governor_with_detection(
+            s,
+            &detection_policy_yaml("  secret_pii:\n    action: deny\n"),
+            ALLOW_VENDOR_WILDCARD,
+            "api.vendor.com",
+            ran.clone(),
+            Box::new(DenyApproval),
+        );
+        assert!(matches!(
+            g.dispatch(
+                "widgets__list",
+                &json!({"body": "Authorization: AKIAIOSFODNN7EXAMPLE"})
+            ),
+            DispatchOutcome::EgressDenied(_)
+        ));
+        assert_eq!(ran.load(Ordering::SeqCst), 0);
+        let io = io_lines(&log);
+        assert_eq!(io[0]["action_id"], "kriya.io.egress.mcp.deny");
+        assert!(io[0]["params"]["reason"].as_str().unwrap().contains("B7"));
+        assert!(!io[0].to_string().contains("AKIAIOSFODNN7EXAMPLE"));
+    }
+
+    #[test]
+    fn b7_secret_pii_false_positive_safety_ordinary_payload_is_unaffected() {
+        let (s, log) = signer_with_log();
+        let ran = Arc::new(AtomicUsize::new(0));
+        // Strictest setting (deny) on an ordinary payload with none of the seven shapes.
+        let mut g = egress_governor_with_detection(
+            s,
+            &detection_policy_yaml("  secret_pii:\n    action: deny\n"),
+            ALLOW_VENDOR_WILDCARD,
+            "api.vendor.com",
+            ran.clone(),
+            Box::new(DenyApproval),
+        );
+        assert!(matches!(
+            g.dispatch(
+                "widgets__list",
+                &json!({"q": "list widgets in warehouse 12"})
+            ),
+            DispatchOutcome::Executed { .. }
+        ));
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+        assert!(io_lines(&log)[0]["params"].get("flags").is_none());
+    }
+
+    #[test]
+    fn b7_secret_pii_sentinel_the_matched_value_never_appears_in_the_io_receipt() {
+        // The underlying ACTION receipt still mirrors `params` verbatim (the frozen receipt
+        // schema's own contract, unrelated to B7 — redacting THAT for display/export is the
+        // Console minimizer's job). This sentinel scopes its assertion to the io receipt, which is
+        // what B7 actually writes, and proves the value never reaches it — type name only.
+        let (s, log) = signer_with_log();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let secret = "AKIAIOSFODNN7EXAMPLE";
+        let mut g = egress_governor_with_detection(
+            s,
+            &detection_policy_yaml("  secret_pii:\n    action: redact\n"),
+            ALLOW_VENDOR_WILDCARD,
+            "api.vendor.com",
+            ran.clone(),
+            Box::new(DenyApproval),
+        );
+        assert!(matches!(
+            g.dispatch(
+                "widgets__list",
+                &json!({"body": format!("Authorization: {secret}")})
+            ),
+            DispatchOutcome::Executed { .. }
+        ));
+        let io = io_lines(&log);
+        let io_raw = io[0].to_string();
+        assert!(
+            !io_raw.contains(secret),
+            "the secret must never appear in the io receipt: {io_raw}"
+        );
+        let flags = io[0]["params"]["flags"].as_array().expect("flags present");
+        assert!(
+            flags
+                .iter()
+                .any(|f| f.as_str().unwrap().contains("aws_access_key")),
+            "flags: {flags:?}"
+        );
+    }
+
+    // B8: operation rails (HTTP verb+path glob, GraphQL mutation name).
+
+    #[test]
+    fn b8_operation_rail_allow_permits_a_matching_operation() {
+        let (s, log) = signer_with_log();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let mut g = egress_governor_with_detection(
+            s,
+            &detection_policy_yaml(
+                "  operation_rails:\n    - host: \"*.vendor.com\"\n      method: GET\n      path: \"/v1/*\"\n      tier: allow\n",
+            ),
+            ALLOW_VENDOR_WILDCARD,
+            "api.vendor.com",
+            ran.clone(),
+            Box::new(DenyApproval),
+        );
+        assert!(matches!(
+            g.dispatch(
+                "widgets__list",
+                &json!({"method": "GET", "path": "/v1/users"})
+            ),
+            DispatchOutcome::Executed { .. }
+        ));
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+        assert_eq!(io_lines(&log)[0]["action_id"], "kriya.io.egress.mcp.allow");
+    }
+
+    #[test]
+    fn b8_operation_rail_denies_an_operation_no_rail_permits() {
+        let (s, log) = signer_with_log();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let mut g = egress_governor_with_detection(
+            s,
+            &detection_policy_yaml(
+                "  operation_rails:\n    - host: \"*.vendor.com\"\n      method: GET\n      path: \"/v1/*\"\n      tier: allow\n",
+            ),
+            ALLOW_VENDOR_WILDCARD,
+            "api.vendor.com",
+            ran.clone(),
+            Box::new(DenyApproval),
+        );
+        // DELETE isn't on the rail — an allowlist fence denies anything not explicitly permitted.
+        assert!(matches!(
+            g.dispatch(
+                "widgets__delete",
+                &json!({"method": "DELETE", "path": "/v1/users/1"})
+            ),
+            DispatchOutcome::EgressDenied(_)
+        ));
+        assert_eq!(ran.load(Ordering::SeqCst), 0);
+        let io = io_lines(&log);
+        assert_eq!(io[0]["action_id"], "kriya.io.egress.mcp.deny");
+        assert!(io[0]["params"]["reason"].as_str().unwrap().contains("B8"));
+    }
+
+    #[test]
+    fn b8_operation_rail_false_positive_safety_unrailed_host_is_unaffected() {
+        let (s, log) = signer_with_log();
+        let ran = Arc::new(AtomicUsize::new(0));
+        // The one configured rail scopes to a DIFFERENT host — api.vendor.com has no rail at all.
+        let mut g = egress_governor_with_detection(
+            s,
+            &detection_policy_yaml(
+                "  operation_rails:\n    - host: \"other.example.com\"\n      tier: allow\n",
+            ),
+            ALLOW_VENDOR_WILDCARD,
+            "api.vendor.com",
+            ran.clone(),
+            Box::new(DenyApproval),
+        );
+        // Params carry none of the rail's expected shape — would parse-fail if a rail applied here.
+        assert!(matches!(
+            g.dispatch("widgets__list", &json!({"q": 1})),
+            DispatchOutcome::Executed { .. }
+        ));
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            1,
+            "an unrailed host must be completely unaffected"
+        );
+        assert_eq!(io_lines(&log)[0]["action_id"], "kriya.io.egress.mcp.allow");
+    }
+
+    #[test]
+    fn b8_operation_rail_parse_failure_denies_fail_closed() {
+        let (s, log) = signer_with_log();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let mut g = egress_governor_with_detection(
+            s,
+            &detection_policy_yaml(
+                "  operation_rails:\n    - host: \"*.vendor.com\"\n      method: GET\n      path: \"/v1/*\"\n      tier: allow\n",
+            ),
+            ALLOW_VENDOR_WILDCARD,
+            "api.vendor.com",
+            ran.clone(),
+            Box::new(DenyApproval),
+        );
+        // No method/path/url/query anywhere in params — the rail can't classify this call at all.
+        assert!(matches!(
+            g.dispatch("widgets__list", &json!({"q": 1})),
+            DispatchOutcome::EgressDenied(_)
+        ));
+        assert_eq!(ran.load(Ordering::SeqCst), 0);
+        let io = io_lines(&log);
+        let reason = io[0]["params"]["reason"].as_str().unwrap();
+        assert!(
+            reason.contains("B8") && reason.contains("parsed"),
+            "reason: {reason}"
+        );
+    }
+
+    // B9: canary tokens.
+
+    #[test]
+    fn b9_canary_token_match_denies_regardless_of_any_soft_mode() {
+        let (s, log) = signer_with_log();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let mut g = egress_governor_with_detection(
+            s,
+            &detection_policy_yaml("  canary_tokens:\n    - \"canary-token-xyz123\"\n"),
+            ALLOW_VENDOR_WILDCARD,
+            "api.vendor.com",
+            ran.clone(),
+            Box::new(DenyApproval),
+        );
+        assert!(matches!(
+            g.dispatch(
+                "widgets__list",
+                &json!({"note": "leaked canary-token-xyz123 here"})
+            ),
+            DispatchOutcome::EgressDenied(_)
+        ));
+        assert_eq!(ran.load(Ordering::SeqCst), 0);
+        let io = io_lines(&log);
+        assert_eq!(io[0]["action_id"], "kriya.io.egress.mcp.deny");
+        assert!(io[0]["params"]["reason"].as_str().unwrap().contains("B9"));
+    }
+
+    #[test]
+    fn b9_canary_false_positive_safety_ordinary_payload_is_unaffected() {
+        let (s, log) = signer_with_log();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let mut g = egress_governor_with_detection(
+            s,
+            &detection_policy_yaml("  canary_tokens:\n    - \"canary-token-xyz123\"\n"),
+            ALLOW_VENDOR_WILDCARD,
+            "api.vendor.com",
+            ran.clone(),
+            Box::new(DenyApproval),
+        );
+        assert!(matches!(
+            g.dispatch("widgets__list", &json!({"note": "nothing suspicious here"})),
+            DispatchOutcome::Executed { .. }
+        ));
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+        assert_eq!(io_lines(&log)[0]["action_id"], "kriya.io.egress.mcp.allow");
+    }
+
+    #[test]
+    fn b9_canary_check_runs_before_the_destination_tier_so_an_allowed_host_is_still_denied() {
+        // Proves B9 pre-empts the tier decision rather than riding it: the destination is on the
+        // ALLOW tier (would otherwise clear cleanly), yet a canary match still blocks it.
+        let (s, log) = signer_with_log();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let mut g = egress_governor_with_detection(
+            s,
+            &detection_policy_yaml("  canary_tokens:\n    - \"canary-token-xyz123\"\n"),
+            ALLOW_VENDOR_WILDCARD,
+            "api.vendor.com", // matches the allow-tier wildcard
+            ran.clone(),
+            Box::new(DenyApproval),
+        );
+        assert!(matches!(
+            g.dispatch("widgets__list", &json!({"note": "canary-token-xyz123"})),
+            DispatchOutcome::EgressDenied(_)
+        ));
+        assert_eq!(ran.load(Ordering::SeqCst), 0);
+        // No `policy_rule` on the deny — it never reached the tier's rule-matching at all.
+        assert!(io_lines(&log)[0]["params"].get("policy_rule").is_none());
+    }
+
+    // B12: MCP response enforcement (per-server trust classes).
+
+    /// An executor returning fixed `data` for every call — for testing what B12 does with a
+    /// response's content, independent of what the underlying action itself does.
+    fn executor_returning(data: Value) -> Box<dyn ActionExecutor> {
+        Box::new(FnExecutor(move |_id: &str, _p: &Value| {
+            ActionOutcome::ok(data.clone())
+        }))
+    }
+
+    /// A governor with ONLY ingress governance installed (no egress) — resolves `<namespace>__<tool>`
+    /// action ids back to `namespace`, exactly like the broker's real resolver.
+    fn ingress_governor(
+        signer: Arc<Signer>,
+        mcp_response_yaml: &str,
+        executor: Box<dyn ActionExecutor>,
+    ) -> Governor {
+        let policy: McpResponsePolicy = serde_yaml::from_str(mcp_response_yaml).unwrap();
+        let ingress = IngressControl::new(policy, |action_id: &str| {
+            action_id.split_once("__").map(|(ns, _)| ns.to_string())
+        });
+        Governor::new(allow_all(), signer, Box::new(DenyApproval), executor).with_ingress(ingress)
+    }
+
+    #[test]
+    fn b12_trusted_class_never_scans_even_a_secret_shaped_response() {
+        let (s, log) = signer_with_log();
+        let mut g = ingress_governor(
+            s,
+            "per_server:\n  widgets: trusted\n",
+            executor_returning(json!({"body": "Authorization: AKIAIOSFODNN7EXAMPLE"})),
+        );
+        assert!(matches!(
+            g.dispatch("widgets__list", &json!({})),
+            DispatchOutcome::Executed { .. }
+        ));
+        let io = io_lines(&log);
+        assert_eq!(io.len(), 1);
+        assert_eq!(io[0]["action_id"], "kriya.io.ingress.mcp.allow");
+        assert!(
+            io[0]["params"].get("flags").is_none(),
+            "trusted never scans, so never flags"
+        );
+    }
+
+    #[test]
+    fn b12_scan_class_flags_a_secret_shaped_response_without_blocking() {
+        let (s, log) = signer_with_log();
+        let mut g = ingress_governor(
+            s,
+            "per_server:\n  widgets: scan\n",
+            executor_returning(json!({"body": "Authorization: AKIAIOSFODNN7EXAMPLE"})),
+        );
+        assert!(matches!(
+            g.dispatch("widgets__list", &json!({})),
+            DispatchOutcome::Executed { .. }
+        ));
+        let io = io_lines(&log);
+        assert_eq!(
+            io[0]["action_id"], "kriya.io.ingress.mcp.allow",
+            "scan never blocks on content"
+        );
+        let flags = io[0]["params"]["flags"].as_array().expect("flags present");
+        assert!(flags
+            .iter()
+            .any(|f| f.as_str().unwrap().contains("aws_access_key")));
+        assert!(
+            !io[0].to_string().contains("AKIAIOSFODNN7EXAMPLE"),
+            "type only, never the value"
+        );
+        // corr always present on an ingress receipt — the call DID execute.
+        let action = read_receipts(&log)
+            .into_iter()
+            .find(|v| v["action_id"] == "widgets__list")
+            .unwrap();
+        assert_eq!(io[0]["params"]["corr"], action["step_id"]);
+    }
+
+    #[test]
+    fn b12_scan_class_false_positive_safety_ordinary_response_is_unaffected() {
+        let (s, log) = signer_with_log();
+        let mut g = ingress_governor(
+            s,
+            "per_server:\n  widgets: scan\n",
+            executor_returning(json!({"items": ["widget-1", "widget-2"]})),
+        );
+        assert!(matches!(
+            g.dispatch("widgets__list", &json!({})),
+            DispatchOutcome::Executed { .. }
+        ));
+        let io = io_lines(&log);
+        assert_eq!(io[0]["action_id"], "kriya.io.ingress.mcp.allow");
+        assert!(io[0]["params"].get("flags").is_none());
+    }
+
+    #[test]
+    fn b12_block_class_replaces_the_response_and_denies_at_the_ingress_receipt() {
+        let (s, log) = signer_with_log();
+        let mut g = ingress_governor(
+            s,
+            "per_server:\n  widgets: block\n",
+            executor_returning(json!({"items": ["real", "data"]})),
+        );
+        match g.dispatch("widgets__list", &json!({})) {
+            DispatchOutcome::Executed { outcome, .. } => {
+                assert!(
+                    !outcome.success,
+                    "a blocked response must not report as a success"
+                );
+                assert!(
+                    outcome.data.is_null(),
+                    "the real content must not reach the caller"
+                );
+            }
+            other => panic!("expected Executed (with a blocked outcome), got {other:?}"),
+        }
+        let io = io_lines(&log);
+        assert_eq!(io[0]["action_id"], "kriya.io.ingress.mcp.deny");
+        assert!(io[0]["params"]["reason"].as_str().unwrap().contains("B12"));
+        // corr still present — unlike an egress deny, the action DID execute.
+        assert!(io[0]["params"].get("corr").is_some());
+    }
+
+    #[test]
+    fn b12_absent_ingress_control_is_byte_identical_to_pre_eg_p() {
+        let ran = Arc::new(AtomicUsize::new(0));
+        let (s, log) = signer_with_log();
+        let mut g = Governor::new(
+            allow_all(),
+            s,
+            Box::new(DenyApproval),
+            counting_executor(ran),
+        );
+        assert!(matches!(
+            g.dispatch("widgets__list", &json!({})),
+            DispatchOutcome::Executed { .. }
+        ));
+        assert!(
+            io_lines(&log).is_empty(),
+            "no ingress control installed → no kriya.io.ingress.* at all"
+        );
     }
 }

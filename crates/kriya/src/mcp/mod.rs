@@ -62,7 +62,7 @@ pub use executor::{
     ActionExecutor, ActionOutcome, FnExecutor, HashScheme, IoDecision, IoDirection, IoKind,
     IoRecord, PersistentProcessExecutor, ProcessExecutor,
 };
-pub use governor::{DispatchOutcome, EgressControl, EgressTarget, Governor};
+pub use governor::{DispatchOutcome, EgressControl, EgressTarget, Governor, IngressControl};
 pub use server::Server;
 
 #[cfg(feature = "mcp-client")]
