@@ -31,6 +31,39 @@ use super::jsonrpc::{CallToolResult, InitializeResult, ListToolsResult, Tool, PR
 /// version (two reader threads correlating by id).
 const PROXY_ID_BASE: u64 = 1;
 
+/// B6 SSRF/rebinding guard, TRANSPORT-level enforcement (doc 24 §11 B6): resolves `netloc`
+/// (`"host:port"`, ureq's resolver convention) and returns EXACTLY ONE address that is not a
+/// forbidden target (loopback/RFC1918/link-local — which subsumes the 169.254.169.254 cloud-
+/// metadata endpoint — /IPv6 unique-local), never the full resolved set. Returning only one matters:
+/// on a failed connect ureq tries the NEXT address in whatever list the resolver returned, so handing
+/// back every resolved address (forbidden ones included) would leave a fallback path straight to
+/// whichever one this filter exists to remove — pinning to a single validated address is what closes
+/// the gap between "checked" and "connected" that a DNS-rebinding attack targets. Only installed on
+/// the agent when the caller opts in (see [`McpClient::connect_http`]'s `ssrf_guard` — a local dev
+/// upstream on `127.0.0.1`/`localhost` is a legitimate target, so this is NOT unconditional).
+#[cfg(feature = "mcp-http")]
+fn ssrf_safe_resolver(netloc: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
+    use std::net::ToSocketAddrs;
+    match pick_safe_address(netloc.to_socket_addrs()?) {
+        Some(addr) => Ok(vec![addr]),
+        None => Err(std::io::Error::other(
+            "SSRF guard: destination resolves only to a forbidden target \
+             (loopback/private/link-local/metadata) — refusing to connect (B6)",
+        )),
+    }
+}
+
+/// The pure filter behind [`ssrf_safe_resolver`], split out so a synthetic multi-address "DNS
+/// answer" (a rebinding fixture: some addresses forbidden, some not) can be tested directly without
+/// a real resolver. Returns the first non-forbidden address in `addrs`, or `None` if every one is
+/// forbidden.
+#[cfg(feature = "mcp-http")]
+fn pick_safe_address(
+    mut addrs: impl Iterator<Item = std::net::SocketAddr>,
+) -> Option<std::net::SocketAddr> {
+    addrs.find(|addr| crate::permissions::ssrf_disallowed_reason(addr.ip()).is_none())
+}
+
 /// A downstream MCP server connection plus the JSON-RPC transport over its stdio. Single-threaded
 /// MVP: one request out, one response in. Holds the [`Child`] (when spawned) so dropping the client
 /// tears the subprocess down with it.
@@ -90,12 +123,20 @@ impl McpClient {
     /// Connect to a **remote** MCP server over Streamable HTTP (W2-2). `url` is the server's MCP
     /// endpoint; `headers` are extra request headers (e.g. `("Authorization", "Bearer …")`) sent on
     /// every call. No subprocess — the "child" is `None`. The MCP session id the server assigns on
-    /// `initialize` is captured and echoed on later requests automatically.
+    /// `initialize` is captured and echoed on later requests automatically. `ssrf_guard` installs the
+    /// B6 resolver pin (doc 24 §11 B6) — gated, not unconditional: a local dev/test upstream on
+    /// `127.0.0.1`/`localhost` is a legitimate `url:` target, so the guard only activates when the
+    /// operator's policy turns it on (`detection.ssrf_guard.enabled`), same opt-in as every other
+    /// detector in the pack.
     #[cfg(feature = "mcp-http")]
-    pub fn connect_http(url: &str, headers: Vec<(String, String)>) -> std::io::Result<Self> {
+    pub fn connect_http(
+        url: &str,
+        headers: Vec<(String, String)>,
+        ssrf_guard: bool,
+    ) -> std::io::Result<Self> {
         Ok(Self {
             child: None,
-            backend: Backend::Http(HttpTransport::new(url, headers)),
+            backend: Backend::Http(HttpTransport::new(url, headers, ssrf_guard)),
         })
     }
 
@@ -317,14 +358,21 @@ struct HttpTransport {
 
 #[cfg(feature = "mcp-http")]
 impl HttpTransport {
-    fn new(url: &str, extra_headers: Vec<(String, String)>) -> Self {
+    fn new(url: &str, extra_headers: Vec<(String, String)>, ssrf_guard: bool) -> Self {
+        let agent = if ssrf_guard {
+            ureq::AgentBuilder::new()
+                .resolver(ssrf_safe_resolver)
+                .build()
+        } else {
+            ureq::agent()
+        };
         Self {
             url: url.to_string(),
             host: crate::permissions::url_host(url),
             extra_headers,
             session_id: None,
             next_id: PROXY_ID_BASE,
-            agent: ureq::agent(),
+            agent,
             last_io: None,
         }
     }
@@ -380,6 +428,7 @@ impl HttpTransport {
             approved_by: None,
             reason: None,
             server: None,
+            flags: Vec::new(),
         });
 
         let resp = match self.post().send_string(&body) {
@@ -771,6 +820,42 @@ mod tests {
         assert!(
             consumed > 0 && consumed <= stream.len() as u64 + 4,
             "observed payload bytes are counted as a lower bound: {consumed}"
+        );
+    }
+
+    // B6 SSRF/rebinding guard — transport-level resolver pin (doc 24 §11 B6).
+
+    #[cfg(feature = "mcp-http")]
+    #[test]
+    fn b6_rebinding_fixture_pins_to_the_one_safe_address_never_the_forbidden_one() {
+        // A synthetic DNS answer mixing a forbidden (rebound-to) address with a legitimate one —
+        // the exact shape a DNS-rebinding attack produces. Forbidden listed FIRST specifically to
+        // prove the filter, not list order, decides the outcome.
+        let addrs = vec![
+            "169.254.169.254:443".parse().unwrap(), // cloud metadata — forbidden
+            "93.184.216.34:443".parse().unwrap(),   // ordinary public address — safe
+        ];
+        let picked = pick_safe_address(addrs.into_iter());
+        assert_eq!(picked, Some("93.184.216.34:443".parse().unwrap()));
+    }
+
+    #[cfg(feature = "mcp-http")]
+    #[test]
+    fn b6_rebinding_fixture_denies_when_every_resolved_address_is_forbidden() {
+        let addrs = vec![
+            "127.0.0.1:443".parse().unwrap(),
+            "169.254.169.254:443".parse().unwrap(),
+        ];
+        assert_eq!(pick_safe_address(addrs.into_iter()), None);
+    }
+
+    #[cfg(feature = "mcp-http")]
+    #[test]
+    fn b6_ordinary_single_address_host_resolves_normally() {
+        let addrs = vec!["93.184.216.34:443".parse().unwrap()];
+        assert_eq!(
+            pick_safe_address(addrs.into_iter()),
+            Some("93.184.216.34:443".parse().unwrap())
         );
     }
 }
