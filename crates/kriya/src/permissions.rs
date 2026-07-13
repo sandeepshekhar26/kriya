@@ -3,6 +3,7 @@
 //! human approval (no approval queue exists yet in Phase 0, so they are held/denied).
 
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::agent::inference::retry::RetryPolicy;
 use std::time::Duration;
@@ -97,6 +98,12 @@ pub struct Policy {
     /// by default → receipts are retained indefinitely (the pre-EG-2 behaviour).
     #[serde(default)]
     retention: Option<Retention>,
+    /// Optional **detection pack** (doc 24 §11 B5–B12 / EG-P): DNS-exfil heuristics, the SSRF/
+    /// rebinding guard, secret+PII scanning, operation rails, canary tokens, the connector
+    /// registry, read-only presets, and MCP response trust classes — each independently absent by
+    /// default, so opting into the pack as a whole never silently enables a specific detector.
+    #[serde(default)]
+    detection: Option<DetectionPolicy>,
 }
 
 impl Default for Policy {
@@ -130,6 +137,7 @@ impl Default for Policy {
             on_device: false,
             egress: None,
             retention: None,
+            detection: None,
         }
     }
 }
@@ -179,7 +187,23 @@ impl Policy {
         self.retention.as_ref()
     }
 
+    /// The detection pack (doc 24 §11 B5–B12 / EG-P), if configured.
+    pub fn detection(&self) -> Option<&DetectionPolicy> {
+        self.detection.as_ref()
+    }
+
     pub fn check(&self, action_id: &str) -> Decision {
+        // B11 (doc 24 §11): a read-only-preset connector's known-mutating tools are denied
+        // BEFORE the explicit rules are even consulted — a hard override the operator's own
+        // (possibly broad) allow rules can never widen back open. This is the "rides the existing
+        // per-action tier" preset: it denies exactly where an explicit rule would, just pre-empted.
+        if self
+            .detection
+            .as_ref()
+            .is_some_and(|d| d.read_only_denies(action_id))
+        {
+            return Decision::Deny;
+        }
         for rule in &self.rules {
             if matches(&rule.action, action_id) {
                 if !rule.allow {
@@ -310,6 +334,7 @@ pub fn default_broker_policy(namespaces: &[String]) -> Policy {
         on_device: false,
         egress: None,
         retention: None,
+        detection: None,
     }
 }
 
@@ -359,6 +384,7 @@ pub fn default_proxy_policy() -> Policy {
         on_device: false,
         egress: None,
         retention: None,
+        detection: None,
     }
 }
 
@@ -618,6 +644,632 @@ pub struct Retention {
     /// Max age in days for policy/approval/action receipts.
     #[serde(default)]
     pub default_days: Option<u32>,
+}
+
+// ─── Detection pack (doc 24 §11 B5–B12 / EG-P) ───────────────────────────────────────────────────
+//
+// Every sub-detector is independently `Option`-gated and absent by default, so opting a policy into
+// `detection:` at all never silently turns on a specific check — each one is a deliberate, separate
+// operator choice (never auto-block silently by default). All detectors run on GOVERNED LANES only
+// (the same seams the egress tier already gates); a spawned subprocess bypasses them exactly as it
+// bypasses the egress tier itself — this is not a host boundary. Detection findings are additive
+// receipt params on the SAME `kriya.io.*` vocabulary (never a new action_id shape): an "alert" is a
+// call that still executes but whose io receipt carries an extra flag field; a "deny" is a real
+// decision-point block with `decision: "deny"` and a `reason` naming the detector, mirroring the
+// egress tier's own L10 discipline.
+
+fn default_true() -> bool {
+    true
+}
+
+/// What a detector does on a match: proceed but flag it (never blocks a legitimate call on its
+/// own), or block outright. Default `Alert` — the house rule for every heuristic that can
+/// false-positive (doc 24 §11's "never auto-block silently by default").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AlertOrDeny {
+    #[default]
+    Alert,
+    Deny,
+}
+
+/// What a content-match detector (secret/PII) does: keep the call fidelity intact but strip the
+/// matched value from what's hashed/recorded (default — safe, non-breaking), or block outright.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RedactOrDeny {
+    #[default]
+    Redact,
+    Deny,
+}
+
+/// The detection pack. Every field is independently optional; only configured detectors run.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DetectionPolicy {
+    /// B5: DNS-exfil / anomalous-destination / subdomain-entropy heuristic.
+    #[serde(default)]
+    pub dns_exfil: Option<DnsExfilPolicy>,
+    /// B6: SSRF / private-IP / cloud-metadata / DNS-rebinding guard.
+    #[serde(default)]
+    pub ssrf_guard: Option<SsrfGuardPolicy>,
+    /// B7: secret + PII scan/redact on outbound governed bodies.
+    #[serde(default)]
+    pub secret_pii: Option<SecretPiiPolicy>,
+    /// B8: operation rails — allow/deny specific outbound API operations, not just hosts.
+    #[serde(default)]
+    pub operation_rails: Vec<OperationRail>,
+    /// B9: canary tokens — an exact-match string whose appearance in an outbound body is always an
+    /// immediate deny, never policy-tunable (that is the entire point of a canary).
+    #[serde(default)]
+    pub canary_tokens: Vec<String>,
+    /// B10: the connector registry — new/drifted MCP tools default disabled-until-approved.
+    #[serde(default)]
+    pub connector_registry: Option<ConnectorRegistryPolicy>,
+    /// B11: per-connector/per-tool read-only presets — host/namespace patterns (egress
+    /// [`host_matches`] syntax) whose known-mutating tools are denied.
+    #[serde(default)]
+    pub read_only: Vec<String>,
+    /// B12: MCP response enforcement — per-server trust classes on governed-lane ingress.
+    #[serde(default)]
+    pub mcp_response: Option<McpResponsePolicy>,
+}
+
+/// B5: flag destinations whose leftmost subdomain label has unusually high character entropy (the
+/// classic DNS-exfiltration shape: stolen data base32/hex/base64-encoded into a subdomain of an
+/// otherwise-allowed domain). This is a HEURISTIC on top of the egress tier's own allow/deny — it
+/// exists to catch abuse of an *already-allowed* wildcard domain, not to replace the allowlist.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DnsExfilPolicy {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Shannon-entropy threshold in bits/char above which a subdomain label is flagged. Ordinary
+    /// hostnames score roughly 2.5–3.5; base32/hex-encoded exfil payloads commonly score 3.8+.
+    /// Default chosen conservatively high to minimize false positives on legitimate CDN/hash-named
+    /// subdomains (see the false-positive-safety test).
+    #[serde(default = "default_entropy_threshold")]
+    pub entropy_threshold: f64,
+    #[serde(default)]
+    pub action: AlertOrDeny,
+}
+
+fn default_entropy_threshold() -> f64 {
+    4.0
+}
+
+/// Shannon entropy in bits/character of `s`, over its raw bytes. A hostname label is ASCII (or
+/// punycode-encoded at the wire level for IDN, which is itself a high-entropy string and correctly
+/// flagged), so byte-level entropy is the right granularity. Strings under 2 bytes score 0.0 — too
+/// short for a meaningful character distribution either way.
+pub fn shannon_entropy(s: &str) -> f64 {
+    if s.len() < 2 {
+        return 0.0;
+    }
+    let mut counts: std::collections::HashMap<u8, u32> = std::collections::HashMap::new();
+    for b in s.bytes() {
+        *counts.entry(b).or_insert(0) += 1;
+    }
+    let len = s.len() as f64;
+    -counts
+        .values()
+        .map(|&c| {
+            let p = c as f64 / len;
+            p * p.log2()
+        })
+        .sum::<f64>()
+}
+
+/// The highest per-label Shannon entropy among `host`'s SUBDOMAIN labels — every label except the
+/// trailing two (assumed to be the registrable apex domain + TLD, e.g. `vendor`/`com`), since that
+/// pair is the operator-allowlisted destination itself, not an attacker-controlled position.
+/// Exfiltration tools commonly chunk encoded data across multiple labels (DNS's 63-byte label
+/// limit), so this checks ALL of them and returns the max, not just the leftmost. `None` for a host
+/// with fewer than 3 labels — an apex or single-label host has no subdomain to inspect at all.
+pub fn max_subdomain_entropy(host: &str) -> Option<f64> {
+    let labels: Vec<&str> = host.trim().trim_end_matches('.').split('.').collect();
+    if labels.len() < 3 {
+        return None;
+    }
+    labels[..labels.len() - 2]
+        .iter()
+        .map(|l| shannon_entropy(l))
+        .fold(None, |acc: Option<f64>, e| {
+            Some(acc.map_or(e, |a| a.max(e)))
+        })
+}
+
+/// B6: reject private/link-local/cloud-metadata destinations and pin the resolved IP for the
+/// connection so a rebind between the check and the connect can't swap in a different address. This
+/// is a real security control, not a tunable heuristic — the only dial is whether it's on.
+///
+/// That one dial governs BOTH layers together: the GOVERNOR-level pre-check (a forbidden destination
+/// gets a clean, policy-attributed pre-execute `kriya.io.*.deny` receipt) AND the HTTP transport's IP
+/// pin (`mcp::client::HttpTransport`, the actually TOCTOU-proof enforcement). Gated, not
+/// unconditional: a local dev/test upstream on `127.0.0.1`/`localhost` is a legitimate `url:`
+/// target — this is real, not hypothetical, an existing broker integration test connects to one — so
+/// pinning away from loopback by default would have real legitimate-traffic cost, unlike (say)
+/// refusing the cloud metadata endpoint. Same house rule as every other detector in the pack (doc 24
+/// §11's "never auto-block silently by default"): absent `detection.ssrf_guard`, both layers are off.
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct SsrfGuardPolicy {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+/// B6 core validator: why `ip` is a forbidden SSRF/rebinding target, or `None` if it's an ordinary
+/// routable address. Covers loopback, RFC1918 private ranges, link-local (which subsumes the cloud
+/// metadata endpoint `169.254.169.254` — it lives inside `169.254.0.0/16`), unspecified, broadcast,
+/// IPv6 unique-local (`fc00::/7`) and link-local (`fe80::/10`), and IPv4-mapped IPv6 addresses
+/// (checked against the same IPv4 rules after unwrapping). Used both by the governor's pre-check
+/// (clean receipts) and the transport's resolver pin (actual enforcement) so the two layers can
+/// never disagree about what's forbidden.
+pub fn ssrf_disallowed_reason(ip: std::net::IpAddr) -> Option<&'static str> {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            if v4.is_loopback() {
+                Some("loopback (127.0.0.0/8)")
+            } else if v4.is_private() {
+                Some("RFC1918 private range")
+            } else if v4.is_link_local() {
+                Some("link-local (169.254.0.0/16, includes the cloud metadata endpoint)")
+            } else if v4.is_unspecified() {
+                Some("unspecified (0.0.0.0)")
+            } else if v4.is_broadcast() {
+                Some("broadcast (255.255.255.255)")
+            } else {
+                None
+            }
+        }
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return ssrf_disallowed_reason(IpAddr::V4(v4));
+            }
+            let seg0 = v6.segments()[0];
+            if v6.is_loopback() {
+                Some("loopback (::1)")
+            } else if v6.is_unspecified() {
+                Some("unspecified (::)")
+            } else if seg0 & 0xfe00 == 0xfc00 {
+                Some("unique-local (fc00::/7)")
+            } else if seg0 & 0xffc0 == 0xfe80 {
+                Some("link-local (fe80::/10)")
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// B7: scan outbound governed bodies for a closed set of secret/PII shapes. On a match, either
+/// redact (record the match TYPE + a content hash only, never the value) or deny.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SecretPiiPolicy {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub action: RedactOrDeny,
+}
+
+/// B7 scan: which secret/PII shapes matched `payload` (the canonical-JSON outbound body), by TYPE
+/// name only. Byte-level scanning throughout (never a `&str` slice at an arbitrary offset) so this
+/// can never panic on attacker-controlled UTF-8 — every helper below only ever compares/indexes
+/// `&[u8]`. The matched substring itself is never extracted or returned: a caller has structurally
+/// nothing to leak into a flag or a "redact" — the value never leaves this function (doc 24 L9's
+/// hash-only rule, applied here as *no value at all*, not even hashed).
+pub fn scan_secrets_pii(payload: &str) -> Vec<&'static str> {
+    let b = payload.as_bytes();
+    let mut hits = Vec::new();
+    if has_fixed_prefix_token(b, b"AKIA", 16, is_upper_alnum) {
+        hits.push("aws_access_key");
+    }
+    if has_fixed_prefix_token(b, b"ghp_", 36, is_alnum) {
+        hits.push("github_pat");
+    }
+    if has_jwt(b) {
+        hits.push("jwt");
+    }
+    if contains(b, b"-----BEGIN") && contains(b, b"PRIVATE KEY") {
+        hits.push("private_key");
+    }
+    if has_email(b) {
+        hits.push("email");
+    }
+    if has_luhn_card(b) {
+        hits.push("credit_card");
+    }
+    if has_ssn(b) {
+        hits.push("ssn");
+    }
+    hits
+}
+
+fn contains(hay: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty() && hay.windows(needle.len()).any(|w| w == needle)
+}
+
+fn is_upper_alnum(c: u8) -> bool {
+    c.is_ascii_uppercase() || c.is_ascii_digit()
+}
+
+fn is_alnum(c: u8) -> bool {
+    c.is_ascii_alphanumeric()
+}
+
+/// True if `prefix` appears anywhere in `b` followed immediately by exactly `tail_len` bytes all
+/// satisfying `tail_ok` (e.g. an AWS key: `AKIA` + 16 upper-alnum chars).
+fn has_fixed_prefix_token(
+    b: &[u8],
+    prefix: &[u8],
+    tail_len: usize,
+    tail_ok: fn(u8) -> bool,
+) -> bool {
+    let plen = prefix.len();
+    if b.len() < plen + tail_len {
+        return false;
+    }
+    (0..=b.len() - plen - tail_len).any(|i| {
+        &b[i..i + plen] == prefix
+            && b[i + plen..i + plen + tail_len]
+                .iter()
+                .copied()
+                .all(tail_ok)
+    })
+}
+
+fn is_b64url(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'_' || c == b'-'
+}
+
+/// A JWT: three dot-separated base64url segments, the first starting `eyJ` (base64 for `{"`) — a
+/// strong anchor that keeps this from firing on an ordinary dotted token or version string. Minimum
+/// segment lengths are conservative (a real header/payload/signature are all comfortably longer).
+fn has_jwt(b: &[u8]) -> bool {
+    let mut i = 0;
+    while i + 3 <= b.len() {
+        if &b[i..i + 3] == b"eyJ" {
+            let seg1_end = walk_while(b, i, is_b64url);
+            if seg1_end >= i + 10 && b.get(seg1_end) == Some(&b'.') {
+                let seg2_start = seg1_end + 1;
+                let seg2_end = walk_while(b, seg2_start, is_b64url);
+                if seg2_end >= seg2_start + 10 && b.get(seg2_end) == Some(&b'.') {
+                    let seg3_start = seg2_end + 1;
+                    let seg3_end = walk_while(b, seg3_start, is_b64url);
+                    if seg3_end >= seg3_start + 5 {
+                        return true;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+fn walk_while(b: &[u8], mut i: usize, pred: fn(u8) -> bool) -> usize {
+    while i < b.len() && pred(b[i]) {
+        i += 1;
+    }
+    i
+}
+
+/// A conservative `local@domain.tld` shape: at least one local-part char, a domain of word chars and
+/// dots, a final label of 2+ letters.
+fn has_email(b: &[u8]) -> bool {
+    for (idx, &c) in b.iter().enumerate() {
+        if c != b'@' {
+            continue;
+        }
+        let local_ok = idx > 0
+            && matches!(b[idx - 1], b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'+' | b'-' | b'_');
+        if !local_ok {
+            continue;
+        }
+        let dom_start = idx + 1;
+        let dom_end = walk_while(b, dom_start, |c| {
+            c.is_ascii_alphanumeric() || c == b'.' || c == b'-'
+        });
+        let domain = &b[dom_start..dom_end];
+        if domain.len() < 4 {
+            continue;
+        }
+        if let Some(dot) = domain.iter().rposition(|&c| c == b'.') {
+            let tld = &domain[dot + 1..];
+            if tld.len() >= 2 && tld.iter().all(u8::is_ascii_alphabetic) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// A 13–19 digit run that passes the Luhn checksum (the standard card-number DLP heuristic — Luhn's
+/// own ~1-in-10 accept rate on random digits is an inherent property of the checksum, not a flaw
+/// here; it is what every mainstream DLP tool uses for exactly this shape).
+fn has_luhn_card(b: &[u8]) -> bool {
+    let mut i = 0;
+    while i < b.len() {
+        if b[i].is_ascii_digit() {
+            let start = i;
+            let end = walk_while(b, i, |c| c.is_ascii_digit());
+            let len = end - start;
+            if (13..=19).contains(&len) && luhn_valid(&b[start..end]) {
+                return true;
+            }
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
+fn luhn_valid(digits: &[u8]) -> bool {
+    let mut sum = 0u32;
+    let mut double = false;
+    for &d in digits.iter().rev() {
+        let mut v = (d - b'0') as u32;
+        if double {
+            v *= 2;
+            if v > 9 {
+                v -= 9;
+            }
+        }
+        sum += v;
+        double = !double;
+    }
+    sum % 10 == 0
+}
+
+/// `\d{3}-\d{2}-\d{4}` not immediately bordered by another digit (so it doesn't fire inside a longer
+/// dash-delimited digit run, e.g. a tracking or account number).
+fn has_ssn(b: &[u8]) -> bool {
+    if b.len() < 11 {
+        return false;
+    }
+    (0..=b.len() - 11).any(|i| {
+        b[i..i + 3].iter().all(u8::is_ascii_digit)
+            && b[i + 3] == b'-'
+            && b[i + 4..i + 6].iter().all(u8::is_ascii_digit)
+            && b[i + 6] == b'-'
+            && b[i + 7..i + 11].iter().all(u8::is_ascii_digit)
+            && (i == 0 || !b[i - 1].is_ascii_digit())
+            && (i + 11 >= b.len() || !b[i + 11].is_ascii_digit())
+    })
+}
+
+/// B9: the first configured canary token that appears verbatim in `payload`, if any. Canary tokens
+/// are operator-planted honeytoken strings (bait credentials that should never legitimately appear
+/// in real traffic) — ANY match is always-deny regardless of `AlertOrDeny`/`RedactOrDeny` (doc 24
+/// §11 B9 is the one detector with no soft mode: there is no legitimate reason for a canary to ever
+/// cross a governed lane, so there is nothing an "alert" mode would be hedging against).
+pub fn canary_match<'a>(payload: &str, tokens: &'a [String]) -> Option<&'a str> {
+    tokens
+        .iter()
+        .find(|t| !t.is_empty() && payload.contains(t.as_str()))
+        .map(String::as_str)
+}
+
+/// B8: one operation rail — allow/deny/approve a specific outbound API operation, narrower than a
+/// host-level egress rule. `host` uses the same pattern syntax as egress rules (`*` / `*.domain` /
+/// exact); `method` is an HTTP verb or `*`; `path` is an optional `prefix_*` glob or exact match;
+/// `graphql_mutation` optionally matches a GraphQL mutation NAME inside a JSON body. Rails are
+/// evaluated top-to-bottom, first match wins; a body the rail must parse to decide (a `path`/
+/// `graphql_mutation` rail against a non-JSON or malformed body) that fails to parse is a DENY
+/// (fail-closed for the rail — an uninspectable body can't be cleared).
+#[derive(Debug, Clone, Deserialize)]
+pub struct OperationRail {
+    #[serde(default = "default_star")]
+    pub host: String,
+    #[serde(default = "default_star")]
+    pub method: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub graphql_mutation: Option<String>,
+    pub tier: EgressTier,
+}
+
+fn default_star() -> String {
+    "*".to_string()
+}
+
+/// B8 evaluation outcome for one call against the configured `operation_rails`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RailOutcome {
+    /// No configured rail's `host` pattern matches this destination — rails are opt-in per
+    /// destination, so an unrailed host is completely unaffected (false-positive safety).
+    NoRailApplies,
+    Allowed,
+    RequiresApproval,
+    Denied(String),
+    /// A rail applies to this destination but the operation (verb+path or GraphQL mutation name)
+    /// could not be extracted from `params` — fail-closed (doc 24 §11 B8).
+    ParseFailed,
+}
+
+/// Best-effort `(METHOD, path)` from an action's params: an explicit `method`/`path` pair, or a
+/// `method` + the path component of a `url` field (defaulting method to `GET`, matching a plain
+/// WebFetch's implicit-GET shape).
+fn extract_operation(params: &Value) -> Option<(String, String)> {
+    let method = params
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or("GET")
+        .to_ascii_uppercase();
+    if let Some(path) = params.get("path").and_then(Value::as_str) {
+        return Some((method, path.to_string()));
+    }
+    let url = params.get("url").and_then(Value::as_str)?;
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let path = after_scheme
+        .find('/')
+        .map(|i| &after_scheme[i..])
+        .unwrap_or("/");
+    Some((method, path.to_string()))
+}
+
+/// A GraphQL mutation NAME out of a `query`/`body` string field: text after the first `mutation`
+/// keyword, up to the first non-identifier character. `None` for an anonymous mutation (`mutation {
+/// ... }`) or no mutation keyword at all — anonymous mutations can't be named-matched by a rail.
+fn extract_graphql_mutation(params: &Value) -> Option<String> {
+    let query = params
+        .get("query")
+        .and_then(Value::as_str)
+        .or_else(|| params.get("body").and_then(Value::as_str))?;
+    let idx = query.find("mutation")?;
+    let rest = query[idx + "mutation".len()..].trim_start();
+    let name: String = rest
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+/// B8: evaluate `params` against the operation rails that apply to `host`. Rails are an ALLOWLIST
+/// FENCE (the "rail" in the name) — an operation that doesn't match any applicable rail is denied,
+/// not silently passed through, consistent with the rest of kriya's deny-by-default posture. Rails
+/// are evaluated top-to-bottom; first match wins.
+pub fn evaluate_operation_rails(
+    rails: &[OperationRail],
+    host: &str,
+    params: &Value,
+) -> RailOutcome {
+    let applicable: Vec<&OperationRail> = rails
+        .iter()
+        .filter(|r| r.host == "*" || host_matches(&r.host, host))
+        .collect();
+    if applicable.is_empty() {
+        return RailOutcome::NoRailApplies;
+    }
+
+    let op = extract_operation(params);
+    let mutation = extract_graphql_mutation(params);
+    if op.is_none() && mutation.is_none() {
+        return RailOutcome::ParseFailed;
+    }
+
+    for rail in applicable {
+        let matched = if let Some(want) = &rail.graphql_mutation {
+            mutation.as_deref() == Some(want.as_str())
+        } else if let Some((method, path)) = &op {
+            let method_ok = rail.method == "*" || rail.method.eq_ignore_ascii_case(method);
+            let path_ok = rail
+                .path
+                .as_deref()
+                .map_or(true, |pattern| matches(pattern, path));
+            method_ok && path_ok
+        } else {
+            false
+        };
+        if matched {
+            return match rail.tier {
+                EgressTier::Allow => RailOutcome::Allowed,
+                EgressTier::Approval => RailOutcome::RequiresApproval,
+                EgressTier::Deny => RailOutcome::Denied(format!(
+                    "operation rail explicitly denies {} on '{host}' (B8)",
+                    op.as_ref()
+                        .map(|(m, p)| format!("{m} {p}"))
+                        .unwrap_or_else(|| format!(
+                            "mutation {}",
+                            mutation.as_deref().unwrap_or("?")
+                        )),
+                )),
+            };
+        }
+    }
+    RailOutcome::Denied(format!(
+        "no operation rail on '{host}' permits {} (B8, fail-closed)",
+        op.as_ref()
+            .map(|(m, p)| format!("{m} {p}"))
+            .unwrap_or_else(|| format!("mutation {}", mutation.as_deref().unwrap_or("?"))),
+    ))
+}
+
+/// B10: the connector registry. A discovered MCP tool `(upstream, tool)` is disabled-until-approved
+/// unless it appears here with a matching `description_hash`; a hash MISMATCH against an approved
+/// entry (the tool's description/schema changed since approval) is drift — the tool-poisoning
+/// signal — and disables it again until re-approved. Approval is authored in policy (via the
+/// Console), never a runtime-mutable file, so it travels with the signed fleet PolicyBundle exactly
+/// like every other policy dial.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConnectorRegistryPolicy {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub approved: Vec<ApprovedConnectorTool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApprovedConnectorTool {
+    /// The broker upstream namespace (the slugified `name:` from `broker.yaml`, e.g. `"widgets"`).
+    pub upstream: String,
+    /// The inner (un-namespaced) tool name as the upstream reports it.
+    pub tool: String,
+    /// SHA-256 hex of the canonical tool description at approval time — see
+    /// `connector_tool_hash` in `bin/kriya-gateway.rs`, the only place a full `Tool` (with its
+    /// description) is in hand at discovery time. A live mismatch is drift.
+    pub description_hash: String,
+}
+
+/// B12: per-server trust class for governed MCP ingress (responses). `Trusted` passes through
+/// unchanged; `Scan` runs the B7 secret/PII pass over the response too; `Block` denies the response
+/// outright. Default class is `Scan`, never `Block` — the house rule against silently auto-blocking
+/// a server the operator hasn't explicitly classified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TrustClass {
+    Trusted,
+    #[default]
+    Scan,
+    Block,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct McpResponsePolicy {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// The class an unlisted server gets. Default `Scan` (never `Block`).
+    #[serde(default)]
+    pub default_class: TrustClass,
+    #[serde(default)]
+    pub per_server: std::collections::BTreeMap<String, TrustClass>,
+}
+
+impl McpResponsePolicy {
+    /// The effective trust class for `server` (the broker upstream namespace).
+    pub fn class_for(&self, server: &str) -> TrustClass {
+        self.per_server
+            .get(server)
+            .copied()
+            .unwrap_or(self.default_class)
+    }
+}
+
+impl DetectionPolicy {
+    /// B11: whether `action_id` is a known-mutating tool on a connector the operator marked
+    /// read-only — a hard override the explicit action `rules` can never widen back open (checked
+    /// before them in [`Policy::check`]). `read_only` entries are connector NAMESPACE patterns using
+    /// the action policy's own prefix-glob syntax (`"widgets"`/`"widgets__*"`/`"widgets__delete_*"`
+    /// — a bare namespace like `"widgets"` is normalized to `"widgets__*"`), never a host: the
+    /// namespace is what a "connector" means in the broker's `<namespace>__<tool>` scheme, and
+    /// resolving a namespace to a destination host isn't information `Policy` has.
+    pub fn read_only_denies(&self, action_id: &str) -> bool {
+        if !is_destructive_name(action_id) {
+            return false;
+        }
+        self.read_only.iter().any(|pattern| {
+            let pattern = if pattern.contains('*') {
+                pattern.clone()
+            } else {
+                format!("{pattern}__*")
+            };
+            matches(&pattern, action_id)
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1054,5 +1706,182 @@ retention:
         assert_eq!(r.io_days, Some(30));
         assert_eq!(r.default_days, Some(365));
         assert!(r.io_days.unwrap() < r.default_days.unwrap());
+    }
+
+    // ─── Detection pack (doc 24 §11 B5–B12 / EG-P) ──────────────────────────────────────────────
+
+    #[test]
+    fn detection_absent_by_default_and_every_sub_detector_independently_gated() {
+        let p = policy_from(r#"rules: [{action: "*", allow: true}]"#);
+        assert!(
+            p.detection().is_none(),
+            "opting into nothing changes nothing"
+        );
+
+        // Opting into `detection:` at all must NOT silently enable any specific sub-detector.
+        let p = policy_from(
+            r#"
+rules: [{action: "*", allow: true}]
+detection: {}
+"#,
+        );
+        let d = p.detection().expect("detection section present");
+        assert!(d.dns_exfil.is_none());
+        assert!(d.ssrf_guard.is_none());
+        assert!(d.secret_pii.is_none());
+        assert!(d.operation_rails.is_empty());
+        assert!(d.canary_tokens.is_empty());
+        assert!(d.connector_registry.is_none());
+        assert!(d.read_only.is_empty());
+        assert!(d.mcp_response.is_none());
+    }
+
+    #[test]
+    fn detection_sub_policies_default_to_the_safe_never_auto_block_choice() {
+        let p = policy_from(
+            r#"
+rules: [{action: "*", allow: true}]
+detection:
+  dns_exfil: {}
+  secret_pii: {}
+  mcp_response: {}
+"#,
+        );
+        let d = p.detection().unwrap();
+        assert_eq!(
+            d.dns_exfil.as_ref().unwrap().action,
+            AlertOrDeny::Alert,
+            "default alert, never deny"
+        );
+        assert_eq!(
+            d.secret_pii.as_ref().unwrap().action,
+            RedactOrDeny::Redact,
+            "default redact, never deny"
+        );
+        assert_eq!(
+            d.mcp_response.as_ref().unwrap().default_class,
+            TrustClass::Scan,
+            "default scan, never block"
+        );
+        assert_eq!(d.dns_exfil.as_ref().unwrap().entropy_threshold, 4.0);
+    }
+
+    #[test]
+    fn b11_read_only_denies_only_destructive_names_on_a_marked_connector() {
+        let p = policy_from(
+            r#"
+rules:
+  - action: "*"
+    allow: true
+detection:
+  read_only: ["widgets"]
+"#,
+        );
+        // Observe: a non-destructive tool on the read-only connector is unaffected.
+        assert_eq!(p.check("widgets__list_items"), Decision::Allow);
+        assert_eq!(p.check("widgets__get_item"), Decision::Allow);
+        // Deny: a destructive-named tool on the read-only connector is hard-denied...
+        assert_eq!(p.check("widgets__delete_item"), Decision::Deny);
+        assert_eq!(p.check("widgets__wipe_all"), Decision::Deny);
+        // False-positive-safety: a DIFFERENT connector's destructive tool is untouched by this
+        // preset (governed only by the explicit rules, which here allow everything).
+        assert_eq!(p.check("gadgets__delete_item"), Decision::Allow);
+    }
+
+    #[test]
+    fn b11_read_only_override_cannot_be_widened_back_open_by_an_explicit_allow_rule() {
+        // Even an operator-authored rule that explicitly allows the exact destructive action must
+        // NOT override the read-only preset — it is a hard override, checked first.
+        let p = policy_from(
+            r#"
+rules:
+  - action: "widgets__delete_item"
+    allow: true
+  - action: "*"
+    allow: true
+detection:
+  read_only: ["widgets"]
+"#,
+        );
+        assert_eq!(
+            p.check("widgets__delete_item"),
+            Decision::Deny,
+            "read-only is a hard override, not just a default"
+        );
+    }
+
+    // ─── B5: DNS-exfil / subdomain-entropy ───────────────────────────────────────────────────────
+
+    #[test]
+    fn max_subdomain_entropy_ignores_the_apex_and_single_label_hosts() {
+        assert_eq!(
+            max_subdomain_entropy("vendor.com"),
+            None,
+            "apex only, nothing to inspect"
+        );
+        assert_eq!(max_subdomain_entropy("localhost"), None, "single label");
+        assert!(
+            max_subdomain_entropy("api.vendor.com").is_some(),
+            "one real subdomain label"
+        );
+    }
+
+    #[test]
+    fn max_subdomain_entropy_stays_well_under_the_default_threshold_for_ordinary_hosts() {
+        // False-positive-safety: common, legitimate subdomain shapes must not approach 4.0 bits/char.
+        for host in [
+            "api.vendor.com",
+            "www.example.org",
+            "cdn.assets.example.com",
+            "eu-west-1.s3.amazonaws.com",
+            "docs.github.com",
+        ] {
+            let e = max_subdomain_entropy(host).unwrap();
+            assert!(
+                e < 4.0,
+                "{host} scored {e:.2}, expected well under the 4.0 default threshold"
+            );
+        }
+    }
+
+    #[test]
+    fn max_subdomain_entropy_flags_a_base32_shaped_exfil_payload() {
+        // A realistic DNS-exfil shape: encoded payload chunks as subdomain labels.
+        let exfil = "khbwy4dxovss4z3jf5xweidwmn2gk4dsn5wg65lsmvzq";
+        let e = max_subdomain_entropy(&format!("{exfil}.vendor.com")).unwrap();
+        assert!(
+            e >= 4.0,
+            "expected the encoded payload label to score >= 4.0, got {e:.2}"
+        );
+
+        // Multi-label chunking: the flag must fire even if the high-entropy chunk isn't leftmost.
+        let chunked = max_subdomain_entropy(&format!("a.b.{exfil}.vendor.com")).unwrap();
+        assert!(
+            chunked >= 4.0,
+            "a high-entropy label anywhere before the apex must be caught, got {chunked:.2}"
+        );
+    }
+
+    #[test]
+    fn shannon_entropy_handles_degenerate_inputs_without_panicking() {
+        assert_eq!(shannon_entropy(""), 0.0);
+        assert_eq!(shannon_entropy("a"), 0.0);
+        assert_eq!(shannon_entropy("aaaa"), 0.0, "zero variety -> zero entropy");
+        assert!(shannon_entropy("abcd") > 0.0);
+    }
+
+    #[test]
+    fn b11_bare_namespace_and_explicit_glob_forms_are_equivalent() {
+        let bare = policy_from(
+            r#"rules: [{action: "*", allow: true}]
+detection: { read_only: ["widgets"] }"#,
+        );
+        let glob = policy_from(
+            r#"rules: [{action: "*", allow: true}]
+detection: { read_only: ["widgets__*"] }"#,
+        );
+        for p in [bare, glob] {
+            assert_eq!(p.check("widgets__delete_item"), Decision::Deny);
+        }
     }
 }
