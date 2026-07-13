@@ -38,6 +38,7 @@ use crate::permissions::{
     ssrf_disallowed_reason, AlertOrDeny, Decision, EgressDecision, McpResponsePolicy, Policy,
     RailOutcome, RedactOrDeny, TrustClass,
 };
+use crate::secrets::find_placeholder_aliases;
 
 use super::approval::ApprovalGate;
 use super::executor::{
@@ -549,7 +550,42 @@ impl Governor {
             }
         }
 
-        // Byte budget (B2) — estimate outbound payload from the serialized request arguments.
+        // B13 credential brokering (doc 24 §11 B13 / EG-B) — scope PRE-CHECK only: this never reads
+        // a secret VALUE, only asks "which aliases are named here, and is each one configured and
+        // allowed for this destination." A misrouted or unconfigured alias gets a clean, attributed
+        // deny receipt here rather than a generic transport failure — the actual substitution (the
+        // real enforcement) happens later, at the transport, right before the wire send; this is the
+        // SAME dual-layer shape as the B6 SSRF guard (a governor-level belt to the transport's
+        // suspenders). A cleared alias is recorded as an ADDITIVE flag — never the value — on the
+        // eventual allow/approve receipt, exactly like every other detector's flag.
+        if let Some(secrets) = self.policy.secrets() {
+            for alias in find_placeholder_aliases(&payload) {
+                match secrets.find(&alias) {
+                    None => {
+                        let reason = format!(
+                            "credential brokering: alias '{alias}' is not configured (B13)"
+                        );
+                        self.sign_io_deny(&target, policy_rule.clone(), reason.clone());
+                        return EgressGate::Denied(reason);
+                    }
+                    Some(entry) if !entry.allows_host(&target.host) => {
+                        let reason = format!(
+                            "credential brokering: alias '{alias}' is not allowed for destination '{}' (B13)",
+                            target.host
+                        );
+                        self.sign_io_deny(&target, policy_rule.clone(), reason.clone());
+                        return EgressGate::Denied(reason);
+                    }
+                    Some(_) => flags.push(format!("b13-brokered:{alias}")),
+                }
+            }
+        }
+
+        // Byte budget (B2) — estimate outbound payload from the serialized request arguments. Note:
+        // when B13 brokering fires, this estimate is taken over the PLACEHOLDER form (the governor
+        // never reads the real secret, so it can't know the substituted length) — a minor, honest
+        // undercount when brokering is active, consistent with this ledger never claiming byte-exact
+        // wire accounting (L2/L4).
         let est = payload.len() as u64;
         if let Err(reason) = control.charge_budget(&target.host, est, now_ms()) {
             self.sign_io_deny(&target, policy_rule, reason.clone());
@@ -1923,5 +1959,197 @@ budget:
             io_lines(&log).is_empty(),
             "no ingress control installed → no kriya.io.ingress.* at all"
         );
+    }
+
+    // ---- B13: credential brokering — governor pre-check (doc 24 §11 B13 / EG-B) --------------
+    // These test the SCOPE pre-check only (alias configured + allowed for the destination): the
+    // governor never reads a secret value, so it can't assert what got sent — that's `secrets.rs`'s
+    // `broker_body` unit tests plus the real-transport integration test in `tests/brokering.rs`.
+
+    fn secrets_policy_yaml(secrets_block: &str) -> String {
+        format!(
+            "rules:\n  - action: \"*\"\n    allow: true\nbudget:\n  max_actions_per_minute: 1000\nsecrets:\n{secrets_block}"
+        )
+    }
+
+    #[test]
+    fn b13_brokering_clears_a_configured_and_scoped_alias_and_flags_the_receipt() {
+        let (s, log) = signer_with_log();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let mut g = egress_governor_with_detection(
+            s,
+            &secrets_policy_yaml(
+                "  aliases:\n    - alias: \"github_pat\"\n      keychain_service: \"kriya\"\n      keychain_account: \"github_pat\"\n      allowed_hosts:\n        - \"*.vendor.com\"\n",
+            ),
+            ALLOW_VENDOR_WILDCARD,
+            "api.vendor.com",
+            ran.clone(),
+            Box::new(DenyApproval),
+        );
+        assert!(matches!(
+            g.dispatch("widgets__list", &json!({"token": "{{kriya:github_pat}}"})),
+            DispatchOutcome::Executed { .. }
+        ));
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            1,
+            "a cleared alias never blocks the call"
+        );
+        let io = io_lines(&log);
+        assert_eq!(io[0]["action_id"], "kriya.io.egress.mcp.allow");
+        let flags = io[0]["params"]["flags"].as_array().expect("flags present");
+        assert!(flags
+            .iter()
+            .any(|f| f.as_str().unwrap() == "b13-brokered:github_pat"));
+        // The placeholder text itself is a fine thing to see in the receipt (it's not the secret) —
+        // but the point of the feature is that nothing BEYOND the placeholder ever appears here.
+        assert!(!io[0].to_string().to_lowercase().contains("real_secret"));
+    }
+
+    #[test]
+    fn b13_brokering_denies_an_unconfigured_alias() {
+        let (s, log) = signer_with_log();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let mut g = egress_governor_with_detection(
+            s,
+            &secrets_policy_yaml("  aliases: []\n"),
+            ALLOW_VENDOR_WILDCARD,
+            "api.vendor.com",
+            ran.clone(),
+            Box::new(DenyApproval),
+        );
+        assert!(matches!(
+            g.dispatch("widgets__list", &json!({"token": "{{kriya:nope}}"})),
+            DispatchOutcome::EgressDenied(_)
+        ));
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            0,
+            "an unconfigured alias must never execute"
+        );
+        let io = io_lines(&log);
+        assert_eq!(io[0]["action_id"], "kriya.io.egress.mcp.deny");
+        let reason = io[0]["params"]["reason"].as_str().unwrap();
+        assert!(
+            reason.contains("B13") && reason.contains("not configured"),
+            "reason: {reason}"
+        );
+    }
+
+    #[test]
+    fn b13_brokering_denies_a_misrouted_alias_without_leaking_anything() {
+        // The alias IS configured, but its allowed_hosts doesn't cover THIS destination — the exact
+        // "misrouted call must not leak the secret to an unlisted host" acceptance criterion.
+        let (s, log) = signer_with_log();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let mut g = egress_governor_with_detection(
+            s,
+            &secrets_policy_yaml(
+                "  aliases:\n    - alias: \"github_pat\"\n      keychain_service: \"kriya\"\n      keychain_account: \"github_pat\"\n      allowed_hosts:\n        - \"api.github.com\"\n",
+            ),
+            ALLOW_VENDOR_WILDCARD,
+            "api.vendor.com", // allowed by the EGRESS tier, but NOT by the alias's own scope
+            ran.clone(),
+            Box::new(DenyApproval),
+        );
+        assert!(matches!(
+            g.dispatch("widgets__list", &json!({"token": "{{kriya:github_pat}}"})),
+            DispatchOutcome::EgressDenied(_)
+        ));
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            0,
+            "a misrouted alias must never execute"
+        );
+        let io = io_lines(&log);
+        assert_eq!(io[0]["action_id"], "kriya.io.egress.mcp.deny");
+        let reason = io[0]["params"]["reason"].as_str().unwrap();
+        assert!(
+            reason.contains("B13") && reason.contains("api.vendor.com"),
+            "reason: {reason}"
+        );
+        let full = io[0].to_string();
+        assert!(
+            !full.to_lowercase().contains("secret"),
+            "no value or hint of one, only the alias name"
+        );
+    }
+
+    #[test]
+    fn b13_brokering_false_positive_safety_a_payload_with_no_placeholder_is_unaffected() {
+        let (s, log) = signer_with_log();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let mut g = egress_governor_with_detection(
+            s,
+            &secrets_policy_yaml(
+                "  aliases:\n    - alias: \"github_pat\"\n      keychain_service: \"kriya\"\n      keychain_account: \"github_pat\"\n      allowed_hosts:\n        - \"api.github.com\"\n",
+            ),
+            ALLOW_VENDOR_WILDCARD,
+            "api.vendor.com",
+            ran.clone(),
+            Box::new(DenyApproval),
+        );
+        assert!(matches!(
+            g.dispatch("widgets__list", &json!({"q": "list widgets"})),
+            DispatchOutcome::Executed { .. }
+        ));
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+        assert!(
+            io_lines(&log)[0]["params"].get("flags").is_none(),
+            "no placeholder → no flag at all"
+        );
+    }
+
+    #[test]
+    fn b13_brokering_one_bad_alias_denies_the_whole_call_even_with_a_good_one_present() {
+        // Fail-safe: a call naming TWO aliases where only one passes its scope check must be denied
+        // outright, never partially cleared.
+        let (s, log) = signer_with_log();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let mut g = egress_governor_with_detection(
+            s,
+            &secrets_policy_yaml(
+                "  aliases:\n    - alias: \"good\"\n      keychain_service: \"kriya\"\n      keychain_account: \"good\"\n      allowed_hosts:\n        - \"*.vendor.com\"\n    - alias: \"bad\"\n      keychain_service: \"kriya\"\n      keychain_account: \"bad\"\n      allowed_hosts:\n        - \"somewhere-else.example\"\n",
+            ),
+            ALLOW_VENDOR_WILDCARD,
+            "api.vendor.com",
+            ran.clone(),
+            Box::new(DenyApproval),
+        );
+        assert!(matches!(
+            g.dispatch(
+                "widgets__list",
+                &json!({"a": "{{kriya:good}}", "b": "{{kriya:bad}}"})
+            ),
+            DispatchOutcome::EgressDenied(_)
+        ));
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            0,
+            "one bad alias must deny the WHOLE call"
+        );
+        let io = io_lines(&log);
+        assert!(io[0]["params"]["reason"].as_str().unwrap().contains("bad"));
+    }
+
+    #[test]
+    fn b13_absent_secrets_policy_never_scans_for_placeholders_at_all() {
+        // No `secrets:` section at all → a literal-looking placeholder in a payload is just text.
+        let (s, log) = signer_with_log();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let mut g = egress_governor_with_detection(
+            s,
+            "rules:\n  - action: \"*\"\n    allow: true\nbudget:\n  max_actions_per_minute: 1000\n",
+            ALLOW_VENDOR_WILDCARD,
+            "api.vendor.com",
+            ran.clone(),
+            Box::new(DenyApproval),
+        );
+        assert!(matches!(
+            g.dispatch("widgets__list", &json!({"note": "{{kriya:whatever}}"})),
+            DispatchOutcome::Executed { .. }
+        ));
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+        assert!(io_lines(&log)[0]["params"].get("flags").is_none());
     }
 }

@@ -159,7 +159,7 @@ fn broker_governs_a_remote_http_upstream_and_signs_it() {
 
     // Connect the REMOTE upstream over HTTP and wrap it exactly as the broker binary does.
     let client = Arc::new(Mutex::new(
-        McpClient::connect_http(&url, vec![], false).expect("connect http upstream"),
+        McpClient::connect_http(&url, vec![], false, None).expect("connect http upstream"),
     ));
     let tools = {
         let mut g = client.lock().unwrap();

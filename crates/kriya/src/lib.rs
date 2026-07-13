@@ -60,6 +60,7 @@ pub mod memory;
 pub mod permissions;
 pub mod protocol;
 pub mod registry;
+pub mod secrets;
 pub mod sidecar;
 
 pub use registry::{json_result, Action, Param, ParamType, Params, Registry};
