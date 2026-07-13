@@ -104,6 +104,13 @@ pub struct Policy {
     /// default, so opting into the pack as a whole never silently enables a specific detector.
     #[serde(default)]
     detection: Option<DetectionPolicy>,
+    /// Optional **credential brokering** (doc 24 §11 B13 / EG-B): alias → OS Keychain reference
+    /// mappings, each scoped to its own destination allowlist. Absent by default → no `{{kriya:*}}`
+    /// placeholder is ever substituted, byte-identical to pre-EG-B behaviour. A NEW trust posture
+    /// when present — kriya briefly holds a real secret in process memory to inject it — see
+    /// `crate::secrets`'s module doc and `docs/THREAT-MODEL-brokering.md`.
+    #[serde(default)]
+    secrets: Option<crate::secrets::SecretsPolicy>,
 }
 
 impl Default for Policy {
@@ -138,6 +145,7 @@ impl Default for Policy {
             egress: None,
             retention: None,
             detection: None,
+            secrets: None,
         }
     }
 }
@@ -190,6 +198,11 @@ impl Policy {
     /// The detection pack (doc 24 §11 B5–B12 / EG-P), if configured.
     pub fn detection(&self) -> Option<&DetectionPolicy> {
         self.detection.as_ref()
+    }
+
+    /// The credential-brokering policy (doc 24 §11 B13 / EG-B), if configured.
+    pub fn secrets(&self) -> Option<&crate::secrets::SecretsPolicy> {
+        self.secrets.as_ref()
     }
 
     pub fn check(&self, action_id: &str) -> Decision {
@@ -335,6 +348,7 @@ pub fn default_broker_policy(namespaces: &[String]) -> Policy {
         egress: None,
         retention: None,
         detection: None,
+        secrets: None,
     }
 }
 
@@ -385,6 +399,7 @@ pub fn default_proxy_policy() -> Policy {
         egress: None,
         retention: None,
         detection: None,
+        secrets: None,
     }
 }
 
@@ -589,7 +604,7 @@ impl EgressPolicy {
 /// Case-insensitive; leading/trailing whitespace ignored. Unlike the action [`matches`] (prefix
 /// glob only), a leading `*.` is a genuine suffix match — the exact case L1 warns silently fails
 /// under the action matcher.
-fn host_matches(pattern: &str, host: &str) -> bool {
+pub(crate) fn host_matches(pattern: &str, host: &str) -> bool {
     let pattern = pattern.trim().to_ascii_lowercase();
     let host = host.trim().to_ascii_lowercase();
     if pattern == "*" {
