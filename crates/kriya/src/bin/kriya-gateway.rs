@@ -207,6 +207,9 @@ fn usage_and_exit(msg: &str) -> ! {
          kriya-gateway computer-use [same governance flags]   (system-wide pixel floor, all apps)\n       \
          kriya-gateway router [--reach-in \"App1,App2\"] [same governance flags]   (computer-use floor + named reach-in apps, ONE governor)\n       \
          kriya-gateway doctor [--app \"<App Name>\"]   (macOS preflight: Accessibility, bundle, snippet)\n       \
+         kriya-gateway run [--policy <p.yaml with an egress: section>] [same governance flags] -- <agent-cmd> [args...]\n       \
+         \x20  (EG-C containment, macOS only: forces the launched agent's egress through the governed lane —\n       \
+         \x20  see the honest ceiling in kriya::mcp::contain's module doc before selling this)\n       \
          kriya-gateway serve ...   (delegates to the kriya-mcp bolt-on)"
     );
     exit(2);
@@ -222,6 +225,11 @@ fn main() -> std::io::Result<()> {
         // Broker (W2) — ONE endpoint, N MCP upstreams, one governor/signer/log. The single wiring
         // point for a client with no hook (Claude Desktop) or many servers (Cursor). Config-driven.
         "broker" => run_broker(args),
+        // Containment (EG-C, doc 24 §11 B14) — force a LAUNCHED agent's egress through the
+        // governed lane via a macOS Seatbelt profile + recording CONNECT proxy. Read
+        // kriya::mcp::contain's module doc before selling this: it is network-only (the spike
+        // found unified-log exec/file fidelity too weak to claim more) and macOS-only in v1.
+        "run" => run_contained(args),
         // Front 2 — govern an app that has NO MCP server / NO API via its accessibility tree.
         "reach-in" => run_reachin(args),
         // Front 3 — governed computer-use (system-wide pixels): the universal reach floor alone.
@@ -1053,6 +1061,163 @@ fn run_broker(mut it: impl Iterator<Item = String>) -> std::io::Result<()> {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     server.serve(stdin.lock(), &mut out)
+}
+
+/// `kriya-gateway run [OPTIONS] -- <agent-cmd> [args...]` — containment (EG-C, doc 24 §11 B14):
+/// force a LAUNCHED agent's network egress through the governed lane, closing the `curl`/subprocess
+/// bypass the governed-lane receipts honestly disclose. macOS only in this release (Seatbelt);
+/// **read `kriya::mcp::contain`'s module doc for the honest ceiling before this is sold as
+/// anything beyond "network egress from agents kriya launches."**
+///
+/// Requires a `--policy` with an `egress:` section — `run` with no egress policy would sandbox the
+/// child for nothing (every destination would fall through the default `unlisted` posture with no
+/// operator-authored intent behind it), so it's a clean startup error rather than a silent no-op.
+#[cfg(feature = "contain")]
+fn run_contained(it: impl Iterator<Item = String>) -> std::io::Result<()> {
+    let args = parse_proxy_args(it);
+    let policy = Arc::new(match &args.policy {
+        Some(p) => Policy::load_or_default(p),
+        None => usage_and_exit(
+            "run requires --policy <p.yaml> with an `egress:` section — containment with no \
+             egress policy would sandbox the child for no operator-authored reason",
+        ),
+    });
+    if policy.egress().is_none() {
+        usage_and_exit(
+            "run requires the policy to have an `egress:` section — see docs/gtm/samples or \
+             doc 24 §7.3 for the shape",
+        );
+    }
+    for w in policy.warnings() {
+        eprintln!("[kriya-gateway] policy warning: {w}");
+    }
+
+    let audit_log = resolve_audit_log(args.audit_log.clone(), "run");
+    let signer = build_signer(&audit_log, &args.signing_key);
+    let actor = build_actor(args.actor.clone(), args.user.clone());
+    write_startup_attestation(&signer, args.signing_key.is_some(), &actor);
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (&policy, &signer, &actor); // keep bindings used on the error path
+        usage_and_exit(
+            "kriya-gateway run is macOS-only in this release (Seatbelt containment) — Linux \
+             containment rides the W3 Tetragon watcher (kriyawatch) when it ships; see doc 24 \
+             §11.3's documented v1 choice",
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use kriya::mcp::{seatbelt_profile, ConnectProxy, RUN_EXIT, RUN_START};
+
+        let scope_token = uuid::Uuid::new_v4().to_string();
+        let egress_policy = policy.egress().cloned().expect("checked above");
+        let proxy = match ConnectProxy::spawn(
+            egress_policy,
+            signer.clone(),
+            actor.clone(),
+            scope_token.clone(),
+        ) {
+            Ok(p) => p,
+            Err(e) => usage_and_exit(&format!("run: failed to start the local egress proxy: {e}")),
+        };
+
+        let profile_text = seatbelt_profile(proxy.port());
+        let profile_sha256 = kriya::mcp::contain_sha256_hex(profile_text.as_bytes());
+        let profile_path = std::env::temp_dir().join(format!("kriya-run-{scope_token}.sb"));
+        if let Err(e) = std::fs::write(&profile_path, &profile_text) {
+            usage_and_exit(&format!(
+                "run: failed to write the Seatbelt profile {profile_path:?}: {e}"
+            ));
+        }
+
+        signer.record(
+            Receipt::new(
+                uuid::Uuid::new_v4().to_string(),
+                RUN_START.to_string(),
+                serde_json::json!({
+                    "scope_token": scope_token,
+                    "seatbelt_profile_sha256": profile_sha256,
+                    "proxy_port": proxy.port(),
+                    "downstream": args.downstream,
+                }),
+                true,
+                now_ms(),
+            )
+            .with_actor(actor.clone()),
+        );
+
+        eprintln!(
+            "[kriya-gateway] run: containing '{}' under Seatbelt profile {profile_path:?} \
+             (sha256={profile_sha256}) · egress proxy on 127.0.0.1:{} · scope_token={scope_token} \
+             · audit log={}",
+            args.downstream.join(" "),
+            proxy.port(),
+            signer.log_path().display()
+        );
+        eprintln!(
+            "[kriya-gateway] honest ceiling: network-only containment for THIS process and its \
+             children — no file/exec visibility (the spike found log-stream fidelity too weak to \
+             claim it); a raw socket that ignores the proxy is blocked by the Seatbelt profile \
+             itself, not by agent cooperation."
+        );
+
+        let proxy_url = format!("http://127.0.0.1:{}", proxy.port());
+        let (program, down_args) = args
+            .downstream
+            .split_first()
+            .expect("non-empty, checked in parse_proxy_args");
+        let start = std::time::Instant::now();
+        let status = std::process::Command::new("sandbox-exec")
+            .arg("-f")
+            .arg(&profile_path)
+            .arg(program)
+            .args(down_args)
+            .env("HTTP_PROXY", &proxy_url)
+            .env("HTTPS_PROXY", &proxy_url)
+            .env("ALL_PROXY", &proxy_url)
+            .env("http_proxy", &proxy_url)
+            .env("https_proxy", &proxy_url)
+            .env("all_proxy", &proxy_url)
+            .status();
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        let (exit_code, spawn_error) = match &status {
+            Ok(s) => (s.code().unwrap_or(-1), None),
+            Err(e) => (-1, Some(e.to_string())),
+        };
+        signer.record(
+            Receipt::new(
+                uuid::Uuid::new_v4().to_string(),
+                RUN_EXIT.to_string(),
+                serde_json::json!({
+                    "scope_token": scope_token,
+                    "exit_code": exit_code,
+                    "duration_ms": duration_ms,
+                    "spawn_error": spawn_error,
+                }),
+                spawn_error.is_none(),
+                now_ms(),
+            )
+            .with_actor(actor.clone()),
+        );
+        let _ = std::fs::remove_file(&profile_path);
+        drop(proxy);
+
+        match status {
+            Ok(s) => std::process::exit(s.code().unwrap_or(1)),
+            Err(e) => usage_and_exit(&format!(
+                "run: failed to spawn '{program}' under sandbox-exec: {e}"
+            )),
+        }
+    }
+}
+
+/// Built WITHOUT the `contain` feature: tell the operator how to get it.
+#[cfg(not(feature = "contain"))]
+fn run_contained(_it: impl Iterator<Item = String>) -> std::io::Result<()> {
+    usage_and_exit("this gateway build has no containment support — rebuild with `--features mcp-client,contain`")
 }
 
 /// `kriya-gateway reach-in --app "<App Name>" [OPTIONS]` — Front 2 (service-architecture §5):
