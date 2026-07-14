@@ -111,6 +111,14 @@ pub struct Policy {
     /// `crate::secrets`'s module doc and `docs/THREAT-MODEL-brokering.md`.
     #[serde(default)]
     secrets: Option<crate::secrets::SecretsPolicy>,
+    /// Optional **A2A (agent-to-agent) governance seam** (doc 24 §11 B18 / EG-F). ROADMAP-DEPTH: no
+    /// agent-to-agent transport exists in this codebase yet, so nothing calls
+    /// [`Policy::evaluate_a2a_target`] today — this only defines the policy shape + decision
+    /// function a future A2A broker lane will call once real inter-agent RPC exists, so that lane
+    /// reuses the SAME allowlist engine as the egress tier instead of inventing a second allowlist
+    /// DSL. Absent by default → byte-identical to pre-EG-F behaviour.
+    #[serde(default)]
+    a2a: Option<A2aPolicy>,
 }
 
 impl Default for Policy {
@@ -146,6 +154,7 @@ impl Default for Policy {
             retention: None,
             detection: None,
             secrets: None,
+            a2a: None,
         }
     }
 }
@@ -203,6 +212,19 @@ impl Policy {
     /// The credential-brokering policy (doc 24 §11 B13 / EG-B), if configured.
     pub fn secrets(&self) -> Option<&crate::secrets::SecretsPolicy> {
         self.secrets.as_ref()
+    }
+
+    /// The A2A governance seam (doc 24 §11 B18 / EG-F), if configured. See [`A2aPolicy`]'s doc
+    /// comment for why this is a seam, not a wired enforcement point, today.
+    pub fn a2a(&self) -> Option<&A2aPolicy> {
+        self.a2a.as_ref()
+    }
+
+    /// Decide what to do with an RPC call to `target_agent_id` under the A2A seam — `None` when
+    /// `a2a:` isn't configured (no opinion, matches every other detector's "absent = off" idiom).
+    /// Convenience wrapper so a future call site doesn't need to unwrap `a2a()` itself.
+    pub fn evaluate_a2a_target(&self, target_agent_id: &str) -> Option<EgressDecision> {
+        self.a2a.as_ref().map(|a| a.evaluate(target_agent_id))
     }
 
     pub fn check(&self, action_id: &str) -> Decision {
@@ -349,6 +371,7 @@ pub fn default_broker_policy(namespaces: &[String]) -> Policy {
         retention: None,
         detection: None,
         secrets: None,
+        a2a: None,
     }
 }
 
@@ -400,6 +423,7 @@ pub fn default_proxy_policy() -> Policy {
         retention: None,
         detection: None,
         secrets: None,
+        a2a: None,
     }
 }
 
@@ -591,6 +615,34 @@ impl EgressPolicy {
     /// Whether the tier is deny-by-default (arms the broker startup allowlist check).
     pub fn is_deny_by_default(&self) -> bool {
         self.unlisted == UnlistedPosture::Deny
+    }
+}
+
+// ─── A2A (agent-to-agent) governance seam (doc 24 §11 B18 / EG-F) ─────────────────────────────────
+//
+// ROADMAP-DEPTH: thin until real agent-to-agent traffic exists. There is no A2A transport in this
+// codebase today (the broker in `kriya-gateway` aggregates MCP upstreams, not other agents; the
+// `agent/` module drives one app, not a peer agent) — so nothing calls `A2aPolicy::evaluate` yet.
+// This exists so that WHEN an A2A lane is built, it reuses the exact allowlist/tier engine
+// `EgressPolicy` already has (rules -> tier, unlisted posture) instead of inventing a second
+// allowlist DSL, and so it emits the SAME `kriya.io.*` receipt vocabulary (no new action_id shape)
+// once it exists — "apply the same allowlist/receipt path" per doc 24 §11's build item.
+
+/// The A2A destination allowlist, keyed by target agent id instead of network host. `#[serde(flatten)]`
+/// so `a2a:` in the policy YAML has the IDENTICAL shape as `egress:` (`rules: [{host, tier, budget?}]`,
+/// `unlisted`, `fail_closed`, `record_ingress`) — `host` is read as an agent-id pattern here, reusing
+/// `EgressPolicy`'s exact matcher (`*`, `*.suffix`, exact) rather than a bespoke agent-id grammar.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct A2aPolicy {
+    #[serde(flatten)]
+    allowlist: EgressPolicy,
+}
+
+impl A2aPolicy {
+    /// Decide what to do with an RPC call to `target_agent_id` — identical decision shape to
+    /// [`EgressPolicy::evaluate`], just evaluated over an agent id instead of a host.
+    pub fn evaluate(&self, target_agent_id: &str) -> EgressDecision {
+        self.allowlist.evaluate(target_agent_id)
     }
 }
 
@@ -1701,6 +1753,92 @@ egress:
         // A policy with no egress section → no egress governance, unchanged behaviour.
         let p = policy_from(r#"rules: [{action: "*", allow: false}]"#);
         assert!(p.egress().is_none());
+    }
+
+    // ─── A2A seam (doc 24 §11 B18 / EG-F) ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn a2a_absent_by_default_is_backward_compatible() {
+        let p = policy_from(r#"rules: [{action: "*", allow: false}]"#);
+        assert!(p.a2a().is_none());
+        assert!(p.evaluate_a2a_target("any-agent").is_none());
+    }
+
+    #[test]
+    fn a2a_reuses_the_egress_allowlist_engine_keyed_by_agent_id() {
+        let p = policy_from(
+            r#"
+rules: [{action: "*", allow: true}]
+a2a:
+  unlisted: deny
+  rules:
+    - host: "*.trusted-fleet"
+      tier: allow
+    - host: "quarantined-agent"
+      tier: deny
+"#,
+        );
+        assert_eq!(
+            p.evaluate_a2a_target("worker.trusted-fleet"),
+            Some(EgressDecision::Allow {
+                rule: Some("*.trusted-fleet".into())
+            })
+        );
+        assert!(matches!(
+            p.evaluate_a2a_target("quarantined-agent"),
+            Some(EgressDecision::Deny { .. })
+        ));
+        // Unlisted under deny-by-default → Deny, same posture semantics as the egress tier.
+        assert!(matches!(
+            p.evaluate_a2a_target("never-seen-agent"),
+            Some(EgressDecision::Deny { .. })
+        ));
+    }
+
+    /// The EG-F acceptance proof: a YAML shaped EXACTLY like kriya-console's
+    /// `control_plane::policy::policy_yaml_from_bundle` produces (top-level `rules`/`egress`/
+    /// `detection`, plus `budgets` merged in under a `budget:` key) round-trips through this crate's
+    /// own `Policy` and actually enforces — "a bundle with an egress policy converges on a device
+    /// and enforces" (doc 24 §11 / EG-F).
+    #[test]
+    fn a_policy_bundle_shaped_yaml_converges_and_enforces() {
+        let p = policy_from(
+            r#"
+rules:
+  - action: "*"
+    allow: true
+egress:
+  unlisted: deny
+  rules:
+    - host: "*.allowed.example.com"
+      tier: allow
+    - host: "evil.example.com"
+      tier: deny
+detection:
+  dns_exfil:
+    enabled: true
+budget:
+  max_actions_per_minute: 42
+"#,
+        );
+
+        let egress = p.egress().expect("the bundle's egress section converged");
+        assert_eq!(
+            egress.evaluate("api.allowed.example.com"),
+            EgressDecision::Allow {
+                rule: Some("*.allowed.example.com".into())
+            }
+        );
+        assert!(matches!(
+            egress.evaluate("evil.example.com"),
+            EgressDecision::Deny { .. }
+        ));
+        assert!(matches!(egress.evaluate("never-listed.example"), EgressDecision::Deny { .. }));
+
+        let detection = p.detection().expect("the bundle's detection section converged");
+        assert!(detection.dns_exfil.as_ref().expect("dns_exfil configured").enabled);
+
+        assert_eq!(p.max_actions_per_minute(), Some(42), "budgets merged under budget: converged");
     }
 
     #[test]
