@@ -563,12 +563,13 @@ fn connect_remote_upstream(
     url: &str,
     headers: &std::collections::BTreeMap<String, String>,
     ssrf_guard: bool,
+    secrets: Option<kriya::secrets::SecretsPolicy>,
 ) -> Arc<Mutex<McpClient>> {
     let hdrs: Vec<(String, String)> = headers
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    match McpClient::connect_http(url, hdrs, ssrf_guard) {
+    match McpClient::connect_http(url, hdrs, ssrf_guard, secrets) {
         Ok(c) => Arc::new(Mutex::new(c)),
         Err(e) => usage_and_exit(&format!(
             "broker: failed to connect remote upstream '{name}' ({url}): {e}"
@@ -582,6 +583,7 @@ fn connect_remote_upstream(
     _url: &str,
     _headers: &std::collections::BTreeMap<String, String>,
     _ssrf_guard: bool,
+    _secrets: Option<kriya::secrets::SecretsPolicy>,
 ) -> Arc<Mutex<McpClient>> {
     usage_and_exit(&format!(
         "broker: upstream '{name}' is remote (`url:`), but this build has no HTTP support — \
@@ -928,7 +930,13 @@ fn run_broker(mut it: impl Iterator<Item = String>) -> std::io::Result<()> {
                     .detection()
                     .and_then(|d| d.ssrf_guard)
                     .is_some_and(|g| g.enabled);
-                connect_remote_upstream(&up.name, url, &up.headers, ssrf_guard)
+                connect_remote_upstream(
+                    &up.name,
+                    url,
+                    &up.headers,
+                    ssrf_guard,
+                    policy.secrets().cloned(),
+                )
             }
             (Some(_), Some(_)) => usage_and_exit(&format!(
                 "broker: upstream '{}' sets both `command` and `url` — pick one",
