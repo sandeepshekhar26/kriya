@@ -187,6 +187,37 @@ Calling these out is part of being trustworthy:
    version/OS combination behaves the same; re-run the script and update this line if the installed
    `claude` version changes materially.
 
+7. ✅ **`kriya-gateway run --` containment, network-only, macOS-only (EG-C, doc 24 §11 B14).** Forces
+   a launched agent's network egress through a governed CONNECT proxy via a Seatbelt profile that
+   denies all outbound network except a loopback connection to that proxy — verified on real
+   hardware (`crates/kriya/tests/contain.rs`): a real subprocess launched through `run --`, making a
+   *direct* connection attempt that never touches `HTTP_PROXY` (the exact "spawned curl/subprocess"
+   bypass this document's audit trail elsewhere concedes it can't stop), is blocked by the OS sandbox
+   itself — and the same destination, unsandboxed, succeeds, proving genuine containment rather than
+   a coincidentally-unreachable target. Say the ceiling precisely, always:
+   - **Scope: the launched subtree only** (the `scope_token` in `kriya.io.run.start`/`run.exit`) —
+     never host-wide. An agent kriya did NOT launch is completely unaffected.
+   - **Network-only, deliberately.** A pre-registered spike (`log stream --style ndjson`, run live
+     against a real child process) found macOS unified-logging fidelity for exec/file events too
+     weak to claim honestly (zero events captured for a marker planted in a child's argv) — so this
+     profile claims nothing about file or process visibility, only network egress. Claiming more
+     here would be exactly the overclaim this document exists to prevent.
+   - **CONNECT-only in v1.** Plain (non-TLS) HTTP through the proxy is refused (`405`) rather than
+     silently unsupported; almost all agent/API traffic is HTTPS, so this is a narrow, named gap.
+   - **No TLS termination, ever.** The tunnel forwards bytes unmodified in both directions after the
+     CONNECT handshake — the agent's TLS session is end-to-end intact; kriya cannot and does not
+     inspect content on this lane. `content_sha256` is `None` on every `kriya.io.egress.http.*`
+     receipt this lane emits for exactly that reason.
+   - **Seatbelt is deprecated-but-present**, not the durable seam — a determined escape of an
+     overly-permissive profile is possible in principle; rung-3 NetExt (`NETransparentProxyProvider`)
+     is the demand-pulled hardening path when a customer needs stronger.
+   - **No Linux path in this release.** `kriya-gateway run` on non-macOS is a clean startup error
+     naming the reason; Linux containment is designed to ride the Tetragon-based watcher
+     (`kriyawatch`) when that ships, not to be silently absent.
+   - **Approval-tier destinations are refused, not queued**, inside a contained session — there is no
+     synchronous approval channel over a raw TCP CONNECT tunnel in v1; route those through the
+     interactive proxy/broker lanes instead.
+
 The honest one-line guarantee today: *"under a pinned (optionally durable) key, no retained receipt
 was altered and none was silently deleted from the chain."*
 
