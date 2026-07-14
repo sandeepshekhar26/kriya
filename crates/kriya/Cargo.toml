@@ -37,6 +37,13 @@ http-inference = ["dep:ureq"]
 # new dependencies — the client is std-only (`std::process`, `std::io`) over the existing
 # serde/serde_json. Enables `mcp::client`, `mcp::proxy_executor`, `mcp::proxy_server`.
 mcp-client = []
+# Containment (doc 24 §11 B14 / EG-C, WATCHER-ROADMAP W4 pulled forward): `kriya-gateway run --
+# <cmd>` forces a LAUNCHED agent's egress through a governed CONNECT proxy via a macOS Seatbelt
+# profile (network-only — see the spike documented in `mcp::contain`'s module doc). Std-only
+# (`TcpListener`, `sandbox-exec` as a subprocess) — adds NO new dependencies. Off by default;
+# independent of `mcp-client` (it doesn't touch MCP at all — it's a raw egress lane), but the
+# `run` subcommand lives in the same `kriya-gateway` binary.
+contain = []
 # Remote MCP upstreams for the broker (W2-2): a Streamable-HTTP + SSE transport so `kriya-gateway
 # broker` can govern REMOTE MCP servers (a `url:` upstream), not just spawned stdio ones — the path
 # that reaches Claude Desktop / Cursor / Copilot's hosted servers. Reuses the same synchronous

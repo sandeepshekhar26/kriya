@@ -32,6 +32,14 @@ pub mod proxy_executor;
 #[cfg(feature = "mcp-client")]
 pub mod proxy_server;
 
+// Containment (EG-C, doc 24 §11 B14): the recording CONNECT proxy + Seatbelt profile generator
+// that force a LAUNCHED agent's egress through the governed lane. Off-by-default `contain`
+// feature; std-only, no new deps, independent of `mcp-client` (it never touches MCP — it's a raw
+// TCP CONNECT tunnel). The `sandbox-exec` invocation lives in `kriya-gateway`'s `run` subcommand,
+// gated `#[cfg(target_os = "macos")]` there (module doc: no Linux path in v1).
+#[cfg(feature = "contain")]
+pub mod contain;
+
 // Front 2 — the reach-in adapter (service-architecture §5). Off-by-default `reach-in` feature so the
 // default build pulls in no macOS AX FFI. The platform-agnostic core (AxBackend trait, tool
 // synthesis, AxExecutor, ReachInServer) compiles on any OS for unit testing; the real AX backend
@@ -71,6 +79,9 @@ pub use client::McpClient;
 pub use proxy_executor::McpProxyExecutor;
 #[cfg(feature = "mcp-client")]
 pub use proxy_server::ProxyServer;
+
+#[cfg(feature = "contain")]
+pub use contain::{seatbelt_profile, sha256_hex as contain_sha256_hex, ConnectProxy, RUN_EXIT, RUN_START};
 
 // Front 2 public surface: the trait + node type, the synthesis entry points, the executor, and the
 // serve loop. The macOS backend is re-exported only on macOS.
