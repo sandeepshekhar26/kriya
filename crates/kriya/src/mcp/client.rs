@@ -127,16 +127,18 @@ impl McpClient {
     /// B6 resolver pin (doc 24 §11 B6) — gated, not unconditional: a local dev/test upstream on
     /// `127.0.0.1`/`localhost` is a legitimate `url:` target, so the guard only activates when the
     /// operator's policy turns it on (`detection.ssrf_guard.enabled`), same opt-in as every other
-    /// detector in the pack.
+    /// detector in the pack. `secrets` installs credential brokering (doc 24 §11 B13) — `None` is
+    /// byte-identical to pre-EG-B.
     #[cfg(feature = "mcp-http")]
     pub fn connect_http(
         url: &str,
         headers: Vec<(String, String)>,
         ssrf_guard: bool,
+        secrets: Option<crate::secrets::SecretsPolicy>,
     ) -> std::io::Result<Self> {
         Ok(Self {
             child: None,
-            backend: Backend::Http(HttpTransport::new(url, headers, ssrf_guard)),
+            backend: Backend::Http(HttpTransport::new(url, headers, ssrf_guard, secrets)),
         })
     }
 
@@ -354,11 +356,21 @@ struct HttpTransport {
     /// to the `ActionOutcome` for the governor to receipt. Overwritten each request; only the value
     /// read immediately after a governed `tools/call` is consumed.
     last_io: Option<IoRecord>,
+    /// Credential brokering (doc 24 §11 B13 / EG-B). `None` → byte-identical to pre-EG-B: no
+    /// `{{kriya:*}}` placeholder is ever substituted. When present, [`Self::request`] substitutes
+    /// AFTER `last_io.content_sha256` is computed over the placeholder form, and only for an alias
+    /// scoped to this transport's own `host` — see `secrets::broker_body`.
+    secrets: Option<crate::secrets::SecretsPolicy>,
 }
 
 #[cfg(feature = "mcp-http")]
 impl HttpTransport {
-    fn new(url: &str, extra_headers: Vec<(String, String)>, ssrf_guard: bool) -> Self {
+    fn new(
+        url: &str,
+        extra_headers: Vec<(String, String)>,
+        ssrf_guard: bool,
+        secrets: Option<crate::secrets::SecretsPolicy>,
+    ) -> Self {
         let agent = if ssrf_guard {
             ureq::AgentBuilder::new()
                 .resolver(ssrf_safe_resolver)
@@ -374,6 +386,7 @@ impl HttpTransport {
             next_id: PROXY_ID_BASE,
             agent,
             last_io: None,
+            secrets,
         }
     }
 
@@ -431,7 +444,19 @@ impl HttpTransport {
             flags: Vec::new(),
         });
 
-        let resp = match self.post().send_string(&body) {
+        // Credential brokering (doc 24 §11 B13 / EG-B) — substitute `{{kriya:<alias>}}` placeholders
+        // with the real secret AFTER `last_io.content_sha256` above was computed over `body` (the
+        // placeholder form), and only in THIS separate `send_body`, never touching `body` itself — so
+        // the receipt, and anything derived from `body` after this point, never sees the real value.
+        // The governor's OWN pre-check (`mcp::governor::egress_gate`) already verified every alias
+        // here is configured and scoped to this host; this is the actual enforcement (defense in
+        // depth, same dual-layer shape as the B6 SSRF guard) and fails closed independently of it.
+        let send_body = match &self.secrets {
+            Some(secrets) => crate::secrets::broker_body(&body, secrets, &self.host)?,
+            None => zeroize::Zeroizing::new(body.clone()),
+        };
+
+        let resp = match self.post().send_string(&send_body) {
             Ok(r) => r,
             Err(ureq::Error::Status(code, r)) => {
                 let body = r.into_string().unwrap_or_default();

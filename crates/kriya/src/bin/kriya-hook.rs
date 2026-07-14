@@ -93,6 +93,10 @@ use kriya::mcp::{
     TtyApproval,
 };
 use kriya::permissions::{url_host, Decision, Policy};
+use kriya::secrets::{
+    find_placeholder_aliases, json_escape_inner, read_keychain_secret, redact_broker_values,
+    substitute_placeholders,
+};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -280,7 +284,9 @@ fn egress_target_for(
 /// **payload bytes** (the serialized `tool_input` size) — NEVER network bytes — and a content hash
 /// over the CANONICAL key-sorted serialization (`hash_scheme: canonical-json`), a different
 /// definition than the gateway lane's wire bytes and labeled as such (doc 24 §4.2 rule 6 / L6).
-/// Hash + size only, never content (L9).
+/// Hash + size only, never content (L9). `tool_input` here MUST already be safe to hash/record — see
+/// `redact_broker_values` at every hook-lane call site where `policy.secrets()` is configured (doc 24
+/// §11 B13): this function itself does no redaction, it trusts its caller.
 #[allow(clippy::too_many_arguments)]
 fn emit_io_egress(
     signer: &Signer,
@@ -292,6 +298,7 @@ fn emit_io_egress(
     decision: IoDecision,
     reason: Option<String>,
     corr: &str,
+    flags: Vec<String>,
 ) {
     let canon = canonical_json_string(tool_input);
     let io = IoRecord {
@@ -309,7 +316,7 @@ fn emit_io_egress(
         approved_by: None,
         reason,
         server,
-        flags: Vec::new(),
+        flags,
     };
     signer.record(
         Receipt::new(
@@ -487,6 +494,39 @@ fn maybe_record_io_deny(
             IoDecision::Deny,
             Some(reason.to_string()),
             corr,
+            Vec::new(),
+        );
+    }
+}
+
+/// Sign a `kriya.io.egress.<kind>.deny` receipt for a credential-brokering refusal (doc 24 §11 B13):
+/// an unconfigured or misrouted alias on a tool whose destination IS knowable. Fires whenever
+/// `secrets:` is configured, independent of whether `egress:` is ALSO configured — brokering is its
+/// own policy section with its own gate, unlike [`maybe_record_io_deny`] above which rides the
+/// egress tier's own switch. No-op when the destination isn't knowable at all (Bash, matching
+/// `egress_target_for`'s own "never invent one" rule) — that case is still evidenced by the plain
+/// action receipt every `pre` caller already writes; there's no host/server to attribute an io
+/// receipt to.
+fn record_brokering_deny(
+    signer: &Signer,
+    actor: &Actor,
+    tool_name: &str,
+    tool_input: &Value,
+    reason: &str,
+    corr: &str,
+) {
+    if let Some((kind, host, server)) = egress_target_for(tool_name, tool_input) {
+        emit_io_egress(
+            signer,
+            actor,
+            kind,
+            host,
+            server,
+            tool_input,
+            IoDecision::Deny,
+            Some(reason.to_string()),
+            corr,
+            Vec::new(),
         );
     }
 }
@@ -554,19 +594,38 @@ fn main() -> ExitCode {
     };
 
     match args.mode.as_str() {
-        "pre" => match policy.check(&action_id) {
-            Decision::Allow => ExitCode::SUCCESS, // the post hook records the outcome
-            Decision::RequiresApproval => {
-                let gate = match approval_gate(&args.approval) {
-                    Ok(g) => g,
-                    Err(e) => {
-                        eprintln!("kriya-hook: {e} — blocking (fail closed)");
+        "pre" => {
+            match policy.check(&action_id) {
+                Decision::Allow => {} // the post hook records the outcome
+                Decision::RequiresApproval => {
+                    let gate = match approval_gate(&args.approval) {
+                        Ok(g) => g,
+                        Err(e) => {
+                            eprintln!("kriya-hook: {e} — blocking (fail closed)");
+                            return ExitCode::from(2);
+                        }
+                    };
+                    if !gate.request(&action_id, &params) {
+                        let step_id = record(&signer, &actor, &action_id, params.clone(), false);
+                        maybe_record_io_deny(
+                            &signer,
+                            &actor,
+                            &policy,
+                            tool_name,
+                            &params,
+                            "requires human approval; not granted",
+                            &step_id,
+                        );
+                        eprintln!(
+                            "kriya-hook: '{action_id}' requires human approval and was not approved \
+                             (kriya policy; approval mode: {}). A signed receipt of the blocked \
+                             attempt was recorded.",
+                            args.approval
+                        );
                         return ExitCode::from(2);
                     }
-                };
-                if gate.request(&action_id, &params) {
-                    ExitCode::SUCCESS
-                } else {
+                }
+                Decision::Deny => {
                     let step_id = record(&signer, &actor, &action_id, params.clone(), false);
                     maybe_record_io_deny(
                         &signer,
@@ -574,54 +633,143 @@ fn main() -> ExitCode {
                         &policy,
                         tool_name,
                         &params,
-                        "requires human approval; not granted",
+                        "denied by kriya policy",
                         &step_id,
                     );
                     eprintln!(
-                        "kriya-hook: '{action_id}' requires human approval and was not approved \
-                         (kriya policy; approval mode: {}). A signed receipt of the blocked \
-                         attempt was recorded.",
-                        args.approval
+                        "kriya-hook: '{action_id}' is denied by kriya policy. A signed receipt of \
+                         the blocked attempt was recorded."
                     );
-                    ExitCode::from(2)
+                    return ExitCode::from(2);
                 }
             }
-            Decision::Deny => {
-                let step_id = record(&signer, &actor, &action_id, params.clone(), false);
-                maybe_record_io_deny(
-                    &signer,
-                    &actor,
-                    &policy,
-                    tool_name,
-                    &params,
-                    "denied by kriya policy",
-                    &step_id,
-                );
-                eprintln!(
-                    "kriya-hook: '{action_id}' is denied by kriya policy. A signed receipt of \
-                     the blocked attempt was recorded."
-                );
-                ExitCode::from(2)
+
+            // Credential brokering (doc 24 §11 B13 / EG-B) — only when the policy configures
+            // `secrets:` AND this call's tool_input actually names a `{{kriya:<alias>}}`
+            // placeholder; zero behavior change for every other call, which is the overwhelming
+            // majority. The agent never sees a real credential: it composed the placeholder, and
+            // ONLY the real value (never the placeholder text) is handed to Claude Code via
+            // `updatedInput`, injected right here, as late as possible.
+            if let Some(secrets) = policy.secrets() {
+                let canon = canonical_json_string(&params);
+                let aliases = find_placeholder_aliases(&canon);
+                if !aliases.is_empty() {
+                    let scope = egress_target_for(tool_name, &params)
+                        .and_then(|(_, host, server)| host.or(server));
+                    let deny_reason = match &scope {
+                        None => Some(format!(
+                            "credential brokering: '{tool_name}' has no resolvable destination to \
+                             scope the placeholder against (B13, fail-closed on ambiguity)"
+                        )),
+                        Some(dest) => aliases.iter().find_map(|alias| match secrets.find(alias) {
+                            None => {
+                                Some(format!("credential brokering: alias '{alias}' is not configured (B13)"))
+                            }
+                            Some(entry) if !entry.allows_host(dest) => Some(format!(
+                                "credential brokering: alias '{alias}' is not allowed for destination \
+                                 '{dest}' (B13)"
+                            )),
+                            Some(_) => None,
+                        }),
+                    };
+                    if let Some(reason) = deny_reason {
+                        let step_id = record(&signer, &actor, &action_id, params.clone(), false);
+                        record_brokering_deny(
+                            &signer, &actor, tool_name, &params, &reason, &step_id,
+                        );
+                        eprintln!(
+                            "kriya-hook: {reason}. A signed receipt of the blocked attempt was recorded."
+                        );
+                        return ExitCode::from(2);
+                    }
+
+                    // Cleared: substitute and hand the real values to Claude Code via updatedInput —
+                    // never through this process's own receipt-writing (pre signs nothing further on
+                    // allow, matching the existing convention; the io.egress.allow receipt with its
+                    // `b13-brokered` flag is POST's job, from the safe placeholder-redacted form).
+                    match substitute_placeholders(&canon, |alias| {
+                        let entry = secrets.find(alias)?; // already validated above; cheap re-check
+                        let raw =
+                            read_keychain_secret(&entry.keychain_service, &entry.keychain_account)
+                                .ok()?;
+                        Some(zeroize::Zeroizing::new(json_escape_inner(&raw)))
+                    }) {
+                        Ok(Some(substituted)) => {
+                            match serde_json::from_str::<Value>(&substituted) {
+                                Ok(updated_input) => {
+                                    let out = serde_json::json!({
+                                        "hookSpecificOutput": {
+                                            "hookEventName": "PreToolUse",
+                                            "permissionDecision": "allow",
+                                            "updatedInput": updated_input,
+                                        }
+                                    });
+                                    println!("{out}");
+                                    return ExitCode::SUCCESS;
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                    "kriya-hook: credential brokering produced invalid JSON ({e}) — \
+                                     blocking (fail closed)"
+                                );
+                                    return ExitCode::from(2);
+                                }
+                            }
+                        }
+                        Ok(None) => {} // unreachable (aliases was non-empty) — fall through to plain allow
+                        Err(alias) => {
+                            eprintln!(
+                                "kriya-hook: credential brokering: alias '{alias}' could not be read \
+                                 from Keychain — blocking (fail closed)"
+                            );
+                            return ExitCode::from(2);
+                        }
+                    }
+                }
             }
-        },
+
+            ExitCode::SUCCESS
+        }
         "post" => {
+            // Credential brokering safety net (doc 24 §11 B13 / EG-B): it is NOT documented whether
+            // Claude Code's PostToolUse payload reflects the ORIGINAL (placeholder) tool_input or the
+            // MUTATED one a PreToolUse `updatedInput` substituted — so this never trusts either
+            // possibility. When secrets are configured, every configured alias's REAL value is
+            // redacted back to `{{kriya:<alias>}}` in `safe_params` BEFORE anything downstream (the
+            // action receipt, the io receipt) hashes or records it. If the real value was never
+            // present here, every redaction is a harmless no-op; if it WAS, it's gone before it can
+            // leak — regardless of which of the two possibilities is actually true.
+            let safe_params = match policy.secrets() {
+                Some(secrets) => redact_broker_values(&params, secrets),
+                None => params.clone(),
+            };
             let success = outcome_success(payload.tool_response.as_ref());
-            let step_id = record(&signer, &actor, &action_id, params.clone(), success);
+            let step_id = record(&signer, &actor, &action_id, safe_params.clone(), success);
             // kriya.io.* receipts (doc 24 §7.3): recorded only when the policy opts in via an
             // `egress:` section, and only for a tool whose destination is knowable (WebFetch host,
             // mcp server) — Bash and file tools produce none (doc 24 §4.1).
             if let Some(egress) = policy.egress() {
-                if let Some((kind, host, server)) = egress_target_for(tool_name, &params) {
+                if let Some((kind, host, server)) = egress_target_for(tool_name, &safe_params) {
+                    // Only ever flag an alias that's actually configured — a stray literal
+                    // `{{kriya:...}}`-shaped string that isn't one PRE would ever have brokered
+                    // must not be mislabeled as a brokering event.
+                    let flags: Vec<String> =
+                        find_placeholder_aliases(&canonical_json_string(&safe_params))
+                            .into_iter()
+                            .filter(|a| policy.secrets().is_some_and(|s| s.find(a).is_some()))
+                            .map(|alias| format!("b13-brokered:{alias}"))
+                            .collect();
                     emit_io_egress(
                         &signer,
                         &actor,
                         kind,
                         host,
                         server.clone(),
-                        &params,
+                        &safe_params,
                         IoDecision::Allow,
                         None,
                         &step_id,
+                        flags,
                     );
                     // Ingress digests ride their OWN switch, default OFF (doc 24 §6-P3): a keyed
                     // (HMAC) hash + size of the response, never its content.
