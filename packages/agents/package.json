@@ -14,6 +14,10 @@
     "./langgraph": {
       "types": "./dist/langgraph.d.ts",
       "import": "./dist/langgraph.js"
+    },
+    "./claude-agent": {
+      "types": "./dist/claude-agent.d.ts",
+      "import": "./dist/claude-agent.js"
     }
   },
   "files": [
