@@ -124,6 +124,35 @@ KRIYA_HOST_BIN=/path/to/kriya-host PYTHONPATH=src python -m unittest tests.test_
 The integration test drives the **real** `kriya-host` through action dispatch + a held/granted
 approval + durable memory recall — the same end-to-end proof the Node sidecar ships.
 
+## Govern an agent framework's tool calls — `kriya.agents`
+
+The sections above host a governed run *inside* the kriya-host (the host drives the loop). When you
+instead use an **agent framework** (LangGraph, CrewAI, the OpenAI/Claude Agent SDKs) that drives its
+own loop, `kriya.agents` governs each of *its* tool calls without an MCP hop and without inverting
+that loop — the framework keeps driving; kriya gates and signs each call by delegating to the
+runtime's `kriya-govern` binary (the one Signer; this module contains no crypto):
+
+```python
+from kriya.agents import GovernClient, govern
+
+client = GovernClient(policy_path="agent-policy.yaml", actor="my-agent",
+                      audit_log="~/.kriya/audit/my-agent.jsonl")  # the Console re-verifies this
+
+@govern(client, "web_search")
+def web_search(params):
+    return real_search(params["q"])
+
+web_search({"q": "kriya"})   # policy → approval → budget gated; signs a receipt if it runs.
+# A denied / approval-refused / over-budget call raises GovernDenied — surface it as the tool's error.
+```
+
+LangGraph / LangChain (Python): wrap the function you hand to `@tool` — `from kriya.agents.langgraph
+import govern_tool`. **Honest ceiling:** in-process governance is *cooperative* (a hostile process can
+skip it — that is what launch-under containment / B14 is for); it governs the action tier + signs, and
+does not see the tool's own egress. Approvals are fail-closed (a `require_approval` tool is denied
+headless unless `approval="tty"|"gui"|"auto"`). Build the binary with `cargo build -p kriya --bin
+kriya-govern`. The TypeScript sibling is `kriya-agents`.
+
 ## Status
 
 Alpha, MIT-licensed. Mirrors `kriya-core` (registry/schema/validation) + `kriya-sidecar` (host
