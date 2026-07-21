@@ -1,0 +1,7 @@
+# Demo policy for the govern-langgraph-stub example.
+rules:
+  - { action: "web_search", allow: true }
+  - { action: "delete_files", allow: false } # denied — the agent is told no, no receipt is signed
+  - { action: "*", allow: true }
+budget:
+  max_actions_per_minute: 60

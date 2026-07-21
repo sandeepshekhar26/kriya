@@ -1,0 +1,13 @@
+{
+  "name": "govern-langgraph-stub",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A stub (no-LLM) agent driving kriya-agents' governed tools the way a LangGraph ToolNode would — end-to-end policy → budget → signed receipt.",
+  "scripts": {
+    "start": "node run.mjs"
+  },
+  "dependencies": {
+    "kriya-agents": "0.0.1"
+  }
+}

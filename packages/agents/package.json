@@ -1,0 +1,59 @@
+{
+  "name": "kriya-agents",
+  "version": "0.0.1",
+  "description": "Govern in-process agent-framework tool calls with kriya — policy, approval, budget, and a signed receipt on every tool call, without an MCP hop. Thin wrappers for LangGraph, the OpenAI Agents SDK, the Claude Agent SDK, and any tool function.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./langgraph": {
+      "types": "./dist/langgraph.d.ts",
+      "import": "./dist/langgraph.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "keywords": [
+    "agent",
+    "ai-agent",
+    "kriya",
+    "governance",
+    "langgraph",
+    "openai-agents",
+    "claude-agent-sdk",
+    "audit",
+    "policy",
+    "llm"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sandeepshekhar26/kriya.git",
+    "directory": "packages/agents"
+  },
+  "homepage": "https://github.com/sandeepshekhar26/kriya#readme",
+  "bugs": "https://github.com/sandeepshekhar26/kriya/issues",
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build && npm run test"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.8"
+  }
+}
