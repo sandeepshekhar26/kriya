@@ -87,12 +87,30 @@ const governed = governLangGraphTool(client, existingTool);
   default (no human is attached). Set `approval: "auto"` only for trusted/testing contexts, or
   `"tty"` / `"gui"` (macOS) to prompt a person.
 
+## Claude Agent SDK (TypeScript)
+
+Wrap your tool **handler**, then pass it to the SDK's `tool()` — see `kriya-agents/claude-agent`:
+
+```ts
+import { tool } from "@anthropic-ai/claude-agent-sdk";
+import { governClaudeHandler } from "kriya-agents/claude-agent";
+
+const search = tool("search", "Search the web", { query: z.string() },
+  governClaudeHandler(client, "search", async ({ query }) => ({
+    content: [{ type: "text", text: `Results for: ${query}` }],
+  })));
+// A denied call comes back as an `isError` result, so the model adapts.
+```
+
 ## Status
 
-- ✅ **Core + LangGraph/LangChain.js** — shipped here, tested against the real `kriya-govern` binary,
-  and the emitted receipts verify in the kriya Console.
-- 🧭 **OpenAI Agents SDK · CrewAI · Claude Agent SDK** and the **Python** sibling package — the same
-  `kriya-govern` core; adapters land as each framework's current tool seam is verified. See
+- ✅ **Core `govern()` + LangGraph/LangChain.js + Claude Agent SDK** — shipped here, tested against the
+  real `kriya-govern` binary, and the emitted receipts verify in the kriya Console. A Python sibling
+  (`kriya.agents`) ships the same core + LangGraph.
+- 🧭 **OpenAI Agents SDK · CrewAI** — the same `kriya-govern` core; the framework-agnostic `govern()`
+  already wraps any tool function today, so a bespoke adapter is only sugar. It lands once that
+  framework's current tool seam is verified against its docs **and** an install is available for a
+  live acceptance (neither was, in the session that built this). See
   `kriya-console/docs/ideas/BREADTH-EXECUTE-PROMPT.md` (S2).
 
 MIT.
