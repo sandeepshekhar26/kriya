@@ -146,12 +146,22 @@ web_search({"q": "kriya"})   # policy → approval → budget gated; signs a rec
 # A denied / approval-refused / over-budget call raises GovernDenied — surface it as the tool's error.
 ```
 
-LangGraph / LangChain (Python): wrap the function you hand to `@tool` — `from kriya.agents.langgraph
-import govern_tool`. **Honest ceiling:** in-process governance is *cooperative* (a hostile process can
-skip it — that is what launch-under containment / B14 is for); it governs the action tier + signs, and
-does not see the tool's own egress. Approvals are fail-closed (a `require_approval` tool is denied
-headless unless `approval="tty"|"gui"|"auto"`). Build the binary with `cargo build -p kriya --bin
-kriya-govern`. The TypeScript sibling is `kriya-agents`.
+Framework adapters (each a thin, dependency-free shim over `govern()`, verified against the
+framework's current tool seam):
+
+- **LangGraph / LangChain** — `from kriya.agents.langgraph import govern_tool` (wrap the function you
+  give `@tool`).
+- **OpenAI Agents SDK** — `from kriya.agents.openai_agents import govern_function_tool` (govern a
+  built `@function_tool` in place).
+- **CrewAI** — `from kriya.agents.crewai import govern_crew_tool` (govern a built `@tool("…")` in place).
+- **Claude Agent SDK** — `from kriya.agents.claude_agent import govern_sdk_tool` (govern a built
+  `@tool(...)`; a denial comes back as an `isError` result the model adapts to).
+
+**Honest ceiling:** in-process governance is *cooperative* (a hostile process can skip it — that is
+what launch-under containment / B14 is for); it governs the action tier + signs, and does not see the
+tool's own egress. Approvals are fail-closed (a `require_approval` tool is denied headless unless
+`approval="tty"|"gui"|"auto"`). Build the binary with `cargo build -p kriya --bin kriya-govern`. The
+TypeScript sibling is `kriya-agents`.
 
 ## Status
 
