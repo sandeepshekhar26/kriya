@@ -23,6 +23,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { createInterface, type Interface } from "node:readline";
 
 /** The decision `check` returns. `allow` is the only one that should proceed to execution. */
@@ -66,6 +67,13 @@ export interface GovernClientOptions {
    * headless posture), `tty`, `gui` (macOS), or `auto` (trusted/testing only).
    */
   approval?: "deny" | "tty" | "gui" | "auto";
+  /**
+   * Run correlation (S3): the `run_id` stamped into every receipt this client records, so the
+   * Console can group one framework invocation's tool calls into a session tree. Defaults to a fresh
+   * UUID per client (one client = one govern session = one run). Pass a framework-native run id
+   * (e.g. a LangGraph thread id) to correlate with the framework's own tracing.
+   */
+  runId?: string;
 }
 
 /** Thrown when `check` returns a non-`allow` decision — surface it as the framework's tool error. */
@@ -96,9 +104,11 @@ export class GovernClient {
   readonly #child: ChildProcess;
   readonly #rl: Interface;
   readonly #pending: Pending[] = [];
+  readonly #runId: string;
   #closed = false;
 
   constructor(options: GovernClientOptions = {}) {
+    this.#runId = options.runId ?? randomUUID();
     const args: string[] = [];
     if (options.policyPath) args.push("--policy", options.policyPath);
     if (options.approval) args.push("--approval", options.approval);
@@ -151,6 +161,11 @@ export class GovernClient {
     });
   }
 
+  /** The run id stamped into every receipt this client records (S3 correlation). */
+  get runId(): string {
+    return this.#runId;
+  }
+
   /** Ask whether `actionId` may run (policy → approval → budget). Signs nothing. */
   async check(actionId: string, params: Record<string, unknown>): Promise<CheckResult> {
     const res = await this.#send<{ decision: GovernDecision; reason?: string }>({
@@ -161,17 +176,26 @@ export class GovernClient {
     return { decision: res.decision, reason: res.reason };
   }
 
-  /** Sign the receipt for a call the framework executed (success or failure). */
+  /**
+   * Sign the receipt for a call the framework executed (success or failure). Run correlation (S3):
+   * always stamps this client's `run_id`; `parentStepId` (the `step_id` of the enclosing tool call)
+   * is threaded for nested calls. The reserved-key placement lives in `kriya-govern` — this only
+   * ships the ids, so TS and Python never diverge on where `kriya.corr` sits in params.
+   */
   async record(
     actionId: string,
     params: Record<string, unknown>,
     success: boolean,
+    parentStepId?: string,
   ): Promise<SignedReceipt> {
+    const corr: { run_id: string; parent_step_id?: string } = { run_id: this.#runId };
+    if (parentStepId) corr.parent_step_id = parentStepId;
     const res = await this.#send<{ receipt: SignedReceipt }>({
       op: "record",
       action_id: actionId,
       params,
       success,
+      corr,
     });
     return res.receipt;
   }
@@ -192,6 +216,12 @@ export interface GovernHooks {
   onReceipt?: (receipt: SignedReceipt) => void;
   /** Called when `check` denies a call (before {@link GovernDenied} is thrown). */
   onDenied?: (actionId: string, result: CheckResult) => void;
+  /**
+   * Run correlation (S3): the `step_id` of the enclosing governed call, for a **nested** tool call —
+   * stamped as `kriya.corr.parent_step_id`. Omit for a top-level call (the common case): the client's
+   * `run_id` already groups the whole invocation. Never fabricate one you can't actually observe.
+   */
+  parentStepId?: string;
 }
 
 /**
@@ -224,8 +254,9 @@ export function govern<P extends Record<string, unknown>, R>(
       thrown = e;
     }
     // Record success OR failure — the receipt is the record of what was attempted, not only of
-    // what worked (parity with the in-process governor, which signs failed calls too).
-    const receipt = await client.record(actionId, params, success);
+    // what worked (parity with the in-process governor, which signs failed calls too). The client's
+    // run_id is stamped automatically; `parentStepId` threads a nested call's lineage when known.
+    const receipt = await client.record(actionId, params, success, hooks.parentStepId);
     hooks.onReceipt?.(receipt);
     if (!success) throw thrown;
     return result as R;

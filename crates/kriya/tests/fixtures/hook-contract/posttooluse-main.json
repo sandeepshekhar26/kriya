@@ -1,0 +1,10 @@
+{
+  "session_id": "sess-w03-A",
+  "transcript_path": "/Users/dev/.claude/projects/demo/sess-w03-A.jsonl",
+  "cwd": "/Users/dev/project",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Task",
+  "tool_input": { "subagent_type": "Explore", "description": "run one echo" },
+  "tool_response": { "isError": false }
+}
