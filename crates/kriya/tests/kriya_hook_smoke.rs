@@ -347,6 +347,100 @@ fn post_hook_signs_the_real_outcome() {
     let _ = std::fs::remove_dir_all(log.parent().unwrap());
 }
 
+// --- S3 run correlation (W0-3): the REAL binary stamps kriya.corr from the pinned payload -----
+
+/// Load a pinned hook-contract fixture (the W0-3 payload shapes).
+fn contract_fixture(name: &str) -> String {
+    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    p.push("tests/fixtures/hook-contract");
+    p.push(name);
+    std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read fixture {}: {e}", p.display()))
+}
+
+/// A subagent-spawning session, driven through the REAL compiled binary: the main agent's `Task`
+/// spawn (session_id, no agent_id) and a subagent's `Bash` call (same session_id, distinct
+/// agent_id, no parent pointer). Both must carry `kriya.corr.run_id = the shared session`, the
+/// subagent receipt must additionally carry `agent_id` and NEVER a fabricated `parent_step_id`, and
+/// the tool arguments must survive untouched alongside the reserved key. This is the run-correlation
+/// substrate the Console session-tree is built from — proven end-to-end at the process boundary, not
+/// just in a unit test. If the pinned contract (session_id / agent_id field names) ever drifts, this
+/// breaks loudly instead of silently emitting no correlation.
+#[test]
+fn post_hook_stamps_run_correlation_from_the_pinned_w03_contract() {
+    let bin = build_binary();
+    let (log, key, _policy) = sandbox();
+
+    // The pinned fixtures ARE the contract — assert the load-bearing fields are present so a drift
+    // in the committed fixture can't quietly weaken this test.
+    let sub_payload = contract_fixture("posttooluse-subagent.json");
+    let main_payload = contract_fixture("posttooluse-main.json");
+    let sub_json: serde_json::Value = serde_json::from_str(&sub_payload).unwrap();
+    assert_eq!(
+        sub_json["session_id"], "sess-w03-A",
+        "run scope field pinned"
+    );
+    assert_eq!(
+        sub_json["agent_id"], "subagent-explore-1",
+        "subagent field pinned"
+    );
+    assert!(
+        sub_json.get("parent_session_id").is_none() && sub_json.get("parent_tool_use_id").is_none(),
+        "the contract carries NO parent pointer — the hook must not invent one"
+    );
+
+    let args = [
+        "--audit-log",
+        log.to_str().unwrap(),
+        "--signing-key",
+        key.to_str().unwrap(),
+    ];
+    // Main agent spawns the subagent (Task), then the subagent runs its Bash call.
+    assert_eq!(
+        run(&bin, "post", &args, &main_payload).status.code(),
+        Some(0)
+    );
+    assert_eq!(
+        run(&bin, "post", &args, &sub_payload).status.code(),
+        Some(0)
+    );
+
+    let receipts = read_receipts(&log);
+    assert_eq!(receipts.len(), 2, "one receipt per tool call");
+
+    // Receipt 0: the main agent's Task spawn — run scoped, no agent_id (absent in payload), no parent.
+    let main = &receipts[0];
+    assert_eq!(main["action_id"], "claude-code__task");
+    assert_eq!(main["params"]["kriya.corr"]["run_id"], "sess-w03-A");
+    assert!(
+        main["params"]["kriya.corr"].get("agent_id").is_none(),
+        "main-agent payload has no agent_id → none is stamped (honest)"
+    );
+    assert!(main["params"]["kriya.corr"].get("parent_step_id").is_none());
+    assert_eq!(
+        main["params"]["subagent_type"], "Explore",
+        "tool args survive"
+    );
+
+    // Receipt 1: the subagent's Bash — same run, distinct agent_id, NO parent_step_id.
+    let sub = &receipts[1];
+    assert_eq!(sub["action_id"], "claude-code__bash");
+    assert_eq!(
+        sub["params"]["kriya.corr"]["run_id"], "sess-w03-A",
+        "the subagent shares the parent's session as one run"
+    );
+    assert_eq!(
+        sub["params"]["kriya.corr"]["agent_id"],
+        "subagent-explore-1"
+    );
+    assert!(
+        sub["params"]["kriya.corr"].get("parent_step_id").is_none(),
+        "the hook lane has no parent pointer — it must never fabricate one"
+    );
+    assert_eq!(sub["params"]["command"], "echo hello-from-subagent");
+
+    let _ = std::fs::remove_dir_all(log.parent().unwrap());
+}
+
 // --- Regression matrix: {allow, approval, deny} x {built-in tool, mcp__ tool} ---------------
 
 #[test]

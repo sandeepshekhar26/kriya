@@ -270,6 +270,13 @@ pub struct Governor {
     egress: Option<EgressControl>,
     /// Optional ingress governance (doc 24 §11 B12). `None` → byte-identical to pre-EG-P.
     ingress: Option<IngressControl>,
+    /// Optional run correlation (S3): a per-gateway-process `run_id` stamped into every action
+    /// receipt's `kriya.corr`, so the Console groups one gateway *session*'s tool calls into a run.
+    /// The gateway is spawned as ONE client's stdio subprocess and lives for that session, so one
+    /// Governor = one connection = one run — a real scope, not a fabricated one. `None` (the router /
+    /// in-process server / tests) → byte-identical to pre-S3. No `parent_step_id`/`agent_id`: the
+    /// proxy lane sees no sub-agent lineage, and guessing one would be dishonest.
+    run_id: Option<String>,
 }
 
 impl Governor {
@@ -289,12 +296,21 @@ impl Governor {
             actor: None,
             egress: None,
             ingress: None,
+            run_id: None,
         }
     }
 
     /// Attribute every receipt this governor signs to `actor` (R8). Chainable on `new`.
     pub fn with_actor(mut self, actor: Option<Actor>) -> Self {
         self.actor = actor;
+        self
+    }
+
+    /// Stamp a per-session `run_id` (S3 run correlation) into every action receipt. Set once per
+    /// gateway process (one Governor = one client session = one run). An empty/absent id is a no-op,
+    /// leaving receipts byte-identical to pre-S3. Chainable.
+    pub fn with_run_correlation(mut self, run_id: Option<String>) -> Self {
+        self.run_id = run_id.filter(|s| !s.is_empty());
         self
     }
 
@@ -361,11 +377,21 @@ impl Governor {
         // 5. Sign + append the action receipt (frozen schema), success or failure. The signing key
         //    never leaves the host, so the agent can propose and run an action but cannot forge its
         //    receipt. The receipt carries who acted (R8) when the binary supplied an identity.
+        // Run correlation (S3): stamp the per-session run_id (proxy lane has no parent/subagent
+        // lineage — never fabricated). Empty run scope ⇒ params byte-identical to pre-S3.
+        let corr_params = crate::corr::attach(
+            params.clone(),
+            &crate::corr::Correlation {
+                run_id: self.run_id.clone(),
+                parent_step_id: None,
+                agent_id: None,
+            },
+        );
         let receipt = self.signer.record(
             Receipt::new(
                 action_step_id.clone(),
                 action_id.to_string(),
-                params.clone(),
+                corr_params,
                 outcome.success,
                 now_ms(),
             )
@@ -827,6 +853,45 @@ mod tests {
             other => panic!("expected Executed, got {other:?}"),
         }
         assert_eq!(ran.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn dispatch_stamps_per_session_run_correlation_when_set_and_is_byte_clean_otherwise() {
+        // With a per-session run_id: the action receipt carries kriya.corr.run_id, no parent/agent
+        // (the proxy lane has no sub-agent lineage), and the tool's own params survive.
+        let ran = Arc::new(AtomicUsize::new(0));
+        let mut g = Governor::new(
+            Arc::new(Policy::default()),
+            signer(),
+            Box::new(DenyApproval),
+            counting_executor(ran.clone()),
+        )
+        .with_run_correlation(Some("gw-session-1".into()));
+        match g.dispatch("create_note", &json!({"title": "hi"})) {
+            DispatchOutcome::Executed { receipt, .. } => {
+                let p = &receipt.receipt.params;
+                assert_eq!(p["kriya.corr"]["run_id"], json!("gw-session-1"));
+                assert!(p["kriya.corr"].get("parent_step_id").is_none());
+                assert!(p["kriya.corr"].get("agent_id").is_none());
+                assert_eq!(p["title"], json!("hi"), "tool params preserved");
+            }
+            other => panic!("expected Executed, got {other:?}"),
+        }
+
+        // Without run correlation (the router / in-process lanes): params are byte-clean — no key.
+        let mut g2 = Governor::new(
+            Arc::new(Policy::default()),
+            signer(),
+            Box::new(DenyApproval),
+            counting_executor(ran.clone()),
+        );
+        match g2.dispatch("create_note", &json!({"title": "hi"})) {
+            DispatchOutcome::Executed { receipt, .. } => {
+                assert_eq!(receipt.receipt.params, json!({"title": "hi"}));
+                assert!(receipt.receipt.params.get("kriya.corr").is_none());
+            }
+            other => panic!("expected Executed, got {other:?}"),
+        }
     }
 
     #[test]

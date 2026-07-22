@@ -37,6 +37,7 @@ import json
 import subprocess
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
+from uuid import uuid4
 
 __all__ = ["GovernClient", "govern", "GovernDenied", "CheckResult"]
 
@@ -76,7 +77,13 @@ class GovernClient:
         user: Optional[str] = None,
         audit_log: Optional[str] = None,
         approval: str = "deny",
+        run_id: Optional[str] = None,
     ):
+        # Run correlation (S3): the run_id stamped into every receipt this client records, so the
+        # Console can group one framework invocation's tool calls into a session tree. Defaults to a
+        # fresh UUID per client (one client = one govern session = one run); pass a framework-native
+        # run id to correlate with the framework's own tracing.
+        self.run_id = run_id or str(uuid4())
         args = [binary_path]
         if policy_path:
             args += ["--policy", policy_path]
@@ -116,10 +123,31 @@ class GovernClient:
         resp = self._send({"op": "check", "action_id": action_id, "params": params})
         return CheckResult(decision=resp["decision"], reason=resp.get("reason"))
 
-    def record(self, action_id: str, params: Dict[str, Any], success: bool) -> Dict[str, Any]:
-        """Sign the receipt for a call the framework executed (success or failure)."""
+    def record(
+        self,
+        action_id: str,
+        params: Dict[str, Any],
+        success: bool,
+        parent_step_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Sign the receipt for a call the framework executed (success or failure).
+
+        Run correlation (S3): always stamps this client's ``run_id``; ``parent_step_id`` (the
+        ``step_id`` of the enclosing tool call) is threaded for a nested call. The reserved-key
+        placement lives in ``kriya-govern`` -- this only ships the ids, so Python and TS never
+        diverge on where ``kriya.corr`` sits in ``params``.
+        """
+        corr: Dict[str, str] = {"run_id": self.run_id}
+        if parent_step_id:
+            corr["parent_step_id"] = parent_step_id
         resp = self._send(
-            {"op": "record", "action_id": action_id, "params": params, "success": success}
+            {
+                "op": "record",
+                "action_id": action_id,
+                "params": params,
+                "success": success,
+                "corr": corr,
+            }
         )
         return resp["receipt"]
 
@@ -151,6 +179,7 @@ def govern(
     client: GovernClient,
     action_id: str,
     fn: Optional[Callable[[Dict[str, Any]], Any]] = None,
+    parent_step_id: Optional[str] = None,
 ) -> Callable:
     """Wrap a tool function into a governed one.
 
@@ -176,7 +205,8 @@ def govern(
             finally:
                 # Record the attempt whether it succeeded or raised -- the receipt is the record of
                 # what was attempted, not only of what worked (parity with the in-process governor).
-                client.record(action_id, params, success)
+                # The client's run_id is stamped automatically; parent_step_id threads nested lineage.
+                client.record(action_id, params, success, parent_step_id)
 
         wrapped.__name__ = getattr(f, "__name__", action_id)
         wrapped.__doc__ = getattr(f, "__doc__", None)

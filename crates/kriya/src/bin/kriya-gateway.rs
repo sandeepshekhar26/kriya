@@ -493,8 +493,10 @@ fn run_proxy(args: ProxyArgs) -> std::io::Result<()> {
 
     // The governor calls McpProxyExecutor on a cleared call; both share the one downstream client.
     let executor = Box::new(McpProxyExecutor::new(client.clone()));
-    let governor =
-        Governor::new(policy.clone(), signer.clone(), approval, executor).with_actor(actor.clone());
+    let governor = Governor::new(policy.clone(), signer.clone(), approval, executor)
+        .with_actor(actor.clone())
+        // Run correlation (S3): one gateway process = one client stdio session = one run.
+        .with_run_correlation(Some(uuid::Uuid::new_v4().to_string()));
 
     let mut server = match ProxyServer::new(&args.name, governor, client, policy) {
         Ok(s) => s,
@@ -1306,8 +1308,10 @@ fn run_reachin(mut it: impl Iterator<Item = String>) -> std::io::Result<()> {
         ))
     });
     let executor = Box::new(AxExecutor::new(backend.clone(), nodes));
-    let governor =
-        Governor::new(policy.clone(), signer.clone(), approval, executor).with_actor(actor.clone());
+    let governor = Governor::new(policy.clone(), signer.clone(), approval, executor)
+        .with_actor(actor.clone())
+        // Run correlation (S3): one gateway process = one client stdio session = one run.
+        .with_run_correlation(Some(uuid::Uuid::new_v4().to_string()));
 
     let server_name = if pargs.name == "kriya-gateway" {
         format!("kriya-gateway (reach-in: {app})")
@@ -1426,8 +1430,10 @@ fn run_computer_use(mut it: impl Iterator<Item = String>) -> std::io::Result<()>
     // screen via CGEvent + screencapture. This is the universal "support every app" floor (D-017).
     let backend: Arc<dyn DesktopBackend> = Arc::new(MacDesktopBackend::new());
     let executor = Box::new(ComputerUseExecutor::new(backend));
-    let governor =
-        Governor::new(policy.clone(), signer.clone(), approval, executor).with_actor(actor.clone());
+    let governor = Governor::new(policy.clone(), signer.clone(), approval, executor)
+        .with_actor(actor.clone())
+        // Run correlation (S3): one gateway process = one client stdio session = one run.
+        .with_run_correlation(Some(uuid::Uuid::new_v4().to_string()));
     let mut server = ComputerUseServer::new(governor, policy);
 
     let actor_desc = match &actor {

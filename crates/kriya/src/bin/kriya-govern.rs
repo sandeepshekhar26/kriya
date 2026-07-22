@@ -53,6 +53,7 @@ use std::sync::Arc;
 
 use kriya::audit::{Actor, Receipt, Signer};
 use kriya::budget::BudgetTracker;
+use kriya::corr::{self, Correlation};
 #[cfg(target_os = "macos")]
 use kriya::mcp::GuiApproval;
 use kriya::mcp::{ApprovalGate, AutoApprove, DenyApproval, TtyApproval};
@@ -118,7 +119,9 @@ fn build_approval(mode: &str) -> Box<dyn ApprovalGate> {
         "gui" => Box::new(GuiApproval),
         #[cfg(not(target_os = "macos"))]
         "gui" => usage_and_exit("--approval gui is only available on macOS"),
-        other => usage_and_exit(&format!("--approval must be deny|tty|gui|auto, got '{other}'")),
+        other => usage_and_exit(&format!(
+            "--approval must be deny|tty|gui|auto, got '{other}'"
+        )),
     }
 }
 
@@ -167,7 +170,11 @@ impl Session {
             "check" => self.check(action_id, &params),
             "record" => {
                 let success = req.get("success").and_then(Value::as_bool).unwrap_or(false);
-                self.record(action_id, params, success)
+                // Run correlation (S3): the middleware may attach `{"corr":{"run_id","parent_step_id"}}`
+                // per framework invocation / nested call. The reserved-key placement is centralized
+                // HERE (the one Signer path) so the TS + Python wrappers never re-implement it.
+                let corr = corr::from_json(req.get("corr"));
+                self.record(action_id, params, success, &corr)
             }
             other => err_line(&format!("unknown op '{other}' (expected check|record)")),
         }
@@ -194,12 +201,26 @@ impl Session {
     }
 
     /// Sign + append the action receipt for a call the middleware executed. Reuses `Signer::record`
-    /// — same Ed25519 key, same hash chain, same canonicalization the Console re-verifies.
-    fn record(&mut self, action_id: &str, params: Value, success: bool) -> String {
+    /// — same Ed25519 key, same hash chain, same canonicalization the Console re-verifies. Run
+    /// correlation (S3) rides `corr` → the shared, seam-authoritative `kriya.corr` params key; an
+    /// empty `corr` leaves `params` byte-identical to the pre-S3 receipt.
+    fn record(
+        &mut self,
+        action_id: &str,
+        params: Value,
+        success: bool,
+        corr: &Correlation,
+    ) -> String {
         let step_id = uuid::Uuid::new_v4().to_string();
         let signed = self.signer.record(
-            Receipt::new(step_id, action_id.to_string(), params, success, now_ms())
-                .with_actor(self.actor.clone()),
+            Receipt::new(
+                step_id,
+                action_id.to_string(),
+                corr::attach(params, corr),
+                success,
+                now_ms(),
+            )
+            .with_actor(self.actor.clone()),
         );
         match serde_json::to_value(&signed) {
             Ok(receipt) => json!({ "op": "record", "receipt": receipt }).to_string(),
@@ -307,7 +328,9 @@ mod tests {
             decision(&s.handle(r#"{"op":"check","action_id":"create_note","params":{"t":"x"}}"#)),
             "allow"
         );
-        let rec_line = s.handle(r#"{"op":"record","action_id":"create_note","params":{"t":"x"},"success":true}"#);
+        let rec_line = s.handle(
+            r#"{"op":"record","action_id":"create_note","params":{"t":"x"},"success":true}"#,
+        );
         let v: Value = serde_json::from_str(&rec_line).unwrap();
         assert_eq!(v["op"], "record");
         let receipt = &v["receipt"];
@@ -316,7 +339,9 @@ mod tests {
         assert_eq!(receipt["actor"]["agent"], "langgraph");
         // The receipt carries a real Ed25519 signature + public key (the one-Signer path).
         assert!(receipt["signature"].as_str().is_some_and(|s| s.len() >= 64));
-        assert!(receipt["public_key"].as_str().is_some_and(|s| s.len() == 64));
+        assert!(receipt["public_key"]
+            .as_str()
+            .is_some_and(|s| s.len() == 64));
     }
 
     #[test]
@@ -330,7 +355,13 @@ mod tests {
             "denied"
         );
         // Nothing was appended to the log — an action-tier deny is the decision, not a receipt.
-        assert!(!s.signer.log_path().exists() || std::fs::read_to_string(s.signer.log_path()).unwrap().trim().is_empty());
+        assert!(
+            !s.signer.log_path().exists()
+                || std::fs::read_to_string(s.signer.log_path())
+                    .unwrap()
+                    .trim()
+                    .is_empty()
+        );
     }
 
     #[test]
@@ -363,8 +394,14 @@ mod tests {
             "rules:\n  - { action: \"tick\", allow: true }\nbudget:\n  max_actions_per_minute: 2\n",
             Box::new(DenyApproval),
         );
-        assert_eq!(decision(&s.handle(r#"{"op":"check","action_id":"tick","params":{}}"#)), "allow");
-        assert_eq!(decision(&s.handle(r#"{"op":"check","action_id":"tick","params":{}}"#)), "allow");
+        assert_eq!(
+            decision(&s.handle(r#"{"op":"check","action_id":"tick","params":{}}"#)),
+            "allow"
+        );
+        assert_eq!(
+            decision(&s.handle(r#"{"op":"check","action_id":"tick","params":{}}"#)),
+            "allow"
+        );
         // The third call in the same minute is over the cap.
         assert_eq!(
             decision(&s.handle(r#"{"op":"check","action_id":"tick","params":{}}"#)),
@@ -373,11 +410,46 @@ mod tests {
     }
 
     #[test]
+    fn record_stamps_run_correlation_when_the_middleware_supplies_it() {
+        let mut s = session_with(
+            "rules:\n  - { action: \"web_search\", allow: true }\nbudget:\n  max_actions_per_minute: 60\n",
+            Box::new(DenyApproval),
+        );
+        // The middleware attaches run_id (per invocation) + parent_step_id (per nested call).
+        let rec = s.handle(
+            r#"{"op":"record","action_id":"web_search","params":{"q":"kriya"},"success":true,"corr":{"run_id":"run-9","parent_step_id":"step-parent"}}"#,
+        );
+        let v: Value = serde_json::from_str(&rec).unwrap();
+        let params = &v["receipt"]["params"];
+        assert_eq!(params["kriya.corr"]["run_id"], "run-9");
+        assert_eq!(params["kriya.corr"]["parent_step_id"], "step-parent");
+        assert_eq!(params["q"], "kriya", "the tool's own params are preserved");
+        // The receipt still carries a real signature (correlation rides the one-Signer path).
+        assert!(v["receipt"]["signature"]
+            .as_str()
+            .is_some_and(|s| s.len() >= 64));
+
+        // No corr supplied → params is byte-clean (no reserved key), byte-identical to pre-S3.
+        let rec2 = s.handle(
+            r#"{"op":"record","action_id":"web_search","params":{"q":"x"},"success":true}"#,
+        );
+        let v2: Value = serde_json::from_str(&rec2).unwrap();
+        assert!(
+            v2["receipt"]["params"].get("kriya.corr").is_none(),
+            "no correlation means no reserved key"
+        );
+    }
+
+    #[test]
     fn malformed_and_unknown_requests_are_errors_not_panics() {
-        let mut s = session_with("rules:\n  - { action: \"*\", allow: true }\n", Box::new(DenyApproval));
+        let mut s = session_with(
+            "rules:\n  - { action: \"*\", allow: true }\n",
+            Box::new(DenyApproval),
+        );
         let v: Value = serde_json::from_str(&s.handle("{not json")).unwrap();
         assert_eq!(v["op"], "error");
-        let v: Value = serde_json::from_str(&s.handle(r#"{"op":"frobnicate","action_id":"x"}"#)).unwrap();
+        let v: Value =
+            serde_json::from_str(&s.handle(r#"{"op":"frobnicate","action_id":"x"}"#)).unwrap();
         assert_eq!(v["op"], "error");
         let v: Value = serde_json::from_str(&s.handle(r#"{"op":"check","params":{}}"#)).unwrap();
         assert_eq!(v["op"], "error", "missing action_id is an error");
