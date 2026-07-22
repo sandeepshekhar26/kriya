@@ -1,0 +1,43 @@
+name: "kriya governed CI lane"
+description: >
+  Run a governed agent step under a repo-committed kriya policy, fail the job when the policy blocks
+  a governed action (or the step fails), and upload the signed receipts as a build-evidence artifact
+  that `verify-receipts` re-proves offline. A COOPERATIVE lane — see docs/GOVERNED-CI-LANE.md. Assumes
+  `kriya-ci` (and the agent's governance binary, e.g. `kriya-govern`) are already on PATH.
+
+inputs:
+  policy:
+    description: "Path to the repo-committed policy YAML the lane enforces (deny-by-default)."
+    required: true
+  command:
+    description: "The governed agent step to run (a shell command). Its tool calls must route through kriya."
+    required: true
+  audit-log:
+    description: "Where the signed receipts are written (also exported to the step as KRIYA_AUDIT_LOG)."
+    required: false
+    default: "kriya-ci-receipts.jsonl"
+  artifact-name:
+    description: "Name of the uploaded receipts artifact."
+    required: false
+    default: "kriya-ci-receipts"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Run the governed step + gate on the policy
+      shell: bash
+      # `kriya-ci run` exports KRIYA_POLICY + KRIYA_AUDIT_LOG to the step, runs it, then gates:
+      # exit 0 clean · 3 policy-denied · 4 kriya-error (fail-closed) · 5 step failed.
+      run: |
+        kriya-ci run \
+          --policy "${{ inputs.policy }}" \
+          --audit-log "${{ inputs.audit-log }}" \
+          -- bash -c "${{ inputs.command }}"
+    - name: Upload the signed receipts (build evidence)
+      # Always upload — even on a policy denial the receipts ARE the evidence of what was blocked.
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ inputs.audit-log }}
+        if-no-files-found: warn
