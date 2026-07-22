@@ -18,9 +18,10 @@ runnable demo the example workflow uses.
 
 ```bash
 # Build the binaries (from the repo root) and put them on PATH.
-( cd apps/note-app/src-tauri && cargo build -p kriya --locked --bin kriya-ci --bin kriya-govern )
+# std-only + core → --no-default-features drops the tauri/glib/brotli host deps (no system packages).
+( cd crates/kriya && cargo build --no-default-features --bin kriya-ci --bin kriya-govern )
 ( cd tools/verify-receipts && cargo build )
-export PATH="$PWD/apps/note-app/src-tauri/target/debug:$PWD/tools/verify-receipts/target/debug:$PATH"
+export PATH="$PWD/crates/kriya/target/debug:$PWD/tools/verify-receipts/target/debug:$PATH"
 
 # Governed CI lane: run the step, gate on the policy.
 kriya-ci run --policy examples/kriya-ci-demo/policy.yaml \

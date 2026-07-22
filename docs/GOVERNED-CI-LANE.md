@@ -53,9 +53,10 @@ a full, runnable example (build → run → verify offline → tamper-detect) is
 
 ```yaml
 - name: Build the kriya binaries (put kriya-ci + the govern lane on PATH)
+  # std-only + core → --no-default-features drops the tauri/glib/brotli host deps (no system packages).
   run: |
-    ( cd apps/note-app/src-tauri && cargo build -p kriya --locked --bin kriya-ci --bin kriya-govern )
-    echo "$PWD/apps/note-app/src-tauri/target/debug" >> "$GITHUB_PATH"
+    ( cd crates/kriya && cargo build --no-default-features --bin kriya-ci --bin kriya-govern )
+    echo "$PWD/crates/kriya/target/debug" >> "$GITHUB_PATH"
 
 - name: Governed CI lane
   uses: ./.github/actions/kriya-ci
@@ -78,9 +79,9 @@ exit-code contract:
 governed-ci-lane:
   image: rust:1.90
   script:
-    - ( cd apps/note-app/src-tauri && cargo build -p kriya --locked --bin kriya-ci --bin kriya-govern )
+    - ( cd crates/kriya && cargo build --no-default-features --bin kriya-ci --bin kriya-govern )
     - ( cd tools/verify-receipts && cargo build )
-    - export PATH="$PWD/apps/note-app/src-tauri/target/debug:$PWD/tools/verify-receipts/target/debug:$PATH"
+    - export PATH="$PWD/crates/kriya/target/debug:$PWD/tools/verify-receipts/target/debug:$PATH"
     - kriya-ci run --policy ci-policy.yaml --audit-log kriya-ci-receipts.jsonl -- node run-my-agent.mjs
     - verify-receipts kriya-ci-receipts.jsonl           # offline re-prove
   artifacts:

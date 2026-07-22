@@ -33,10 +33,12 @@ jobs:
           node-version: "20"
 
       - name: Build kriya-ci + kriya-govern + verify-receipts (put on PATH)
+        # --no-default-features: kriya-ci + kriya-govern are std-only + core, so this drops the
+        # tauri/glib/brotli host deps entirely — no system packages needed, fast, portable.
         run: |
-          ( cd apps/note-app/src-tauri && cargo build -p kriya --locked --bin kriya-ci --bin kriya-govern )
+          ( cd crates/kriya && cargo build --no-default-features --bin kriya-ci --bin kriya-govern )
           ( cd tools/verify-receipts && cargo build )
-          echo "$PWD/apps/note-app/src-tauri/target/debug" >> "$GITHUB_PATH"
+          echo "$PWD/crates/kriya/target/debug" >> "$GITHUB_PATH"
           echo "$PWD/tools/verify-receipts/target/debug" >> "$GITHUB_PATH"
 
       - name: Run the governed CI lane + upload the receipts artifact
