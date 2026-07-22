@@ -1,0 +1,65 @@
+name: kriya-ci example (governed CI lane)
+
+# The REAL acceptance for S4: a GitHub Actions run that (1) runs a governed agent step through the
+# `kriya-ci` composite action under a repo-committed policy, uploading the signed receipts as an
+# artifact, (2) re-proves that artifact OFFLINE with `verify-receipts` (exit 0), and (3) flips one
+# byte and shows the auditor catches it (exit 1). Scoped to the CI-lane files + manual dispatch, so
+# it does not run on unrelated changes.
+on:
+  push:
+    paths:
+      - "crates/kriya/src/bin/kriya-ci.rs"
+      - "examples/kriya-ci-demo/**"
+      - ".github/actions/kriya-ci/**"
+      - ".github/workflows/kriya-ci-example.yml"
+      - "tools/verify-receipts/**"
+  workflow_dispatch:
+
+jobs:
+  governed-ci-lane:
+    name: governed CI lane — run · verify offline · tamper-detect
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.90.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.90.0"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build kriya-ci + kriya-govern + verify-receipts (put on PATH)
+        # --no-default-features: kriya-ci + kriya-govern are std-only + core, so this drops the
+        # tauri/glib/brotli host deps entirely — no system packages needed, fast, portable.
+        run: |
+          ( cd crates/kriya && cargo build --no-default-features --bin kriya-ci --bin kriya-govern )
+          ( cd tools/verify-receipts && cargo build )
+          echo "$PWD/crates/kriya/target/debug" >> "$GITHUB_PATH"
+          echo "$PWD/tools/verify-receipts/target/debug" >> "$GITHUB_PATH"
+
+      - name: Run the governed CI lane + upload the receipts artifact
+        uses: ./.github/actions/kriya-ci
+        with:
+          policy: examples/kriya-ci-demo/policy.yaml
+          command: node examples/kriya-ci-demo/agent.mjs
+          audit-log: kriya-ci-receipts.jsonl
+          artifact-name: kriya-ci-receipts
+
+      - name: Offline re-prove — verify-receipts must exit 0
+        run: |
+          verify-receipts kriya-ci-receipts.jsonl
+          echo "✓ every receipt verifies offline (exit 0) — the build's tamper-evidence"
+
+      - name: Tamper detection — flip one byte, the auditor must exit 1
+        run: |
+          cp kriya-ci-receipts.jsonl tampered.jsonl
+          sed -i '1s/"success":true/"success":false/' tampered.jsonl
+          if verify-receipts tampered.jsonl; then
+            echo "✗ FAIL: verify-receipts did NOT catch the flipped byte"; exit 1
+          else
+            echo "✓ tamper caught: one flipped byte → verify-receipts exited non-zero"
+          fi
