@@ -102,15 +102,31 @@ const search = tool("search", "Search the web", { query: z.string() },
 // A denied call comes back as an `isError` result, so the model adapts.
 ```
 
+## OpenAI Agents SDK (JS/TS)
+
+Wrap your tool's `execute`, then pass it to the SDK's `tool()` — see `kriya-agents/openai-agents`:
+
+```ts
+import { tool } from "@openai/agents";
+import { z } from "zod";
+import { governExecute } from "kriya-agents/openai-agents";
+
+const add = tool({
+  name: "add", description: "Add two numbers",
+  parameters: z.object({ a: z.number(), b: z.number() }),
+  execute: governExecute(client, "add", async ({ a, b }) => `${a + b}`),
+});
+// A denied call throws GovernDenied; the SDK surfaces it to the model as the tool's error.
+```
+
 ## Status
 
-- ✅ **Core `govern()` + LangGraph/LangChain.js + Claude Agent SDK** — shipped here, tested against the
-  real `kriya-govern` binary, and the emitted receipts verify in the kriya Console. A Python sibling
-  (`kriya.agents`) ships the same core + LangGraph.
-- 🧭 **OpenAI Agents SDK · CrewAI** — the same `kriya-govern` core; the framework-agnostic `govern()`
-  already wraps any tool function today, so a bespoke adapter is only sugar. It lands once that
-  framework's current tool seam is verified against its docs **and** an install is available for a
-  live acceptance (neither was, in the session that built this). See
-  `kriya-console/docs/ideas/BREADTH-EXECUTE-PROMPT.md` (S2).
+- ✅ **Core `govern()` + LangGraph/LangChain.js + Claude Agent SDK + OpenAI Agents SDK** — shipped
+  here, tested against the real `kriya-govern` binary (the OpenAI + LangGraph tests drive a real tool
+  *through* the framework), and the emitted receipts verify in the kriya Console. A Python sibling
+  (`kriya.agents`) ships the same core + LangGraph (and the OpenAI Agents / CrewAI / Claude Agent SDK
+  Python adapters).
+- 🧭 Anything not listed is covered by the framework-agnostic `govern()` today (wrap any tool
+  function); a bespoke adapter is only sugar and lands once its current seam is verified + installed.
 
 MIT.

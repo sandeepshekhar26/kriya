@@ -18,6 +18,10 @@
     "./claude-agent": {
       "types": "./dist/claude-agent.d.ts",
       "import": "./dist/claude-agent.js"
+    },
+    "./openai-agents": {
+      "types": "./dist/openai-agents.d.ts",
+      "import": "./dist/openai-agents.js"
     }
   },
   "files": [
@@ -56,8 +60,10 @@
     "prepublishOnly": "npm run build && npm run test"
   },
   "devDependencies": {
+    "@openai/agents": "^0.13.5",
     "@types/node": "^22.10.0",
     "typescript": "^5.6.0",
-    "vitest": "^2.1.8"
+    "vitest": "^2.1.8",
+    "zod": "^4.4.3"
   }
 }
