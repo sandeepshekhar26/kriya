@@ -75,7 +75,10 @@ class TestCrewAI(unittest.TestCase):
         receipt = json.loads(Path(log).read_text().strip())
         self.assertEqual(receipt["action_id"], "add")
         self.assertTrue(receipt["success"])
-        self.assertEqual(receipt["params"], {"a": 2, "b": 3})
+        # Tool params preserved; run correlation (S3) rides the reserved key alongside them.
+        self.assertEqual(receipt["params"]["a"], 2)
+        self.assertEqual(receipt["params"]["b"], 3)
+        self.assertEqual(receipt["params"]["kriya.corr"]["run_id"], client.run_id)
         self.assertEqual(receipt["actor"]["agent"], "crewai")
         client.close()
 

@@ -1,0 +1,12 @@
+{
+  "session_id": "sess-w03-A",
+  "transcript_path": "/Users/dev/.claude/projects/demo/sess-w03-A.jsonl",
+  "cwd": "/Users/dev/project",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Bash",
+  "tool_input": { "command": "echo hello-from-subagent" },
+  "tool_response": { "stdout": "hello-from-subagent\n", "isError": false },
+  "agent_id": "subagent-explore-1",
+  "agent_type": "Explore"
+}

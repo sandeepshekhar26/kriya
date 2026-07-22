@@ -145,6 +145,38 @@ class TestGovernClient(unittest.TestCase):
         send2 = govern(auto_client, "send_email", lambda p: "sent")
         self.assertEqual(send2({}), "sent")
 
+    def test_stamps_run_correlation_run_id_and_nested_parent_step_id(self):
+        client, log = self._make(
+            'rules:\n  - { action: "*", allow: true }\nbudget:\n  max_actions_per_minute: 60\n',
+            approval="auto",
+        )
+        # A top-level call: the client's run_id groups the invocation; no parent.
+        outer = govern(client, "outer", lambda p: "ok")
+        outer({"q": "x"})
+        outer_receipt = json.loads(Path(log).read_text().strip().splitlines()[0])
+        # A nested call under the outer step's id.
+        inner = govern(client, "inner", lambda p: "ok", parent_step_id=outer_receipt["step_id"])
+        inner({})
+
+        lines = Path(log).read_text().strip().splitlines()
+        outer_r = json.loads(lines[0])
+        inner_r = json.loads(lines[1])
+        # Both share the client's run_id — the whole invocation is one run.
+        self.assertEqual(outer_r["params"]["kriya.corr"]["run_id"], client.run_id)
+        self.assertEqual(inner_r["params"]["kriya.corr"]["run_id"], client.run_id)
+        # The top-level call has no parent; the nested call points at the outer step.
+        self.assertNotIn("parent_step_id", outer_r["params"]["kriya.corr"])
+        self.assertEqual(inner_r["params"]["kriya.corr"]["parent_step_id"], outer_r["step_id"])
+        # The tool's own params are preserved alongside the reserved key.
+        self.assertEqual(outer_r["params"]["q"], "x")
+
+    def test_default_run_ids_are_distinct_and_a_supplied_run_id_is_honored(self):
+        a = GovernClient(binary_path=BIN, run_id="run-external-42")
+        b = GovernClient(binary_path=BIN)
+        self._clients += [a, b]
+        self.assertEqual(a.run_id, "run-external-42")
+        self.assertNotEqual(b.run_id, a.run_id)  # a fresh UUID per client by default
+
     def test_langgraph_adapter_governs_a_keyword_called_tool(self):
         client, log = self._make(
             'rules:\n  - { action: "adder", allow: true }\nbudget:\n  max_actions_per_minute: 60\n'
@@ -155,7 +187,10 @@ class TestGovernClient(unittest.TestCase):
         self.assertEqual(governed(a=2, b=3), 5)
         receipt = json.loads(Path(log).read_text().strip())
         self.assertEqual(receipt["action_id"], "adder")
-        self.assertEqual(receipt["params"], {"a": 2, "b": 3})
+        # The tool's own params are preserved; run correlation (S3) rides the reserved key alongside.
+        self.assertEqual(receipt["params"]["a"], 2)
+        self.assertEqual(receipt["params"]["b"], 3)
+        self.assertEqual(receipt["params"]["kriya.corr"]["run_id"], client.run_id)
         self.assertTrue(receipt["success"])
 
 

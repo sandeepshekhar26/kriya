@@ -147,4 +147,44 @@ describe.skipIf(!BIN)("GovernClient against the real kriya-govern binary", () =>
     expect(receipt.action_id).toBe("adder");
     expect(receipt.success).toBe(true);
   });
+
+  it("stamps run correlation (run_id per client, parent_step_id for a nested call)", async () => {
+    const { client, auditLog } = make(
+      'rules:\n  - { action: "*", allow: true }\nbudget:\n  max_actions_per_minute: 60\n',
+      { approval: "auto" },
+    );
+    // A top-level call: the client's run_id groups the invocation; no parent.
+    const parent = govern(client, "outer", async () => "ok");
+    await parent({ q: "x" });
+    // A nested call under the first one's step_id (threaded via the hooks bag).
+    const lines1 = readFileSync(auditLog, "utf8").trim().split("\n");
+    const outerReceipt = JSON.parse(lines1[0]!);
+    const nested = govern(client, "inner", async () => "ok", {
+      parentStepId: outerReceipt.step_id,
+    });
+    await nested({});
+
+    const lines = readFileSync(auditLog, "utf8").trim().split("\n");
+    const outer = JSON.parse(lines[0]!);
+    const inner = JSON.parse(lines[1]!);
+
+    // Both share the client's run_id — the whole invocation is one run.
+    expect(outer.params["kriya.corr"].run_id).toBe(client.runId);
+    expect(inner.params["kriya.corr"].run_id).toBe(client.runId);
+    // The top-level call carries no parent; the nested call points at the outer step.
+    expect(outer.params["kriya.corr"].parent_step_id).toBeUndefined();
+    expect(inner.params["kriya.corr"].parent_step_id).toBe(outer.step_id);
+    // The tool's own params are preserved alongside the reserved key.
+    expect(outer.params.q).toBe("x");
+    // Still a real signature (correlation rides the one-Signer path, changes no bytes' validity).
+    expect(outer.signature).toMatch(/^[0-9a-f]{128}$/);
+  });
+
+  it("honors a caller-supplied runId and gives distinct clients distinct runs", async () => {
+    const a = new GovernClient({ binaryPath: BIN!, runId: "run-external-42" });
+    const b = new GovernClient({ binaryPath: BIN! });
+    clients.push(a, b);
+    expect(a.runId).toBe("run-external-42");
+    expect(b.runId).not.toBe(a.runId); // a fresh UUID per client by default
+  });
 });

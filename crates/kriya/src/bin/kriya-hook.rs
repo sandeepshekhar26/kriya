@@ -86,6 +86,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use kriya::audit::{default_audit_dir, now_ms, Actor, Receipt, Signer};
+use kriya::corr::{self, Correlation};
 #[cfg(target_os = "macos")]
 use kriya::mcp::GuiApproval;
 use kriya::mcp::{
@@ -115,8 +116,17 @@ struct HookPayload {
     tool_input: Option<Value>,
     #[serde(default)]
     tool_response: Option<Value>,
+    /// Run correlation (S3): the Claude Code session id — stable across every tool call in one
+    /// session, including a spawned subagent's calls — so it is the run scope for `kriya.corr.run_id`.
     #[serde(default)]
     session_id: Option<String>,
+    /// Run correlation (S3): the per-agent id. Claude Code stamps a DIFFERENT `agent_id` on a spawned
+    /// subagent's tool calls than on the main agent's, with no parent-step pointer anywhere in the
+    /// payload (verified 2026-07-22 against the hooks reference) — so it is the honest sub-agent
+    /// discriminator for `kriya.corr.agent_id` (nests `run → subagent → actions`), and the hook never
+    /// fabricates a `parent_step_id` it cannot see. Absent on payloads/versions that omit it.
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 struct Args {
@@ -241,13 +251,24 @@ fn signer_for(args: &Args) -> Result<Signer, String> {
 
 /// Sign the action receipt and return its `step_id` so a correlated `kriya.io.*` receipt can carry
 /// it as `corr` (doc 24 §4.2 — correlation by `corr`, never adjacency, L5).
-fn record(signer: &Signer, actor: &Actor, action_id: &str, params: Value, success: bool) -> String {
+///
+/// Run correlation (S3): `corr` stamps `kriya.corr` (run_id + agent_id) into `params` via the shared,
+/// seam-authoritative [`kriya::corr::attach`] — one placement, reused by every emitter. Empty
+/// correlation leaves `params` byte-identical to the pre-S3 receipt.
+fn record(
+    signer: &Signer,
+    actor: &Actor,
+    action_id: &str,
+    params: Value,
+    success: bool,
+    corr: &Correlation,
+) -> String {
     let step_id = uuid::Uuid::new_v4().to_string();
     signer.record(
         Receipt::new(
             step_id.clone(),
             action_id.to_string(),
-            params,
+            corr::attach(params, corr),
             success,
             now_ms(),
         )
@@ -569,6 +590,16 @@ fn main() -> ExitCode {
         .unwrap_or_else(|| "unknown".into());
     let actor = Actor::new(args.actor.clone(), user);
 
+    // Run correlation (S3): stamp the session as `run_id` and the sub-agent id (when present) so the
+    // Console can build the `run → subagent → actions` tree from verified receipts. `parent_step_id`
+    // is deliberately NOT set — the Claude Code payload carries no parent pointer (W0-3), and guessing
+    // lineage the seam can't see is dishonest (doc 24 locus discipline). Empty ⇒ params byte-identical.
+    let corr = Correlation {
+        run_id: payload.session_id.clone().filter(|s| !s.is_empty()),
+        parent_step_id: None,
+        agent_id: payload.agent_id.clone().filter(|s| !s.is_empty()),
+    };
+
     let signer = match signer_for(&args) {
         Ok(s) => s,
         Err(e) => {
@@ -606,7 +637,8 @@ fn main() -> ExitCode {
                         }
                     };
                     if !gate.request(&action_id, &params) {
-                        let step_id = record(&signer, &actor, &action_id, params.clone(), false);
+                        let step_id =
+                            record(&signer, &actor, &action_id, params.clone(), false, &corr);
                         maybe_record_io_deny(
                             &signer,
                             &actor,
@@ -626,7 +658,7 @@ fn main() -> ExitCode {
                     }
                 }
                 Decision::Deny => {
-                    let step_id = record(&signer, &actor, &action_id, params.clone(), false);
+                    let step_id = record(&signer, &actor, &action_id, params.clone(), false, &corr);
                     maybe_record_io_deny(
                         &signer,
                         &actor,
@@ -673,7 +705,8 @@ fn main() -> ExitCode {
                         }),
                     };
                     if let Some(reason) = deny_reason {
-                        let step_id = record(&signer, &actor, &action_id, params.clone(), false);
+                        let step_id =
+                            record(&signer, &actor, &action_id, params.clone(), false, &corr);
                         record_brokering_deny(
                             &signer, &actor, tool_name, &params, &reason, &step_id,
                         );
@@ -744,7 +777,14 @@ fn main() -> ExitCode {
                 None => params.clone(),
             };
             let success = outcome_success(payload.tool_response.as_ref());
-            let step_id = record(&signer, &actor, &action_id, safe_params.clone(), success);
+            let step_id = record(
+                &signer,
+                &actor,
+                &action_id,
+                safe_params.clone(),
+                success,
+                &corr,
+            );
             // kriya.io.* receipts (doc 24 §7.3): recorded only when the policy opts in via an
             // `egress:` section, and only for a tool whose destination is knowable (WebFetch host,
             // mcp server) — Bash and file tools produce none (doc 24 §4.1).
@@ -781,7 +821,6 @@ fn main() -> ExitCode {
                     }
                 }
             }
-            let _ = payload.session_id; // reserved: session correlation lands with envelope work
             ExitCode::SUCCESS
         }
         _ => unreachable!("parse_args validated the mode"),
@@ -803,6 +842,64 @@ fn fail_mode_exit(mode: &str) -> ExitCode {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// S3 run correlation: the hook builds `Correlation { run_id = session_id, agent_id }` from the
+    /// payload and NEVER a `parent_step_id` (the Claude Code payload has no parent pointer). The
+    /// `record()` helper stamps `kriya.corr` into params while leaving the tool args intact; a
+    /// payload without a session id leaves params byte-identical.
+    #[test]
+    fn hook_stamps_run_correlation_from_the_payload_and_never_a_parent() {
+        let dir = std::env::temp_dir().join(format!("kriya-hook-corr-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("claude-code.jsonl");
+        let actor = Actor::new("claude-code", "tester");
+        let s = Signer::with_identity(&dir.join("k.key"), log.clone()).unwrap();
+
+        // A subagent's tool call: session_id (run) + a distinct agent_id, no parent pointer.
+        let corr = Correlation {
+            run_id: Some("sess-42".into()),
+            parent_step_id: None,
+            agent_id: Some("subagent-7".into()),
+        };
+        record(
+            &s,
+            &actor,
+            "claude-code__bash",
+            json!({"command":"ls"}),
+            true,
+            &corr,
+        );
+
+        // No correlation at all → params byte-identical to the raw tool input.
+        record(
+            &s,
+            &actor,
+            "claude-code__read",
+            json!({"file_path":"a.txt"}),
+            true,
+            &Correlation::default(),
+        );
+
+        let lines: Vec<String> = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        let v0: Value = serde_json::from_str(&lines[0]).unwrap();
+        let v1: Value = serde_json::from_str(&lines[1]).unwrap();
+
+        // The correlated receipt: reserved key present, tool arg intact, NO parent_step_id.
+        assert_eq!(v0["params"]["kriya.corr"]["run_id"], json!("sess-42"));
+        assert_eq!(v0["params"]["kriya.corr"]["agent_id"], json!("subagent-7"));
+        assert!(v0["params"]["kriya.corr"].get("parent_step_id").is_none());
+        assert_eq!(v0["params"]["command"], json!("ls"));
+
+        // The uncorrelated receipt: NO reserved key — params is exactly the raw tool input.
+        assert_eq!(v1["params"], json!({"file_path":"a.txt"}));
+        assert!(v1["params"].get("kriya.corr").is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn maps_tool_names_into_the_governed_namespace() {
@@ -995,6 +1092,7 @@ mod tests {
             "claude-code__bash",
             json!({"command":"ls"}),
             true,
+            &Correlation::default(),
         );
         drop(s1); // ≈ the pre/post process exits
         let s2 = Signer::with_identity(&key, log.clone()).unwrap();
@@ -1004,6 +1102,7 @@ mod tests {
             "claude-code__edit",
             json!({"file":"a.rs"}),
             false,
+            &Correlation::default(),
         );
 
         let text = std::fs::read_to_string(&log).unwrap();
