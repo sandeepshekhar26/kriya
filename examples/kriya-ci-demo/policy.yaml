@@ -1,0 +1,14 @@
+# The repo-committed policy the governed CI lane enforces (S4).
+# First match wins; NO match = deny (deny-by-default — the safe posture the CI lane relies on).
+#
+# This demo's agent performs read-only, side-effect-free actions, all allowed. Add a `deny`/
+# `require_approval` action here (or make the agent attempt one) and `kriya-ci` fails the job —
+# see the unit tests in crates/kriya/src/bin/kriya-ci.rs and the README.
+rules:
+  - { action: "read_file", allow: true }
+  - { action: "list_dir", allow: true }
+  - { action: "http_get", allow: true }
+  # Everything else (e.g. wire_funds, delete_repo, deploy) falls through to deny-by-default.
+  - { action: "*", allow: false }
+budget:
+  max_actions_per_minute: 120
