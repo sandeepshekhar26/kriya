@@ -311,8 +311,15 @@ local-first finance app with **no HTTP API** — in ~37 lines, without changing 
 
 **Binaries:** `kriya-gateway` (wrap any MCP server, zero changes) · `kriya-hook` (govern Claude
 Code's whole tool lane) · `kriya-hermes-hook` (Hermes' native tools) · `kriya-mcp` (governed MCP
-server — external agents drive your app through the gates) · `kriya-host` (the stdio sidecar) ·
+server — external agents drive your app through the gates) · `kriya-govern` (per-call govern + sign
+over stdio — the one signer the SDK middleware delegates to) · [`kriya-ci`](docs/GOVERNED-CI-LANE.md)
+(the governed CI lane — run an agent step in CI under a repo policy; fail the build on a block; signed
+receipts as a re-verifiable artifact) · `kriya-host` (the stdio sidecar) ·
 [`tools/verify-receipts`](tools/verify-receipts/) (offline audit-log verifier).
+
+**SDK middleware** (govern in-process agent-framework tool calls — no MCP hop, no crypto in the
+wrapper): [`kriya-agents`](packages/agents/) (TypeScript) and [`kriya.agents`](bindings/python/)
+(Python), with adapters for LangGraph, the OpenAI Agents SDK, CrewAI, and the Claude Agent SDK.
 
 **Reference apps:** [`apps/note-app`](apps/note-app/) and [`apps/task-manager`](apps/task-manager/)
 — two domains on the one shared host crate.
