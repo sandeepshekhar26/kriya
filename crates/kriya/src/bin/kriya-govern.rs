@@ -255,6 +255,12 @@ fn main() -> std::io::Result<()> {
     let budget = BudgetTracker::new(policy.max_actions_per_minute());
     let approval = build_approval(&args.approval);
     let actor = build_actor(args.actor.clone(), args.user.clone());
+    // A4 (doc 27 / docs/design/a4-fips-lane.md D2): NOT wired here — `kriya-ci` invokes
+    // `kriya-govern` once PER GOVERNED ACTION (see `kriya_ci_smoke.rs`), so a per-invocation
+    // attestation would double every action-count assertion in that suite for a low-priority,
+    // "optional (consistency)" binary per the design. The crypto lane is still fully migrated to
+    // the facade here (`crypto::verify`/`SigningKey` via `Signer`); only the self-attestation
+    // RECEIPT is intentionally not emitted by this particular binary.
 
     let actor_desc = match &actor {
         Some(a) => format!("{}/{}", a.agent, a.user),

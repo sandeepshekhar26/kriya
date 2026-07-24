@@ -258,7 +258,6 @@ mod tests {
     #[test]
     fn a_signed_receipt_carrying_correlation_reverifies() {
         use crate::audit::{Actor, Receipt, Signer};
-        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
         let s = Signer::with_log_path(
             std::env::temp_dir().join(format!("kriya-corr-rt-{}.jsonl", uuid::Uuid::new_v4())),
@@ -277,15 +276,13 @@ mod tests {
             json!("sess-1")
         );
 
-        // Re-derive the canonical bytes and verify against the embedded key (what every verifier does).
+        // Re-derive the canonical bytes and verify against the embedded key (what every verifier does),
+        // through the same facade the production verify paths use (A4).
         let pk: [u8; 32] = hex::decode(&signed.public_key).unwrap().try_into().unwrap();
         let sig: [u8; 64] = hex::decode(&signed.signature).unwrap().try_into().unwrap();
         let msg = serde_json::to_vec(&signed.receipt).unwrap();
         assert!(
-            VerifyingKey::from_bytes(&pk)
-                .unwrap()
-                .verify(&msg, &Signature::from_bytes(&sig))
-                .is_ok(),
+            crate::crypto::verify(&pk, &msg, &sig),
             "a real signed correlated receipt must verify"
         );
     }
