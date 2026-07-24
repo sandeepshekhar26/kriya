@@ -182,9 +182,18 @@ jobs:
         working-directory: crates/kriya
         run: cargo build --features pq-crypto
 
-      - name: cargo test -p kriya --features pq-crypto (PQ parity/interop + cross-impl + full suite)
+      - name: cargo test -p kriya --features pq-crypto (PQ parity/interop + full suite)
         working-directory: crates/kriya
         run: cargo test --features pq-crypto
+
+      # The two cross-implementation ML-DSA-87 parity tests (aws-lc-rs ⇄ RustCrypto `ml-dsa`) were
+      # moved out of `crates/kriya` into this standalone sibling crate so `crates/kriya` carries no
+      # dev-dependencies (required for `cargo test -p kriya` from the note-app workspace). They run
+      # here, in the same pq-crypto job, so the same toolchain/cache covers them and the cross-impl
+      # assurance still executes on every push.
+      - name: test kriya-pq-parity (cross-impl ML-DSA-87 parity, aws-lc-rs ⇄ RustCrypto)
+        working-directory: crates/kriya-pq-parity
+        run: cargo test
 
       - name: cargo test -p kriya --features mcp-http,pq-crypto
         working-directory: crates/kriya
