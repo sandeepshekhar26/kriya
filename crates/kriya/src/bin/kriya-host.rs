@@ -89,6 +89,9 @@ fn main() -> std::io::Result<()> {
         // Default: an ephemeral per-process key (fine for demos/CI/single sessions).
         None => Signer::with_log_path(log_path),
     });
+    // A4 (doc 27 / docs/design/a4-fips-lane.md D2): consistency emission (low priority — the
+    // receipt is additive either way). No `Actor` concept in this binary today.
+    signer.attest_crypto_module("kriya-host", None);
 
     // Validate the script once up front so a typo fails loudly at startup, not mid-run.
     if let Some(path) = &args.script {
