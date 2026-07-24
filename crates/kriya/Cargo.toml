@@ -72,7 +72,24 @@ router = ["reach-in", "computer-use"]
 # `ed25519-dalek`. Requires CMake + Go (+ bindgen unless pre-generated bindings exist for the target)
 # at build time; adds NO surface to the default dependency graph. See `crates/kriya/src/crypto.rs`
 # and `docs/design/a4-fips-lane.md` (kriya-console repo) for the full design.
-fips-crypto = ["dep:aws-lc-rs"]
+# (A5 note: `aws-lc-rs/fips` is requested HERE on the feature edge, not baked into the base
+# dependency declaration below — required so `pq-crypto` can pull `aws-lc-rs` WITHOUT `fips`
+# when it's the only PQ feature on. See the `pq-crypto` feature + `crypto.rs`'s deviation note.)
+fips-crypto = ["dep:aws-lc-rs", "aws-lc-rs/fips"]
+# A5 (doc 27, PQ dual-signature receipts): opt-in, OFF by default, INDEPENDENT of `fips-crypto`
+# (a buyer may want PQ without the FIPS lane, or neither, or — for everything except the two
+# together, see below — both). Adds an ML-DSA-87 (FIPS 204) countersignature type via
+# `aws-lc-rs`'s `unstable` feature (`unstable::signature::{PqdsaKeyPair, ML_DSA_87}`). ML-DSA-87
+# is NOT FIPS-validated (outside CMVP cert #5298's approved boundary) — "post-quantum-ready",
+# never "FIPS-validated PQ". See `crates/kriya/src/crypto.rs` and
+# `docs/design/a5-pq-dual-sig.md` (kriya-console repo).
+#
+# MUTUALLY EXCLUSIVE with `fips-crypto` (documented deviation from the design's D4 "compose"
+# claim — verified against the real aws-lc-rs 1.17.x source: its `unstable` module, where
+# `PqdsaKeyPair`/`ML_DSA_87` live, is `#[cfg(all(feature = "unstable", not(feature = "fips")))]`
+# — compiled OUT whenever `fips` is active). `crypto.rs` turns an accidental double-enable into a
+# clear `compile_error!` instead of a confusing "module `unstable` not found" deep in `audit.rs`.
+pq-crypto = ["dep:aws-lc-rs", "aws-lc-rs/unstable"]
 
 [dependencies]
 tauri = { version = "2", features = [], optional = true }
@@ -83,9 +100,14 @@ ed25519-dalek = "2"
 rand = "0.8"
 hex = "0.4"
 sha2 = "0.10"
-# A4 FIPS lane (optional, `fips-crypto` feature only) — see `crypto.rs`. Pinned major so the
-# validated-module identity in `crypto::active_module()` doesn't silently drift underneath us.
-aws-lc-rs = { version = "1", features = ["fips"], optional = true }
+# A4 FIPS lane / A5 PQ lane (optional; `fips-crypto` and/or `pq-crypto` — see `crypto.rs`).
+# Pinned to the exact 1.17.3 patch (via Cargo.lock) so the validated-module identity in
+# `crypto::active_module()` and the pinned `unstable::signature::PqdsaKeyPair` API (A5 CS5 /
+# RT2.5 guardrail) don't silently drift underneath us. NO feature baked in here — `fips` and
+# `unstable` are requested on the `fips-crypto`/`pq-crypto` feature edges above so each stays
+# independently activatable (and so the two edges' mutual exclusion is visible at the feature
+# level, not hidden inside this dependency line).
+aws-lc-rs = { version = "=1.17.3", optional = true }
 # Already pulled in transitively by ed25519-dalek/curve25519-dalek and by rustls (via ureq) — zero
 # new supply-chain surface. Used for credential brokering (doc 24 §11 B13 / EG-B): a secret read
 # from OS Keychain is wrapped the moment it's in hand and zeroed on drop.
@@ -115,3 +137,16 @@ core-foundation = { version = "0.10", optional = true }
 # Same target-gating + `optional` posture as the AX deps, so the default build never pulls it; its
 # default `link` feature links the CoreGraphics framework (and unifies core-foundation's `link`).
 core-graphics = { version = "0.25", optional = true }
+
+# A5 (doc 27, PQ dual-signature receipts, design D7): a SECOND, INDEPENDENT ML-DSA-87
+# implementation, TEST-ONLY — never a signing or verification dependency of any production path.
+# RustCrypto's `ml-dsa` is unaudited (V4), which is acceptable for cross-implementation parity
+# fixtures/tests and unacceptable for signing; `aws-lc-rs` (behind `pq-crypto`, `unstable`) is the
+# only production PQ signer. This crate is NOT gated by any feature — it compiles only for
+# `cargo test`, so `cargo build` (no `--tests`) never touches it, and it adds no surface to any
+# shipped binary at all (dev-dependencies are excluded from `cargo build`'s dependency graph).
+# Default features only (`alloc`, `getrandom`, `pkcs8`) — deliberately NOT pinning `signature`/
+# `rand_core` separately, to avoid a duplicate `signature`-crate version conflict with
+# `aws-lc-rs`'s own (older) `signature` dependency.
+[dev-dependencies]
+ml-dsa = "0.1"
