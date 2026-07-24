@@ -230,6 +230,147 @@ pub fn active_module() -> CryptoModule {
     backend::active_module()
 }
 
+// ─── A5 (doc 27, PQ dual-signature receipts — `docs/design/a5-pq-dual-sig.md`) ───────────────
+//
+// A SEPARATE, independent opt-in feature `pq-crypto` extends this facade with an ML-DSA-87
+// (FIPS 204) countersignature type, parallel to (not nested in) the `fips-crypto` lane above
+// (design D4). ML-DSA-87 is **post-quantum-ready, NOT FIPS-validated** — it is outside CMVP cert
+// #5298's approved boundary (ML-KEM is in it, ML-DSA is not — design D6). Never claim
+// "FIPS-validated PQ" / "quantum-proof" anywhere this facade's output is surfaced.
+//
+// **Documented deviation from the design (D4 / RT2.5 "compose" claim).** The design states
+// `pq-crypto` and `fips-crypto` "compose" (both may be enabled together) and calls for a CI
+// matrix cell exercising both. Verified against the real, pinned `aws-lc-rs` 1.17.x source
+// (`src/lib.rs`): `#[cfg(all(feature = "unstable", not(feature = "fips")))] pub mod unstable;` —
+// the `unstable` module, which is where `PqdsaKeyPair`/`ML_DSA_87` live, is compiled OUT of
+// `aws-lc-rs` whenever ITS `fips` feature is active. So `pq-crypto` and `fips-crypto` are
+// mutually exclusive at the dependency level, not composable, in this aws-lc-rs release line.
+// This is a narrow, mechanical correction (the D4 "compose" sentence and the RT2.5/§8 CI
+// matrix-cell plan) — it does not touch D1-D3/D5-D9, the §4 schema, §5 verification matrix, §6
+// honesty wording, or the §7 red-team findings, none of which depend on simultaneous fips+pq. The
+// `compile_error!` below turns an accidental double-enable into a build failure with this
+// explanation rather than a silent `unstable`-module-not-found compile error deep in `audit.rs`.
+#[cfg(all(feature = "pq-crypto", feature = "fips-crypto"))]
+compile_error!(
+    "pq-crypto and fips-crypto cannot be enabled together in this build: aws-lc-rs's `unstable` \
+     module (PqdsaKeyPair / ML-DSA, what pq-crypto needs) is compiled out whenever aws-lc-rs's \
+     own `fips` feature is active (aws-lc-rs 1.17.x: `#[cfg(all(feature = \"unstable\", \
+     not(feature = \"fips\")))] pub mod unstable;`). This is a real upstream constraint, not a \
+     kriya restriction — see the deviation note in crates/kriya/src/crypto.rs and \
+     docs/design/a5-pq-dual-sig.md (kriya-console repo) D4/RT2.5."
+);
+
+/// The PQ lane's status — the facts a `kriya.crypto.pq_key`/`pq_checkpoint` receipt and the
+/// Console Settings row read (design §6). Always constructible (both lanes), unlike
+/// [`PqSigningKey`] which only exists when `pq-crypto` is compiled in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PqStatus {
+    /// `true` iff this build was compiled with `pq-crypto`. There is no runtime on/off switch
+    /// for the algorithm itself (unlike the FIPS lane's live `try_fips_mode()` probe) — ML-DSA
+    /// has no FIPS-validated mode to probe (design §10 honest ceiling).
+    pub enabled: bool,
+    /// `Some("ML-DSA-87")` when enabled, else `None`.
+    pub alg: Option<&'static str>,
+}
+
+#[cfg(feature = "pq-crypto")]
+pub fn pq_active() -> PqStatus {
+    PqStatus {
+        enabled: true,
+        alg: Some("ML-DSA-87"),
+    }
+}
+#[cfg(not(feature = "pq-crypto"))]
+pub fn pq_active() -> PqStatus {
+    PqStatus {
+        enabled: false,
+        alg: None,
+    }
+}
+
+#[cfg(feature = "pq-crypto")]
+pub use pq::{pq_verify, PqError, PqSigningKey};
+
+#[cfg(feature = "pq-crypto")]
+mod pq {
+    use aws_lc_rs::rand as lc_rand;
+    use aws_lc_rs::signature::{KeyPair as _, UnparsedPublicKey};
+    use aws_lc_rs::unstable::signature::{PqdsaKeyPair, ML_DSA_87, ML_DSA_87_SIGNING};
+
+    /// An ML-DSA-87 (FIPS 204) keypair — post-quantum-ready, **not** FIPS-validated (design D6).
+    /// Unlike [`super::SigningKey`] (Ed25519, RFC 8032 deterministic), ML-DSA-87 signing is
+    /// **randomized** (FIPS 204 hedged signing): two signatures over the same message with the
+    /// same key differ. Callers must not assert byte-identity across signs — only that a
+    /// signature verifies (design D4/RT2.4). The keypair itself IS seed-deterministic: the same
+    /// 32-byte seed always derives the same keypair (design D3), which is what
+    /// [`PqSigningKey::from_seed`] relies on for persisted-identity reload.
+    pub struct PqSigningKey(PqdsaKeyPair);
+
+    /// A PQ (ML-DSA-87) facade error — seed rejected, sign/verify round-trip failure, etc.
+    #[derive(Debug)]
+    pub struct PqError(pub String);
+
+    impl std::fmt::Display for PqError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "PQ (ML-DSA-87) error: {}", self.0)
+        }
+    }
+    impl std::error::Error for PqError {}
+
+    impl PqSigningKey {
+        /// Load a keypair from a 32-byte seed (FIPS 204 seed-deterministic — design D3). Mirrors
+        /// the Ed25519 [`super::SigningKey::from_seed`] discipline: the on-disk secret is always
+        /// the 32-byte seed, never the expanded private key.
+        pub fn from_seed(seed: &[u8; 32]) -> Result<Self, PqError> {
+            PqdsaKeyPair::from_seed(&ML_DSA_87_SIGNING, seed)
+                .map(PqSigningKey)
+                .map_err(|e| PqError(format!("from_seed: {e:?}")))
+        }
+
+        /// Mint a fresh keypair: the seed is sourced from the active lane's DRBG
+        /// (`aws_lc_rs::rand::fill` — the same RNG A4's FIPS lane uses for Ed25519 keygen), then
+        /// expanded deterministically into the ML-DSA-87 keypair (design D3). Returns the raw
+        /// seed alongside the key so callers persist it at `~/.kriya/pq-signing.seed` (0600)
+        /// exactly as the Ed25519 identity is persisted at `signing.key`.
+        pub fn generate() -> ([u8; 32], Self) {
+            let mut seed = [0u8; 32];
+            lc_rand::fill(&mut seed).expect("aws-lc-rs DRBG fill");
+            let key =
+                Self::from_seed(&seed).expect("a freshly-filled 32-byte seed is always valid");
+            (seed, key)
+        }
+
+        /// The raw ML-DSA-87 public key — 2592 bytes (design §2 D1 size table; 5184 hex chars on
+        /// the wire). Raw octets, not DER/PKCS#8 — the wire format design D2's `pq_public_key`
+        /// sibling uses.
+        pub fn public_key(&self) -> Vec<u8> {
+            self.0.public_key().as_ref().to_vec()
+        }
+
+        /// Sign `msg` with ML-DSA-87 — 4627 bytes (design §2 D1). **Randomized**: repeated calls
+        /// over the same message produce different signature bytes (FIPS 204 hedged signing);
+        /// every one of them verifies. Do not assert byte-identity in tests (design D4/RT2.4) —
+        /// assert `pq_verify` instead.
+        pub fn sign(&self, msg: &[u8]) -> Vec<u8> {
+            let mut sig = vec![0u8; ML_DSA_87_SIGNING.signature_len()];
+            let n = self
+                .0
+                .sign(msg, &mut sig)
+                .expect("ML-DSA-87 sign (fixed-size output buffer, cannot fail on a valid key)");
+            sig.truncate(n);
+            sig
+        }
+    }
+
+    /// Verify a detached ML-DSA-87 signature. `pubkey` is the raw 2592-byte octet form
+    /// [`PqSigningKey::public_key`] returns (never DER/PKCS#8 on the wire — design D2).
+    pub fn pq_verify(pubkey: &[u8], msg: &[u8], sig: &[u8]) -> bool {
+        UnparsedPublicKey::new(&ML_DSA_87, pubkey)
+            .verify(msg, sig)
+            .is_ok()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,5 +389,89 @@ mod tests {
     fn active_module_reports_something_sane() {
         let m = active_module();
         assert!(!m.backend.is_empty());
+    }
+
+    #[test]
+    fn pq_active_reports_something_sane() {
+        let s = pq_active();
+        assert_eq!(s.enabled, cfg!(feature = "pq-crypto"));
+        assert_eq!(s.alg.is_some(), cfg!(feature = "pq-crypto"));
+    }
+
+    #[cfg(feature = "pq-crypto")]
+    #[test]
+    fn pq_same_seed_same_pubkey_verify_roundtrip() {
+        let seed = [7u8; 32];
+        let key = PqSigningKey::from_seed(&seed).unwrap();
+        let pk1 = key.public_key();
+        let key2 = PqSigningKey::from_seed(&seed).unwrap();
+        let pk2 = key2.public_key();
+        // Seed-deterministic keypair (FIPS 204): same seed -> same public key, even though
+        // signing itself is randomized (design D4/RT2.4).
+        assert_eq!(pk1, pk2);
+        assert_eq!(pk1.len(), 2592);
+
+        let sig = key.sign(b"hello pq kriya");
+        assert_eq!(sig.len(), 4627);
+        assert!(pq_verify(&pk1, b"hello pq kriya", &sig));
+        assert!(!pq_verify(&pk1, b"tampered", &sig));
+    }
+
+    #[cfg(feature = "pq-crypto")]
+    #[test]
+    fn pq_signing_is_randomized_but_both_verify() {
+        let seed = [9u8; 32];
+        let key = PqSigningKey::from_seed(&seed).unwrap();
+        let pk = key.public_key();
+        let sig_a = key.sign(b"same message");
+        let sig_b = key.sign(b"same message");
+        // ML-DSA-87 hedged/randomized signing (design D4/RT2.4): NOT byte-identical across calls.
+        assert_ne!(sig_a, sig_b);
+        assert!(pq_verify(&pk, b"same message", &sig_a));
+        assert!(pq_verify(&pk, b"same message", &sig_b));
+    }
+
+    /// A5 (design D7): cross-implementation parity — `aws-lc-rs` (production) signs, RustCrypto's
+    /// `ml-dsa` (test-only, unaudited — V4) independently verifies. See the reverse direction in
+    /// [`pq_cross_impl_rustcrypto_signs_aws_lc_verifies`]. Two independent ML-DSA-87
+    /// implementations agreeing is the strongest cross-impl assurance available without a JS build
+    /// of aws-lc (D7's rationale).
+    #[cfg(feature = "pq-crypto")]
+    #[test]
+    fn pq_cross_impl_aws_lc_signs_rustcrypto_verifies() {
+        use ml_dsa::{EncodedVerifyingKey, MlDsa87, Verifier as _, VerifyingKey};
+
+        let seed = [11u8; 32];
+        let key = PqSigningKey::from_seed(&seed).unwrap();
+        let pk_bytes = key.public_key();
+        let msg = b"kriya A5 cross-impl parity fixture (crates/kriya)";
+        let sig_bytes = key.sign(msg);
+        assert!(pq_verify(&pk_bytes, msg, &sig_bytes));
+
+        let encoded_vk = EncodedVerifyingKey::<MlDsa87>::try_from(pk_bytes.as_slice())
+            .expect("aws-lc-rs public key decodes as a valid RustCrypto verifying key");
+        let vk = VerifyingKey::<MlDsa87>::decode(&encoded_vk);
+        let sig = ml_dsa::Signature::<MlDsa87>::try_from(sig_bytes.as_slice())
+            .expect("aws-lc-rs signature decodes as a valid RustCrypto signature");
+        assert!(
+            vk.verify(msg, &sig).is_ok(),
+            "RustCrypto must independently verify an aws-lc-rs-produced ML-DSA-87 signature"
+        );
+    }
+
+    #[cfg(feature = "pq-crypto")]
+    #[test]
+    fn pq_cross_impl_rustcrypto_signs_aws_lc_verifies() {
+        use ml_dsa::{Generate, Keypair as _, MlDsa87, Signer as _, SigningKey};
+
+        let sk = SigningKey::<MlDsa87>::generate();
+        let msg = b"kriya A5 cross-impl parity fixture, reverse direction (crates/kriya)";
+        let sig = sk.sign(msg);
+        let pk_bytes: Vec<u8> = sk.verifying_key().encode().as_slice().to_vec();
+        let sig_bytes: Vec<u8> = sig.encode().as_slice().to_vec();
+        assert!(
+            pq_verify(&pk_bytes, msg, &sig_bytes),
+            "aws-lc-rs must independently verify a RustCrypto-produced ML-DSA-87 signature"
+        );
     }
 }

@@ -149,6 +149,67 @@ jobs:
           cargo build --features fips-crypto
           cargo test --features fips-crypto
 
+  pq-crypto:
+    name: pq-crypto (A5, doc 27 — opt-in aws-lc-rs unstable ML-DSA-87 lane)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same Tauri 2 system deps the `rust`/`fips-crypto` jobs need (glib-sys/gobject-sys are
+      # transitively pulled by `cargo build -p kriya` on Linux).
+      - name: install tauri system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.90.0"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/kriya
+
+      - name: cargo build -p kriya --features pq-crypto
+        working-directory: crates/kriya
+        run: cargo build --features pq-crypto
+
+      - name: cargo test -p kriya --features pq-crypto (PQ parity/interop + cross-impl + full suite)
+        working-directory: crates/kriya
+        run: cargo test --features pq-crypto
+
+      - name: cargo test -p kriya --features mcp-http,pq-crypto
+        working-directory: crates/kriya
+        run: cargo test --features mcp-http,pq-crypto
+
+      - name: build + test the offline verify-receipts CLI under pq-crypto
+        working-directory: tools/verify-receipts
+        run: |
+          cargo build --features pq-crypto
+          cargo test --features pq-crypto
+
+      # Design D4/RT2.5 deviation (documented in crypto.rs): pq-crypto and fips-crypto are
+      # MUTUALLY EXCLUSIVE at the aws-lc-rs dependency level (its `unstable` module is compiled
+      # out whenever `fips` is active). This asserts the guard fires — the compose cell the
+      # original design called for is impossible, so this replaces it with a negative-space test:
+      # the combined build MUST fail, with the documented compile_error! message.
+      - name: assert pq-crypto + fips-crypto together is a build ERROR (documented mutual exclusion)
+        working-directory: crates/kriya
+        run: |
+          if cargo build --features "pq-crypto,fips-crypto" 2>build.log; then
+            echo "::error::pq-crypto + fips-crypto built successfully — expected a compile_error! (see crypto.rs's deviation note)"
+            exit 1
+          fi
+          grep -q "cannot be enabled together" build.log || (cat build.log && exit 1)
+
   scaffolder-smoke:
     name: scaffolder (generate + tsc the output)
     runs-on: ubuntu-latest

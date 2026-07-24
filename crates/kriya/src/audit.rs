@@ -56,6 +56,20 @@ pub const ATTESTATION_CRYPTO_MODULE: &str = "kriya.crypto.module";
 /// tamper-evident instead of reading as tampering. See [`prune_and_seal`].
 pub const RETENTION_CHECKPOINT: &str = "kriya.retention.checkpoint";
 
+/// Reserved `action_id` for the A5 PQ checkpoint receipt (doc 27 A5 / `docs/design/a5-pq-dual-sig.md`
+/// §4.1, D1/D4 — the DEFAULT PQ mode) — a normal signed, hash-chained receipt whose ML-DSA-87
+/// countersignature (top-level `pq_*` wire siblings, see [`SignedReceipt`]) seals the chain head
+/// recorded in `params.to_head_hash`, so ONE post-quantum signature transitively anchors the whole
+/// sealed prefix (SHA-256 collision resistance + one ML-DSA-87 signature — design axiom §1.4).
+/// Emitted every N receipts (default 256) / on a time cadence via [`Signer::pq_checkpoint`].
+pub const PQ_CHECKPOINT: &str = "kriya.crypto.pq_checkpoint";
+
+/// Reserved `action_id` for the A5 PQ key attestation/rotation receipt (design §4.2) — an
+/// Ed25519-signed receipt binding an ML-DSA-87 public key to this host's pinned Ed25519 identity,
+/// via [`Signer::attest_pq_key`]. A fresh attestation (new `pq_key_id`) is rotation; older
+/// checkpoints/dual-signed receipts stay self-verifying under their inline old `pq_public_key`.
+pub const PQ_KEY: &str = "kriya.crypto.pq_key";
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Receipt {
     pub step_id: String,
@@ -113,6 +127,25 @@ pub struct SignedReceipt {
     pub receipt: Receipt,
     pub public_key: String,
     pub signature: String,
+    /// A5 (design D2): additive top-level wire siblings — NOT inside the signed `Receipt` bytes
+    /// (same position as `public_key`/`signature` above, which are also outside the signed
+    /// bytes). "ML-DSA-87" exactly, the require-if-present trigger. `None` (omitted from the
+    /// wire via `skip_serializing_if`) on every pre-A5 / non-PQ receipt, so the JSON is
+    /// byte-identical to today when PQ material is absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pq_alg: Option<String>,
+    /// The ML-DSA-87 public key, hex — inline/self-contained (design D2: per-receipt dual-sig and
+    /// the checkpoint both need offline single-line verification).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pq_public_key: Option<String>,
+    /// The ML-DSA-87 signature, hex, over the identical canonical receipt bytes
+    /// (`serde_json::to_vec(&receipt)`) the Ed25519 `signature` covers (design D2).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pq_sig: Option<String>,
+    /// First 8 bytes of SHA-256(`pq_public_key`), lowercase hex (design D2/D3) — binds this line
+    /// to a `kriya.crypto.pq_key` attestation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pq_key_id: Option<String>,
 }
 
 pub struct Signer {
@@ -131,6 +164,37 @@ pub struct Signer {
     /// `"imported-seed"` when loaded from a pre-existing persisted `signing.key` — disclosed
     /// honestly rather than laundered into "module-drbg" (RT2.3).
     key_provenance: &'static str,
+    /// A5 (design D1/D3/D4): `None` unless this signer was built with [`Signer::with_pq`]. Only
+    /// exists when the `pq-crypto` feature is compiled in — a signer built without the feature can
+    /// never carry PQ material, by construction, not by convention.
+    #[cfg(feature = "pq-crypto")]
+    pq: Option<PqState>,
+}
+
+/// A5: the PQ signing state attached to a [`Signer`] via [`Signer::with_pq`]. See [`PQ_CHECKPOINT`]
+/// / [`PQ_KEY`] / the per-receipt `pq_*` siblings on [`SignedReceipt`].
+#[cfg(feature = "pq-crypto")]
+struct PqState {
+    key: crypto::PqSigningKey,
+    /// First 8 bytes of SHA-256(public key), lowercase hex (design D2/D3).
+    key_id: String,
+    /// Design §4 `key_provenance`, PQ variant: `"module-drbg"` | `"external-rng"` | `"imported-seed"`.
+    key_provenance: &'static str,
+    /// Design D1: the opt-in high-assurance dial — when `true`, EVERY receipt this signer records
+    /// carries a per-receipt ML-DSA-87 dual signature (§2 D1's ~14.5 KiB/line cost); when `false`
+    /// (the default/recommended mode), only [`Signer::pq_checkpoint`] carries PQ material. An
+    /// `AtomicBool` (not a plain `bool`) because [`Signer::pq_checkpoint`] briefly forces this to
+    /// `true` around its own internal `record()` call — the checkpoint's PQ signature MUST be
+    /// attached before the line is serialized/persisted (`attach_pq_dual_sign` runs inside
+    /// `record_persisted`, before the write), so there is no way to attach it correctly
+    /// AFTER `record()` returns (the line would already be on disk without it).
+    dual_sign_enabled: std::sync::atomic::AtomicBool,
+    /// Running count of receipts sealed by [`Signer::record_persisted`] since this process started
+    /// (design §4.1 `from_seq`/`count` basis — an in-memory counter, not a durable sequence number;
+    /// see the `pq_checkpoint` doc comment for the known cross-process/restart limitation).
+    seq_counter: Mutex<u64>,
+    /// `seq_counter` value as of the last [`Signer::pq_checkpoint`] call (design §4.1 `from_seq`).
+    last_checkpoint_seq: Mutex<u64>,
 }
 
 /// See [`Signer::chain`].
@@ -162,6 +226,8 @@ impl Signer {
             log_path,
             chain,
             key_provenance: FRESH_KEY_PROVENANCE,
+            #[cfg(feature = "pq-crypto")]
+            pq: None,
         }
     }
 
@@ -189,7 +255,53 @@ impl Signer {
                 // cannot know under which lane it was originally minted.
                 "imported-seed"
             },
+            #[cfg(feature = "pq-crypto")]
+            pq: None,
         })
+    }
+
+    /// A5 (design D3): attach a **persisted** ML-DSA-87 identity to this signer — loaded from
+    /// `pq_key_path` if present, else minted fresh (module DRBG, design D3) and written there
+    /// (0600 on Unix), mirroring [`Signer::with_identity`]'s Ed25519 discipline exactly (same
+    /// on-disk-secret-is-the-seed shape, same never-silently-overwrite guarantee). Consuming
+    /// builder — chain onto [`Signer::with_identity`] / [`Signer::with_log_path`].
+    ///
+    /// `dual_sign_enabled` is design D1's opt-in high-assurance dial: `true` makes EVERY
+    /// subsequent [`Signer::record`]/[`Signer::record_persisted`] call attach a per-receipt PQ
+    /// dual signature (~14.5 KiB/line — reserve this for low-volume, high-value signers: policy
+    /// bundles, org-key control-plane signatures, retention checkpoints, evidence-export seals).
+    /// `false` (the default/recommended mode) means only [`Signer::pq_checkpoint`] carries PQ
+    /// material. Either way, [`Signer::attest_pq_key`] and [`Signer::pq_checkpoint`] become
+    /// available once this is called.
+    ///
+    /// On error, returns `(self, reason)` — the ORIGINAL signer, unchanged, alongside the reason
+    /// (mirrors [`NotPersisted`] carrying its payload) — so a caller that wants to fail open (run
+    /// without the PQ lane rather than not start at all) can recover the signer it already had
+    /// instead of being forced to reconstruct it from scratch.
+    #[cfg(feature = "pq-crypto")]
+    pub fn with_pq(mut self, pq_key_path: &Path, dual_sign_enabled: bool) -> Result<Self, (Self, String)> {
+        let (seed, freshly_generated) = match load_or_create_pq_seed(pq_key_path) {
+            Ok(v) => v,
+            Err(e) => return Err((self, e)),
+        };
+        let key = match crypto::PqSigningKey::from_seed(&seed) {
+            Ok(k) => k,
+            Err(e) => return Err((self, format!("loading PQ (ML-DSA-87) key: {e}"))),
+        };
+        let key_id = pq_key_id_hex(&key.public_key());
+        self.pq = Some(PqState {
+            key,
+            key_id,
+            key_provenance: if freshly_generated {
+                FRESH_PQ_KEY_PROVENANCE
+            } else {
+                "imported-seed"
+            },
+            dual_sign_enabled: std::sync::atomic::AtomicBool::new(dual_sign_enabled),
+            seq_counter: Mutex::new(0),
+            last_checkpoint_seq: Mutex::new(0),
+        });
+        Ok(self)
     }
 
     pub fn public_key(&self) -> &str {
@@ -258,11 +370,19 @@ impl Signer {
                                                 // Canonical bytes = compact JSON of the unsigned (key-sorted, now chained) receipt.
         let msg = serde_json::to_vec(&receipt).unwrap_or_default();
         let signature = hex::encode(self.key.sign(&msg));
-        let signed = SignedReceipt {
+        let mut signed = SignedReceipt {
             receipt,
             public_key: self.public_hex.clone(),
             signature,
+            pq_alg: None,
+            pq_public_key: None,
+            pq_sig: None,
+            pq_key_id: None,
         };
+        // A5 (design D1/D2, opt-in per-receipt dual-sig): a no-op unless this signer was built
+        // with `with_pq(..., dual_sign_enabled = true)`. Must run BEFORE the line is serialized
+        // below so the `pq_*` siblings are part of what gets written/chained/hashed.
+        self.attach_pq_dual_sign(&mut signed);
         let line = serde_json::to_string(&signed).unwrap_or_default();
         let persisted = if let Some(mut f) = locked {
             if writeln!(f, "{line}").is_ok() {
@@ -270,6 +390,9 @@ impl Signer {
                 // observed length by what we appended (we hold the lock, nothing interleaves).
                 chain.hash = Some(sha256_hex(line.as_bytes()));
                 chain.len += line.len() as u64 + 1;
+                // A5: count this receipt toward the next `pq_checkpoint`'s `count`/`from_seq`
+                // (design §4.1) — a no-op unless a PQ key is loaded on this signer.
+                self.note_pq_receipt_sealed(&signed.receipt.action_id);
                 true
             } else {
                 false
@@ -304,6 +427,10 @@ impl Signer {
             receipt,
             public_key: self.public_hex.clone(),
             signature,
+            pq_alg: None,
+            pq_public_key: None,
+            pq_sig: None,
+            pq_key_id: None,
         }
     }
 
@@ -340,12 +467,202 @@ impl Signer {
             .with_actor(actor),
         )
     }
+
+    /// A5 (design D1/D2, opt-in per-receipt dual-sig): attach `pq_*` wire siblings to `signed` when
+    /// this signer carries a PQ key with `dual_sign_enabled` currently `true` — either because the
+    /// signer was built that way ([`Signer::with_pq`]) or because [`Signer::pq_checkpoint`]
+    /// briefly forced it on around its own `record()` call (see the `PqState::dual_sign_enabled`
+    /// doc comment for why). Signs the identical canonical bytes
+    /// (`serde_json::to_vec(&receipt)`) the Ed25519 `signature` covers (design D2) — called after
+    /// Ed25519 signing, before the line is serialized/persisted.
+    #[cfg(feature = "pq-crypto")]
+    fn attach_pq_dual_sign(&self, signed: &mut SignedReceipt) {
+        let Some(pq) = &self.pq else { return };
+        if !pq.dual_sign_enabled.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let msg = serde_json::to_vec(&signed.receipt).unwrap_or_default();
+        let sig = pq.key.sign(&msg);
+        signed.pq_alg = Some("ML-DSA-87".to_string());
+        signed.pq_public_key = Some(hex::encode(pq.key.public_key()));
+        signed.pq_sig = Some(hex::encode(sig));
+        signed.pq_key_id = Some(pq.key_id.clone());
+    }
+    #[cfg(not(feature = "pq-crypto"))]
+    fn attach_pq_dual_sign(&self, _signed: &mut SignedReceipt) {}
+
+    /// A5: count one more receipt toward the next [`Signer::pq_checkpoint`]'s `count`/`from_seq`
+    /// (design §4.1). A no-op unless a PQ key is loaded — called unconditionally from
+    /// [`Signer::record_persisted`] on every successfully persisted receipt, regardless of
+    /// `dual_sign_enabled`, because the checkpoint counts ALL sealed receipts, not just
+    /// per-receipt-dual-signed ones. Excludes `PQ_CHECKPOINT`/`PQ_KEY` receipts themselves — a
+    /// checkpoint seals the receipts BEFORE it, not itself, so it must not inflate the next
+    /// checkpoint's count.
+    #[cfg(feature = "pq-crypto")]
+    fn note_pq_receipt_sealed(&self, action_id: &str) {
+        if action_id == PQ_CHECKPOINT || action_id == PQ_KEY {
+            return;
+        }
+        if let Some(pq) = &self.pq {
+            let mut n = pq.seq_counter.lock().unwrap_or_else(|e| e.into_inner());
+            *n += 1;
+        }
+    }
+    #[cfg(not(feature = "pq-crypto"))]
+    fn note_pq_receipt_sealed(&self, _action_id: &str) {}
+
+    /// A5 (design §4.2, D3): emit the `kriya.crypto.pq_key` attestation — an **Ed25519-signed**
+    /// (need not itself be dual-signed) hash-chained receipt binding this signer's ML-DSA-87
+    /// public key to the pinned Ed25519 identity. Call once at startup (beside
+    /// [`Signer::attest_crypto_module`]) and again on rotation (a fresh call after
+    /// [`Signer::with_pq`] loads/mints a new seed) — each call records the CURRENT `pq_key_id`;
+    /// older checkpoints/dual-signed lines stay self-verifying under their own inline
+    /// `pq_public_key` (no history re-signing, design D3).
+    ///
+    /// Errors if this signer has no PQ key loaded (call [`Signer::with_pq`] first).
+    #[cfg(feature = "pq-crypto")]
+    pub fn attest_pq_key(&self, component: &str, actor: Option<Actor>) -> Result<SignedReceipt, String> {
+        let pq = self
+            .pq
+            .as_ref()
+            .ok_or_else(|| "attest_pq_key: no PQ key loaded (call Signer::with_pq first)".to_string())?;
+        let params = serde_json::json!({
+            "pq_alg": "ML-DSA-87",
+            "pq_public_key": hex::encode(pq.key.public_key()),
+            "pq_key_id": pq.key_id,
+            "key_provenance": pq.key_provenance,
+            "component": component,
+        });
+        Ok(self.record(
+            Receipt::new(
+                uuid::Uuid::new_v4().to_string(),
+                PQ_KEY.to_string(),
+                params,
+                true,
+                now_ms(),
+            )
+            .with_actor(actor),
+        ))
+    }
+
+    /// A5 (design §4.1, D1 — the DEFAULT PQ mode): emit a `kriya.crypto.pq_checkpoint` receipt
+    /// sealing every receipt recorded since the prior checkpoint (or since this signer's PQ key
+    /// was attached, on the first call) under ONE ML-DSA-87 signature over the checkpoint's own
+    /// canonical bytes — which include the sealed chain head in `params.to_head_hash` (design
+    /// axiom §1.4: SHA-256 collision resistance + one PQ signature post-quantum-anchors the whole
+    /// prefix). Call every N receipts (default 256, a policy dial — see `docs/design/a5-pq-dual-sig.md`
+    /// D1) and/or on a time cadence; **never** from a constructor (no `Actor` at construction,
+    /// mirrors [`Signer::attest_crypto_module`]'s reasoning).
+    ///
+    /// **Known limitation (in-memory counter):** `from_seq`/`count` are tracked in-process (design
+    /// §4.1 basis), not read back from the log — a process restart resets the counter to 0 for
+    /// THIS signer instance, so `from_seq` after a restart is relative to the restart, not the
+    /// log's true absolute sequence. The checkpoint's post-quantum tamper-evidence (the actual
+    /// security property, design axiom §1.4) is unaffected: `to_head_hash` is always read fresh
+    /// from the real on-disk chain head, never from the in-memory counter.
+    ///
+    /// Errors if no PQ key is loaded, or if nothing has been recorded yet (nothing to seal).
+    #[cfg(feature = "pq-crypto")]
+    pub fn pq_checkpoint(&self, component: &str, actor: Option<Actor>) -> Result<SignedReceipt, String> {
+        if self.pq.is_none() {
+            return Err("pq_checkpoint: no PQ key loaded (call Signer::with_pq first)".to_string());
+        }
+        let to_head_hash = {
+            let chain = self.chain.lock().unwrap_or_else(|e| e.into_inner());
+            chain
+                .hash
+                .clone()
+                .ok_or_else(|| "pq_checkpoint: no receipts recorded yet — nothing to seal".to_string())?
+        };
+        let (from_seq, count) = {
+            let pq = self.pq.as_ref().expect("checked Some above");
+            let cur = *pq.seq_counter.lock().unwrap_or_else(|e| e.into_inner());
+            let mut last = pq.last_checkpoint_seq.lock().unwrap_or_else(|e| e.into_inner());
+            let from_seq = *last + 1;
+            let count = cur.saturating_sub(*last);
+            *last = cur;
+            (from_seq, count)
+        };
+        let params = serde_json::json!({
+            "from_seq": from_seq,
+            "to_head_hash": to_head_hash,
+            "count": count,
+            "pq_alg": "ML-DSA-87",
+            "component": component,
+        });
+        // Carrying a PQ signature IS what makes this receipt a checkpoint (design §4.1), so it
+        // must be attached UNCONDITIONALLY — regardless of this signer's `dual_sign_enabled`
+        // setting. `attach_pq_dual_sign` runs INSIDE `record()`/`record_persisted`, before the
+        // line is serialized and written to disk (a hard requirement — pq_* siblings aren't
+        // signed, but they DO need to be present in the exact bytes that get persisted and
+        // chain-hashed). So: force `dual_sign_enabled` on for the duration of this one `record()`
+        // call, then restore whatever it was before. Ordering is safe because `record()` takes
+        // `&self` and this signer isn't meant to be called concurrently with itself on the SAME
+        // pq_checkpoint invocation; the toggle window is a single synchronous call.
+        use std::sync::atomic::Ordering;
+        let pq = self.pq.as_ref().expect("checked Some above");
+        let was_enabled = pq.dual_sign_enabled.swap(true, Ordering::SeqCst);
+        let signed = self.record(
+            Receipt::new(
+                uuid::Uuid::new_v4().to_string(),
+                PQ_CHECKPOINT.to_string(),
+                params,
+                true,
+                now_ms(),
+            )
+            .with_actor(actor),
+        );
+        self.pq
+            .as_ref()
+            .expect("checked Some above")
+            .dual_sign_enabled
+            .store(was_enabled, Ordering::SeqCst);
+        Ok(signed)
+    }
+
+    /// A5 cadence helper (design §4.1 "`N` is a policy dial, default proposed 256"): call this
+    /// after any receipt-producing event; it emits a [`Signer::pq_checkpoint`] iff at least
+    /// `every_n` receipts have been sealed since the previous checkpoint (or since the PQ key was
+    /// attached, on the first call), else returns `None` cheaply (just a Mutex read). Centralizes
+    /// the cadence decision so callers (binaries, the governor) don't each reimplement counting —
+    /// call it as often as convenient; it self-throttles.
+    #[cfg(feature = "pq-crypto")]
+    pub fn pq_maybe_checkpoint(
+        &self,
+        component: &str,
+        actor: Option<Actor>,
+        every_n: u64,
+    ) -> Option<Result<SignedReceipt, String>> {
+        let pq = self.pq.as_ref()?;
+        let cur = *pq.seq_counter.lock().unwrap_or_else(|e| e.into_inner());
+        let last = *pq.last_checkpoint_seq.lock().unwrap_or_else(|e| e.into_inner());
+        if cur.saturating_sub(last) < every_n {
+            return None;
+        }
+        Some(self.pq_checkpoint(component, actor))
+    }
 }
 
 #[cfg(feature = "fips-crypto")]
 const FRESH_KEY_PROVENANCE: &str = "module-drbg";
 #[cfg(not(feature = "fips-crypto"))]
 const FRESH_KEY_PROVENANCE: &str = "external-rng";
+
+/// A5 (design §4 `key_provenance`, PQ variant): `"module-drbg"` when `pq-crypto`'s
+/// `PqSigningKey::generate` sourced the seed from `aws_lc_rs::rand::fill` (always true when the
+/// feature compiles — see `crypto.rs`'s `PqSigningKey::generate`), else `"external-rng"` would
+/// apply to a future non-aws-lc-rs PQ backend (none exists today, so this constant is currently
+/// always `"module-drbg"` for a freshly-minted PQ key).
+#[cfg(feature = "pq-crypto")]
+const FRESH_PQ_KEY_PROVENANCE: &str = "module-drbg";
+
+/// A5 (design D2/D3): first 8 bytes of SHA-256(`pq_public_key` raw bytes), lowercase hex — a
+/// stable short id binding a PQ-signed line to a `kriya.crypto.pq_key` attestation.
+#[cfg(feature = "pq-crypto")]
+fn pq_key_id_hex(pq_public_key: &[u8]) -> String {
+    let full = sha256_hex(pq_public_key);
+    full[..16].to_string()
+}
 
 /// A receipt was signed but could not be durably written to the audit log. Carries the signed
 /// receipt (so a fail-open caller can still surface it) plus a human-readable reason.
@@ -595,6 +912,40 @@ fn load_or_create_seed(path: &Path) -> Result<([u8; 32], bool), String> {
     Ok((seed, true))
 }
 
+/// A5 (design D3): load a 32-byte ML-DSA-87 seed from `path` (lowercase hex), or mint one from
+/// the active lane's DRBG and persist it there (0600 on Unix) — the PQ mirror of
+/// [`load_or_create_seed`], deliberately kept at a SEPARATE path
+/// (`~/.kriya/pq-signing.seed`, beside the existing `signing.key`, per the caller's convention;
+/// this function itself is path-agnostic) so the Ed25519 and PQ identities never collide or get
+/// silently conflated. Same never-silently-overwrite guarantee as the Ed25519 loader.
+#[cfg(feature = "pq-crypto")]
+fn load_or_create_pq_seed(path: &Path) -> Result<([u8; 32], bool), String> {
+    if path.exists() {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("reading PQ signing key {}: {e}", path.display()))?;
+        let bytes = hex::decode(text.trim())
+            .map_err(|e| format!("PQ signing key {} is not valid hex: {e}", path.display()))?;
+        let seed: [u8; 32] = bytes.try_into().map_err(|_| {
+            format!(
+                "PQ signing key {} must be 32 bytes (64 hex chars)",
+                path.display()
+            )
+        })?;
+        return Ok((seed, false));
+    }
+    let (seed, _key) = crypto::PqSigningKey::generate();
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("creating PQ key dir {}: {e}", parent.display()))?;
+        }
+    }
+    std::fs::write(path, hex::encode(seed))
+        .map_err(|e| format!("writing PQ signing key {}: {e}", path.display()))?;
+    restrict_perms(path);
+    Ok((seed, true))
+}
+
 #[cfg(unix)]
 fn restrict_perms(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
@@ -704,6 +1055,45 @@ mod tests {
         Signer::with_log_path(
             std::env::temp_dir().join(format!("kriya-audit-test-{}.jsonl", uuid::Uuid::new_v4())),
         )
+    }
+
+    /// A5: a fresh `Signer` with a PQ key attached — a unique log + a unique PQ seed path per
+    /// call, so each test is a genuine genesis and independent PQ identity.
+    #[cfg(feature = "pq-crypto")]
+    fn pq_signer(dual_sign_enabled: bool) -> Signer {
+        let id = uuid::Uuid::new_v4();
+        signer()
+            .with_pq(
+                &std::env::temp_dir().join(format!("kriya-pq-seed-test-{id}.hex")),
+                dual_sign_enabled,
+            )
+            .map_err(|(_, e)| e)
+            .expect("with_pq")
+    }
+
+    /// A5: verify the ML-DSA-87 `pq_*` siblings on a signed receipt, mirroring [`verifies`]'s
+    /// Ed25519 check. `None` (no PQ material) is treated as "nothing to verify" — callers assert
+    /// presence separately.
+    #[cfg(feature = "pq-crypto")]
+    fn pq_verifies(signed: &SignedReceipt) -> bool {
+        let (Some(alg), Some(pk_hex), Some(sig_hex)) =
+            (&signed.pq_alg, &signed.pq_public_key, &signed.pq_sig)
+        else {
+            return false;
+        };
+        if alg != "ML-DSA-87" {
+            return false;
+        }
+        let pk = match hex::decode(pk_hex) {
+            Ok(b) => b,
+            Err(_) => return false,
+        };
+        let sig = match hex::decode(sig_hex) {
+            Ok(b) => b,
+            Err(_) => return false,
+        };
+        let msg = serde_json::to_vec(&signed.receipt).unwrap();
+        crypto::pq_verify(&pk, &msg, &sig)
     }
 
     #[test]
@@ -1254,6 +1644,215 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // ─── A5 (design docs/design/a5-pq-dual-sig.md) ─────────────────────────────────────────
+
+    #[cfg(feature = "pq-crypto")]
+    #[test]
+    fn no_pq_key_no_pq_material_ed25519_still_verifies() {
+        let s = signer();
+        let signed = s.record(Receipt::new(
+            "step-1".into(),
+            "kriya.test.noop".into(),
+            json!({}),
+            true,
+            now_ms(),
+        ));
+        assert!(verifies(&signed));
+        assert!(signed.pq_alg.is_none());
+        assert!(signed.pq_sig.is_none());
+        // Byte-for-byte with a pre-A5 receipt: serializing omits every pq_* field.
+        let line = serde_json::to_string(&signed).unwrap();
+        assert!(!line.contains("pq_"));
+    }
+
+    #[cfg(feature = "pq-crypto")]
+    #[test]
+    fn dual_sign_disabled_by_default_even_with_pq_key_loaded() {
+        // A PQ key is loaded, but dual_sign_enabled = false (checkpoint-only mode, design D1
+        // default): ordinary record() calls must NOT carry per-receipt pq_* siblings.
+        let s = pq_signer(false);
+        let signed = s.record(Receipt::new(
+            "step-1".into(),
+            "kriya.test.noop".into(),
+            json!({}),
+            true,
+            now_ms(),
+        ));
+        assert!(verifies(&signed));
+        assert!(signed.pq_alg.is_none(), "checkpoint-only mode must not dual-sign every receipt");
+    }
+
+    #[cfg(feature = "pq-crypto")]
+    #[test]
+    fn dual_sign_enabled_attaches_verifying_pq_siblings_to_every_receipt() {
+        let s = pq_signer(true);
+        let signed = s.record(Receipt::new(
+            "step-1".into(),
+            "kriya.test.noop".into(),
+            json!({"x": 1}),
+            true,
+            now_ms(),
+        ));
+        assert!(verifies(&signed), "Ed25519 must still verify (design axiom §1.1)");
+        assert_eq!(signed.pq_alg.as_deref(), Some("ML-DSA-87"));
+        assert!(pq_verifies(&signed), "ML-DSA-87 signature must verify");
+        // Wire sizes match design §2 D1's size table.
+        assert_eq!(signed.pq_public_key.as_ref().unwrap().len(), 5184);
+        assert_eq!(signed.pq_sig.as_ref().unwrap().len(), 9254);
+        assert_eq!(signed.pq_key_id.as_ref().unwrap().len(), 16);
+
+        // Tamper the PQ signature only — Ed25519 must still verify (row 3 of the design §5
+        // matrix): the PQ tamper is distinct and does not touch the Ed25519-signed bytes.
+        let mut tampered = signed.clone();
+        tampered.pq_sig = Some("00".repeat(4627));
+        assert!(verifies(&tampered), "Ed25519 unaffected by a PQ-only tamper");
+        assert!(!pq_verifies(&tampered), "tampered PQ signature must not verify");
+    }
+
+    #[cfg(feature = "pq-crypto")]
+    #[test]
+    fn attest_pq_key_without_a_loaded_key_errors() {
+        let s = signer();
+        assert!(s.attest_pq_key("kriya-test", None).is_err());
+    }
+
+    #[cfg(feature = "pq-crypto")]
+    #[test]
+    fn attest_pq_key_binds_pq_pubkey_under_the_ed25519_identity() {
+        let s = pq_signer(false);
+        let attestation = s.attest_pq_key("kriya-test", None).unwrap();
+        assert_eq!(attestation.receipt.action_id, PQ_KEY);
+        assert!(verifies(&attestation), "the attestation itself is Ed25519-signed");
+        assert_eq!(
+            attestation.receipt.params["pq_alg"].as_str(),
+            Some("ML-DSA-87")
+        );
+        assert!(attestation.receipt.params["pq_public_key"]
+            .as_str()
+            .unwrap()
+            .len()
+            == 5184);
+    }
+
+    #[cfg(feature = "pq-crypto")]
+    #[test]
+    fn pq_checkpoint_without_prior_receipts_errors() {
+        let s = pq_signer(false);
+        assert!(s.pq_checkpoint("kriya-test", None).is_err());
+    }
+
+    #[cfg(feature = "pq-crypto")]
+    #[test]
+    fn pq_checkpoint_seals_the_chain_head_with_a_verifying_pq_signature() {
+        let s = pq_signer(false);
+        for i in 0..5 {
+            s.record(Receipt::new(
+                format!("step-{i}"),
+                "kriya.test.noop".into(),
+                json!({"i": i}),
+                true,
+                now_ms(),
+            ));
+        }
+        // Read the true on-disk chain head independently of the signer's in-memory state.
+        let expected_head = seed_chain_head(&s.log_path).hash.expect("5 records exist");
+
+        let checkpoint = s.pq_checkpoint("kriya-test", None).unwrap();
+        assert_eq!(checkpoint.receipt.action_id, PQ_CHECKPOINT);
+        assert!(verifies(&checkpoint), "checkpoint is Ed25519-signed + chained like any receipt");
+        assert!(pq_verifies(&checkpoint), "checkpoint's own pq_sig must verify");
+        assert_eq!(
+            checkpoint.receipt.params["to_head_hash"].as_str(),
+            Some(expected_head.as_str())
+        );
+        assert_eq!(checkpoint.receipt.params["from_seq"], 1);
+        assert_eq!(checkpoint.receipt.params["count"], 5);
+        // The design's pq_alg-authority rule (§4.1): signed params.pq_alg and the unsigned
+        // top-level sibling MUST agree.
+        assert_eq!(
+            checkpoint.receipt.params["pq_alg"].as_str(),
+            checkpoint.pq_alg.as_deref()
+        );
+
+        // A second checkpoint after 3 more receipts seals only the NEW receipts (from_seq
+        // continues where the last checkpoint left off).
+        for i in 5..8 {
+            s.record(Receipt::new(
+                format!("step-{i}"),
+                "kriya.test.noop".into(),
+                json!({"i": i}),
+                true,
+                now_ms(),
+            ));
+        }
+        let checkpoint2 = s.pq_checkpoint("kriya-test", None).unwrap();
+        assert_eq!(checkpoint2.receipt.params["from_seq"], 6);
+        assert_eq!(checkpoint2.receipt.params["count"], 3);
+    }
+
+    #[cfg(feature = "pq-crypto")]
+    #[test]
+    fn pq_siblings_do_not_break_the_hash_chain() {
+        // Axiom §1.3: the chain hashes the raw line verbatim, so pq_* siblings (present via
+        // dual-sign) are naturally chain-covered with no chain-logic change.
+        let s = pq_signer(true);
+        for i in 0..4 {
+            s.record(Receipt::new(
+                format!("step-{i}"),
+                "kriya.test.noop".into(),
+                json!({"i": i}),
+                true,
+                now_ms(),
+            ));
+        }
+        let content = std::fs::read_to_string(&s.log_path).unwrap();
+        let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines.len(), 4);
+        // Every line after the first carries a prev_hash equal to the SHA-256 of the previous
+        // raw line INCLUDING its pq_* siblings.
+        for w in lines.windows(2) {
+            let expected_prev = sha256_hex(w[0].as_bytes());
+            let v: Value = serde_json::from_str(w[1]).unwrap();
+            assert_eq!(v["prev_hash"].as_str(), Some(expected_prev.as_str()));
+        }
+    }
+
+    #[cfg(feature = "pq-crypto")]
+    #[test]
+    fn pq_maybe_checkpoint_self_throttles_on_cadence() {
+        let s = pq_signer(false);
+        // No PQ key loaded scenario is covered elsewhere; here: below the cadence, no checkpoint.
+        for i in 0..3 {
+            s.record(Receipt::new(
+                format!("step-{i}"),
+                "kriya.test.noop".into(),
+                json!({}),
+                true,
+                now_ms(),
+            ));
+        }
+        assert!(s.pq_maybe_checkpoint("kriya-test", None, 5).is_none());
+
+        for i in 3..5 {
+            s.record(Receipt::new(
+                format!("step-{i}"),
+                "kriya.test.noop".into(),
+                json!({}),
+                true,
+                now_ms(),
+            ));
+        }
+        let cp = s
+            .pq_maybe_checkpoint("kriya-test", None, 5)
+            .expect("cadence reached")
+            .expect("checkpoint succeeds");
+        assert_eq!(cp.receipt.action_id, PQ_CHECKPOINT);
+        assert!(pq_verifies(&cp));
+
+        // Immediately after, the cadence resets — nothing new to seal yet.
+        assert!(s.pq_maybe_checkpoint("kriya-test", None, 5).is_none());
+    }
+
     /// Re-hydrate a stored line into the local `SignedReceipt` shape so the test's `verifies` helper
     /// can re-derive its canonical bytes. Mirrors what `parse_stored_receipt` does internally.
     fn reparse_signed(line: &str) -> SignedReceipt {
@@ -1280,6 +1879,16 @@ mod tests {
             receipt: r,
             public_key: v["public_key"].as_str().unwrap().to_string(),
             signature: v["signature"].as_str().unwrap().to_string(),
+            pq_alg: v.get("pq_alg").and_then(Value::as_str).map(str::to_string),
+            pq_public_key: v
+                .get("pq_public_key")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            pq_sig: v.get("pq_sig").and_then(Value::as_str).map(str::to_string),
+            pq_key_id: v
+                .get("pq_key_id")
+                .and_then(Value::as_str)
+                .map(str::to_string),
         }
     }
 }

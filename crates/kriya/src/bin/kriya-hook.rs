@@ -246,7 +246,33 @@ fn signer_for(args: &Args) -> Result<Signer, String> {
             keys.join("claude-code-hook.key")
         }
     };
-    Signer::with_identity(&key_path, log_path)
+    let signer = Signer::with_identity(&key_path, log_path)?;
+    Ok(maybe_attach_pq(signer, &key_path))
+}
+
+/// A5 (design D3, `pq-crypto` feature only): attach a PQ (ML-DSA-87) identity beside the
+/// persisted Ed25519 one, at a seed file colocated with `key_path`
+/// (`<dir>/pq-signing.seed`). Checkpoint-only mode (`dual_sign_enabled = false` — design D1
+/// default). Fail-open on any PQ-key error (logs to stderr, continues without the PQ lane) —
+/// mirrors `kriya-gateway`'s `maybe_attach_pq` exactly; a broken PQ seed file must never block a
+/// hook invocation (each one IS the process — there is no "start up without the feature" retry).
+#[cfg(feature = "pq-crypto")]
+fn maybe_attach_pq(signer: Signer, key_path: &Path) -> Signer {
+    let pq_seed_path = key_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("pq-signing.seed");
+    match signer.with_pq(&pq_seed_path, false) {
+        Ok(s) => s,
+        Err((s, e)) => {
+            eprintln!("[kriya-hook] PQ (ML-DSA-87) identity unavailable, continuing without it: {e}");
+            s
+        }
+    }
+}
+#[cfg(not(feature = "pq-crypto"))]
+fn maybe_attach_pq(signer: Signer, _key_path: &Path) -> Signer {
+    signer
 }
 
 /// Sign the action receipt and return its `step_id` so a correlated `kriya.io.*` receipt can carry
@@ -773,6 +799,12 @@ fn main() -> ExitCode {
             // receipt file for a secret to ever leak into). Additive, new `action_id`; never
             // affects the chain a verifier without A4 awareness already accepts.
             signer.attest_crypto_module("kriya-hook", Some(actor.clone()));
+            // A5 (doc 27 / docs/design/a5-pq-dual-sig.md §4.2): same "fired only from `post`"
+            // reasoning as the A4 attestation above. No-op when this signer has no PQ key loaded.
+            #[cfg(feature = "pq-crypto")]
+            if let Err(e) = signer.attest_pq_key("kriya-hook", Some(actor.clone())) {
+                eprintln!("kriya-hook: skipping PQ key attestation: {e}");
+            }
 
             // Credential brokering safety net (doc 24 §11 B13 / EG-B): it is NOT documented whether
             // Claude Code's PostToolUse payload reflects the ORIGINAL (placeholder) tool_input or the
