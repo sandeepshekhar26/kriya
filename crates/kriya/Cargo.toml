@@ -23,6 +23,13 @@ name = "kriya-gateway"
 path = "src/bin/kriya-gateway.rs"
 required-features = ["mcp-client"]
 
+# F1 (doc 28): the attested-local-inference reverse proxy. Same declared-binary convention as
+# kriya-gateway above — built only when `llm-proxy` is on.
+[[bin]]
+name = "kriya-llm-proxy"
+path = "src/bin/kriya-llm-proxy.rs"
+required-features = ["llm-proxy"]
+
 [features]
 # Full host by default — existing Tauri apps and the cloud LLM backends keep working unchanged.
 default = ["tauri-host", "http-inference"]
@@ -90,6 +97,12 @@ fips-crypto = ["dep:aws-lc-rs", "aws-lc-rs/fips"]
 # — compiled OUT whenever `fips` is active). `crypto.rs` turns an accidental double-enable into a
 # clear `compile_error!` instead of a confusing "module `unstable` not found" deep in `audit.rs`.
 pq-crypto = ["dep:aws-lc-rs", "aws-lc-rs/unstable"]
+# F1 (doc 28, attested local inference): the `llm` module + `kriya-llm-proxy` binary — a governed
+# reverse proxy in front of a local OpenAI-compatible / Ollama-native inference server. Off by
+# default; adds NO new dependency (reuses the same `ureq` HTTP *client* the http-inference backends
+# already use for the proxy's OUTBOUND leg — the inbound listener is hand-rolled std `TcpListener`,
+# same idiom as `mcp::contain::ConnectProxy`, so no HTTP-server crate is pulled in either).
+llm-proxy = ["dep:ureq"]
 
 [dependencies]
 tauri = { version = "2", features = [], optional = true }
