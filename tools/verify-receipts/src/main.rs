@@ -19,7 +19,6 @@ use std::fs;
 use std::path::PathBuf;
 use std::process;
 
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -131,19 +130,6 @@ fn verify_line(line: &str) -> (String, String, Outcome) {
         }
     };
 
-    let verifying_key = match VerifyingKey::from_bytes(&pub_bytes) {
-        Ok(k) => k,
-        Err(e) => {
-            return (
-                action_id,
-                step_id,
-                Outcome::Fail(format!("bad verifying key: {e}")),
-            );
-        }
-    };
-
-    let signature = Signature::from_bytes(&sig_bytes);
-
     // ── canonical message — must byte-match what audit.rs signed ───────────
     // `serde_json::to_vec` of the unsigned Receipt struct (struct fields serialize in declaration
     // order: step_id, action_id, params, success, ts_ms, actor), with `params` object keys sorted
@@ -162,10 +148,15 @@ fn verify_line(line: &str) -> (String, String, Outcome) {
         }
     };
 
-    // ── verify ─────────────────────────────────────────────────────────────
-    match verifying_key.verify(&msg, &signature) {
-        Ok(()) => (action_id, step_id, Outcome::Ok),
-        Err(e) => (action_id, step_id, Outcome::Fail(format!("bad signature: {e}"))),
+    // ── verify (A4: routed through the shared crypto facade, kriya::crypto) ────────────────
+    if kriya::crypto::verify(&pub_bytes, &msg, &sig_bytes) {
+        (action_id, step_id, Outcome::Ok)
+    } else {
+        (
+            action_id,
+            step_id,
+            Outcome::Fail("bad signature".to_string()),
+        )
     }
 }
 
@@ -289,8 +280,7 @@ fn verify_log(content: &str) -> (u32, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::Signer as _;
-    use ed25519_dalek::SigningKey;
+    use kriya::crypto::SigningKey;
     use serde_json::json;
 
     // Fixed 32-byte seed keys — deterministic, no RNG crate needed.
@@ -309,8 +299,8 @@ mod tests {
     /// Replicate audit.rs's `Signer::record` so test signing is byte-identical.
     fn sign_receipt(key: &SigningKey, receipt: &Receipt) -> SignedReceipt {
         let msg = serde_json::to_vec(receipt).expect("serialize receipt");
-        let signature = hex::encode(key.sign(&msg).to_bytes());
-        let public_key = hex::encode(key.verifying_key().to_bytes());
+        let signature = hex::encode(key.sign(&msg));
+        let public_key = hex::encode(key.public_key());
         SignedReceipt {
             receipt: receipt.clone(),
             public_key,
@@ -346,7 +336,7 @@ mod tests {
 
     #[test]
     fn round_trip_ok() {
-        let key = SigningKey::from_bytes(&KEY_A);
+        let key = SigningKey::from_seed(&KEY_A);
         let receipt = make_receipt();
         let signed = sign_receipt(&key, &receipt);
 
@@ -358,7 +348,7 @@ mod tests {
     #[test]
     fn round_trip_with_actor_ok() {
         // An attributed receipt (R8) must re-derive byte-identically and verify.
-        let key = SigningKey::from_bytes(&KEY_A);
+        let key = SigningKey::from_seed(&KEY_A);
         let signed = sign_receipt(&key, &make_receipt_with_actor());
         let line = serde_json::to_string(&signed).unwrap();
         assert!(line.contains("\"actor\":{\"agent\":\"claude-desktop\",\"user\":\"alice\"}"));
@@ -370,7 +360,7 @@ mod tests {
     fn tampered_actor_fails() {
         // Swapping the operator after signing must invalidate the receipt — attribution
         // is inside the signed bytes, so it cannot be forged.
-        let key = SigningKey::from_bytes(&KEY_A);
+        let key = SigningKey::from_seed(&KEY_A);
         let signed = sign_receipt(&key, &make_receipt_with_actor());
 
         let mut obj: serde_json::Map<String, Value> =
@@ -386,7 +376,7 @@ mod tests {
 
     #[test]
     fn tampered_params_fails() {
-        let key = SigningKey::from_bytes(&KEY_A);
+        let key = SigningKey::from_seed(&KEY_A);
         let receipt = make_receipt();
         let signed = sign_receipt(&key, &receipt);
 
@@ -405,7 +395,7 @@ mod tests {
 
     #[test]
     fn tampered_success_fails() {
-        let key = SigningKey::from_bytes(&KEY_A);
+        let key = SigningKey::from_seed(&KEY_A);
         let receipt = make_receipt();
         let signed = sign_receipt(&key, &receipt);
 
@@ -423,7 +413,7 @@ mod tests {
 
     #[test]
     fn tampered_action_id_fails() {
-        let key = SigningKey::from_bytes(&KEY_A);
+        let key = SigningKey::from_seed(&KEY_A);
         let receipt = make_receipt();
         let signed = sign_receipt(&key, &receipt);
 
@@ -454,13 +444,13 @@ mod tests {
 
     #[test]
     fn wrong_key_fails() {
-        let signing_key = SigningKey::from_bytes(&KEY_A);
-        let other_key = SigningKey::from_bytes(&KEY_B);
+        let signing_key = SigningKey::from_seed(&KEY_A);
+        let other_key = SigningKey::from_seed(&KEY_B);
 
         let receipt = make_receipt();
         let mut signed = sign_receipt(&signing_key, &receipt);
         // Replace public key with a different, unrelated key.
-        signed.public_key = hex::encode(other_key.verifying_key().to_bytes());
+        signed.public_key = hex::encode(other_key.public_key());
 
         let line = serde_json::to_string(&signed).unwrap();
         let (_, _, outcome) = verify_line(&line);
@@ -482,7 +472,7 @@ mod tests {
 
     #[test]
     fn complete_chain_verifies_and_deletion_is_caught() {
-        let key = SigningKey::from_bytes(&KEY_A);
+        let key = SigningKey::from_seed(&KEY_A);
         let base = make_receipt();
         // A 3-receipt chain: each prev_hash = SHA-256 of the previous LINE.
         let l1 = sign_chained(&key, &base, None, "s1");
@@ -509,7 +499,7 @@ mod tests {
 
     #[test]
     fn retention_checkpoint_at_head_is_a_sealed_chain_point_not_a_break() {
-        let key = SigningKey::from_bytes(&KEY_A);
+        let key = SigningKey::from_seed(&KEY_A);
         // The pruned prefix (two receipts) — present only to compute the prior head hash H.
         let base = make_receipt();
         let old1 = sign_chained(&key, &base, None, "old1");

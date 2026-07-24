@@ -335,8 +335,17 @@ fn post_hook_signs_the_real_outcome() {
     );
     assert_eq!(r_err.status.code(), Some(0));
 
-    let receipts = read_receipts(&log);
-    assert_eq!(receipts.len(), 2);
+    // A4: each `post` invocation also emits one `kriya.crypto.module` self-attestation ahead of
+    // the action receipt (docs/design/a4-fips-lane.md D2) — additive and expected, so the action
+    // receipts are located by `action_id` rather than raw position.
+    let all_receipts = read_receipts(&log);
+    assert_eq!(all_receipts.len(), 4, "attest+action per post invocation, twice");
+    let receipts: Vec<_> = all_receipts
+        .iter()
+        .filter(|r| r["action_id"] != "kriya.crypto.module")
+        .cloned()
+        .collect();
+    assert_eq!(receipts.len(), 2, "two action receipts");
     assert_eq!(receipts[0]["success"], true);
     assert_eq!(receipts[1]["success"], false);
     assert!(
@@ -404,8 +413,17 @@ fn post_hook_stamps_run_correlation_from_the_pinned_w03_contract() {
         Some(0)
     );
 
-    let receipts = read_receipts(&log);
-    assert_eq!(receipts.len(), 2, "one receipt per tool call");
+    // A4: each `post` invocation also emits one `kriya.crypto.module` self-attestation ahead of
+    // the action receipt (docs/design/a4-fips-lane.md D2) — additive and expected, so the action
+    // receipts are located by `action_id` rather than raw position.
+    let all_receipts = read_receipts(&log);
+    assert_eq!(all_receipts.len(), 4, "attest+action per post invocation, twice");
+    let receipts: Vec<_> = all_receipts
+        .iter()
+        .filter(|r| r["action_id"] != "kriya.crypto.module")
+        .cloned()
+        .collect();
+    assert_eq!(receipts.len(), 2, "one action receipt per tool call");
 
     // Receipt 0: the main agent's Task spawn — run scoped, no agent_id (absent in payload), no parent.
     let main = &receipts[0];

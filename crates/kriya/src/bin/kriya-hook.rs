@@ -764,6 +764,16 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         "post" => {
+            // A4 (doc 27 / docs/design/a4-fips-lane.md D2): the hook has no persistent-process
+            // "startup" — each invocation IS the process. Fired only from `post` (which always
+            // records at least the action receipt below) rather than unconditionally after
+            // `signer_for`, so it never disturbs `pre`'s deliberate "signs nothing on a cleared
+            // allow" no-write property (a real security invariant — see `brokering.rs`'s
+            // `pre signs nothing on a cleared allow` — a pre-hook call that writes NOTHING has no
+            // receipt file for a secret to ever leak into). Additive, new `action_id`; never
+            // affects the chain a verifier without A4 awareness already accepts.
+            signer.attest_crypto_module("kriya-hook", Some(actor.clone()));
+
             // Credential brokering safety net (doc 24 §11 B13 / EG-B): it is NOT documented whether
             // Claude Code's PostToolUse payload reflects the ORIGINAL (placeholder) tool_input or the
             // MUTATED one a PreToolUse `updatedInput` substituted — so this never trusts either

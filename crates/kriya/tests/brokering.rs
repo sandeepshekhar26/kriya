@@ -274,7 +274,13 @@ fn post_hook_never_records_the_real_secret_regardless_of_which_tool_input_form_c
         );
 
         let receipts = read_receipts(&log);
-        assert_eq!(receipts.len(), 2, "[{label}] action receipt + io.egress.allow receipt");
+        // A4: `post` also emits one `kriya.crypto.module` self-attestation ahead of the action
+        // receipt (docs/design/a4-fips-lane.md D2) — additive and expected.
+        assert_eq!(
+            receipts.len(),
+            3,
+            "[{label}] crypto-module attestation + action receipt + io.egress.allow receipt"
+        );
         let action = receipts.iter().find(|r| r["action_id"] == "claude-code__webfetch").unwrap();
         assert!(
             !action["params"].to_string().contains(SECRET_VALUE),

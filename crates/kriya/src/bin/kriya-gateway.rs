@@ -457,6 +457,11 @@ fn write_startup_attestation(signer: &Signer, durable_key: bool, actor: &Option<
         &signer.public_key()[..signer.public_key().len().min(16)],
         &attestation.signature[..attestation.signature.len().min(16)]
     );
+    // A4 (doc 27 / docs/design/a4-fips-lane.md D2): same durable-key gate as the on-device
+    // attestation above — an ephemeral key's crypto-module claim isn't verifiable across runs
+    // either. Additive, new `action_id`; never affects the chain a verifier without A4 awareness
+    // already accepts.
+    signer.attest_crypto_module("kriya-gateway", actor.clone());
 }
 
 fn run_proxy(args: ProxyArgs) -> std::io::Result<()> {

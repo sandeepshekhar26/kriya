@@ -2,7 +2,7 @@
 //! receipt for every executed action. Receipts are appended to a JSONL log and can be
 //! verified offline by anyone holding the public key.
 
-use ed25519_dalek::{Signer as _, SigningKey};
+use crate::crypto::{self, SigningKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::Write;
@@ -39,6 +39,14 @@ impl Actor {
 /// run was sealed (the inference backend made no remote egress). Recognizable by verifiers
 /// and the console as an attestation rather than an app action.
 pub const ATTESTATION_ON_DEVICE: &str = "kriya.attestation.on_device";
+
+/// Reserved `action_id` for the A4 crypto-module attestation receipt (doc 27 A4 /
+/// `docs/design/a4-fips-lane.md` D2) — a signed record of WHICH crypto lane this signer's process
+/// ran under (default `ed25519-dalek` or the opt-in FIPS `aws-lc-rs` lane), emitted once by the
+/// binary via [`Signer::attest_crypto_module`]. New `action_id` ⇒ fully additive: no existing
+/// receipt or verifier changes shape (design RT2.1). See [`crate::crypto`] for the honesty axiom
+/// this attestation is bound by (a signature never reveals its own module).
+pub const ATTESTATION_CRYPTO_MODULE: &str = "kriya.crypto.module";
 
 /// Reserved `action_id` for a **retention epoch-checkpoint** receipt (doc 24 §6-P2 / EG-2). Signed
 /// like any receipt and part of the chain, it seals a pruned prefix: its `params` attest
@@ -118,6 +126,11 @@ pub struct Signer {
     /// another process appended since we last looked, and the head is re-seeded from disk before
     /// chaining — so parallel hook invocations extend one chain instead of forking it.
     chain: Mutex<ChainHead>,
+    /// A4 (design §4 `key_provenance`): `"module-drbg"` when this key was freshly minted under the
+    /// `fips-crypto` lane, `"external-rng"` when freshly minted under the default lane, or
+    /// `"imported-seed"` when loaded from a pre-existing persisted `signing.key` — disclosed
+    /// honestly rather than laundered into "module-drbg" (RT2.3).
+    key_provenance: &'static str,
 }
 
 /// See [`Signer::chain`].
@@ -140,15 +153,15 @@ impl Signer {
     /// Mint a signer that appends to a specific log file. Useful for tests, demos, and
     /// any host that wants its audit trail somewhere other than the shared temp file.
     pub fn with_log_path(log_path: PathBuf) -> Self {
-        let bytes: [u8; 32] = rand::random();
-        let key = SigningKey::from_bytes(&bytes);
-        let public_hex = hex::encode(key.verifying_key().to_bytes());
+        let (_seed, key) = SigningKey::generate();
+        let public_hex = hex::encode(key.public_key());
         let chain = Mutex::new(seed_chain_head(&log_path));
         Self {
             key,
             public_hex,
             log_path,
             chain,
+            key_provenance: FRESH_KEY_PROVENANCE,
         }
     }
 
@@ -159,15 +172,23 @@ impl Signer {
     /// trail is verifiable over months, not just within one session. Errors if the key file exists
     /// but is unreadable/invalid — a signing identity is never silently overwritten.
     pub fn with_identity(key_path: &Path, log_path: PathBuf) -> Result<Self, String> {
-        let seed = load_or_create_seed(key_path)?;
-        let key = SigningKey::from_bytes(&seed);
-        let public_hex = hex::encode(key.verifying_key().to_bytes());
+        let (seed, freshly_generated) = load_or_create_seed(key_path)?;
+        let key = SigningKey::from_seed(&seed);
+        let public_hex = hex::encode(key.public_key());
         let chain = Mutex::new(seed_chain_head(&log_path));
         Ok(Self {
             key,
             public_hex,
             log_path,
             chain,
+            key_provenance: if freshly_generated {
+                FRESH_KEY_PROVENANCE
+            } else {
+                // A key that already existed on disk before this call — honestly disclosed as
+                // imported even when the process is now running the FIPS lane (design RT2.3): we
+                // cannot know under which lane it was originally minted.
+                "imported-seed"
+            },
         })
     }
 
@@ -236,7 +257,7 @@ impl Signer {
         receipt.prev_hash = chain.hash.clone(); // None on the genesis receipt
                                                 // Canonical bytes = compact JSON of the unsigned (key-sorted, now chained) receipt.
         let msg = serde_json::to_vec(&receipt).unwrap_or_default();
-        let signature = hex::encode(self.key.sign(&msg).to_bytes());
+        let signature = hex::encode(self.key.sign(&msg));
         let signed = SignedReceipt {
             receipt,
             public_key: self.public_hex.clone(),
@@ -278,14 +299,53 @@ impl Signer {
     pub fn sign_only(&self, mut receipt: Receipt) -> SignedReceipt {
         receipt.params = canonical_value(&receipt.params);
         let msg = serde_json::to_vec(&receipt).unwrap_or_default();
-        let signature = hex::encode(self.key.sign(&msg).to_bytes());
+        let signature = hex::encode(self.key.sign(&msg));
         SignedReceipt {
             receipt,
             public_key: self.public_hex.clone(),
             signature,
         }
     }
+
+    /// A4 (design D2): emit the `kriya.crypto.module` self-attestation — a normal signed,
+    /// hash-chained receipt (not a genesis; never auto-fired from a constructor, see the design's
+    /// three reasons) that records which crypto lane this process ran under. `component` is the
+    /// caller's binary/module name (only the binary knows it — e.g. `"kriya-gateway"`,
+    /// `"kriya-hook"`); `actor` is attached like any other receipt.
+    ///
+    /// This is a **host self-attestation**, not a cryptographic proof (design §1, §4): the
+    /// signature over this receipt proves the *receipt* is authentic and unmodified, not that the
+    /// reported lane actually produced the neighboring signatures.
+    pub fn attest_crypto_module(&self, component: &str, actor: Option<Actor>) -> SignedReceipt {
+        let module = crypto::active_module();
+        let params = serde_json::json!({
+            "backend": module.backend,
+            "fips_module": module.fips_module,
+            "cmvp_cert": module.cmvp_cert,
+            "fips_mode_active": module.fips_mode_active,
+            "operational_environment": module.operational_environment,
+            "key_provenance": self.key_provenance,
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "component": component,
+        });
+        self.record(
+            Receipt::new(
+                uuid::Uuid::new_v4().to_string(),
+                ATTESTATION_CRYPTO_MODULE.to_string(),
+                params,
+                true,
+                now_ms(),
+            )
+            .with_actor(actor),
+        )
+    }
 }
+
+#[cfg(feature = "fips-crypto")]
+const FRESH_KEY_PROVENANCE: &str = "module-drbg";
+#[cfg(not(feature = "fips-crypto"))]
+const FRESH_KEY_PROVENANCE: &str = "external-rng";
 
 /// A receipt was signed but could not be durably written to the audit log. Carries the signed
 /// receipt (so a fail-open caller can still surface it) plus a human-readable reason.
@@ -504,20 +564,25 @@ fn home_dir() -> Option<PathBuf> {
 /// (creating parent dirs; restricted to 0600 on Unix). An existing-but-invalid key file is an
 /// error, never overwritten — losing a durable signing identity must be a deliberate act, not a
 /// side effect of a typo'd path (R20).
-fn load_or_create_seed(path: &Path) -> Result<[u8; 32], String> {
+/// Loads the persisted seed, or mints + persists a fresh one via the crypto facade (A4: the FIPS
+/// lane's module DRBG when `fips-crypto` is on). Returns whether the seed was freshly generated
+/// (`true`) vs loaded from an existing file (`false`) — [`Signer::with_identity`] uses this to set
+/// `key_provenance` honestly (design RT2.3).
+fn load_or_create_seed(path: &Path) -> Result<([u8; 32], bool), String> {
     if path.exists() {
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("reading signing key {}: {e}", path.display()))?;
         let bytes = hex::decode(text.trim())
             .map_err(|e| format!("signing key {} is not valid hex: {e}", path.display()))?;
-        return bytes.try_into().map_err(|_| {
+        let seed: [u8; 32] = bytes.try_into().map_err(|_| {
             format!(
                 "signing key {} must be 32 bytes (64 hex chars)",
                 path.display()
             )
-        });
+        })?;
+        return Ok((seed, false));
     }
-    let seed: [u8; 32] = rand::random();
+    let (seed, _key) = SigningKey::generate();
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)
@@ -527,7 +592,7 @@ fn load_or_create_seed(path: &Path) -> Result<[u8; 32], String> {
     std::fs::write(path, hex::encode(seed))
         .map_err(|e| format!("writing signing key {}: {e}", path.display()))?;
     restrict_perms(path);
-    Ok(seed)
+    Ok((seed, true))
 }
 
 #[cfg(unix)]

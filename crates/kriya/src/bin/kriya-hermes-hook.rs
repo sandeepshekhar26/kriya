@@ -320,6 +320,14 @@ fn main() -> ExitCode {
             }
         }
         "post" => {
+            // A4 (doc 27 / docs/design/a4-fips-lane.md D2): fired only from `post` (which always
+            // records below) rather than unconditionally after `signer_for`, so it never disturbs
+            // `pre`'s deliberate "signs nothing on allow" no-write property — see
+            // `kriya_hermes_hook_smoke.rs`'s `pre_hook_allows_and_signs_nothing_when_policy_permits`
+            // and the "blocked attempt is itself A signed receipt" (first-line) assertion.
+            // Additive, new `action_id`; never affects the chain a verifier without A4 awareness
+            // already accepts.
+            signer.attest_crypto_module("kriya-hermes-hook", Some(actor.clone()));
             let success = outcome_success(payload.extra.as_ref());
             record(&signer, &actor, &action_id, params, success);
             ExitCode::SUCCESS
