@@ -119,6 +119,14 @@ pub struct Policy {
     /// DSL. Absent by default → byte-identical to pre-EG-F behaviour.
     #[serde(default)]
     a2a: Option<A2aPolicy>,
+    /// Optional **model-identity gate** (F1, doc 28 §F1): `kriya-llm-proxy`'s policy dimension —
+    /// approved local-inference model digests per tier + the default action for an unrecognized
+    /// model. Absent by default → `kriya-llm-proxy` still runs with [`ModelPolicy::default`]
+    /// (`unknown_model: warn`), so an agent-policy.yaml that never authored `model:` behaves
+    /// identically whether the key is present-but-empty or absent (same BC discipline `egress`/
+    /// `detection`/`secrets` already established).
+    #[serde(default)]
+    model: Option<ModelPolicy>,
 }
 
 impl Default for Policy {
@@ -155,6 +163,7 @@ impl Default for Policy {
             detection: None,
             secrets: None,
             a2a: None,
+            model: None,
         }
     }
 }
@@ -225,6 +234,12 @@ impl Policy {
     /// Convenience wrapper so a future call site doesn't need to unwrap `a2a()` itself.
     pub fn evaluate_a2a_target(&self, target_agent_id: &str) -> Option<EgressDecision> {
         self.a2a.as_ref().map(|a| a.evaluate(target_agent_id))
+    }
+
+    /// The model-identity gate (F1, doc 28 §F1), if configured. `None` → `kriya-llm-proxy` runs
+    /// with [`ModelPolicy::default`] (`unknown_model: warn`) rather than any stricter posture.
+    pub fn model(&self) -> Option<&ModelPolicy> {
+        self.model.as_ref()
     }
 
     pub fn check(&self, action_id: &str) -> Decision {
@@ -372,6 +387,7 @@ pub fn default_broker_policy(namespaces: &[String]) -> Policy {
         detection: None,
         secrets: None,
         a2a: None,
+        model: None,
     }
 }
 
@@ -424,6 +440,7 @@ pub fn default_proxy_policy() -> Policy {
         detection: None,
         secrets: None,
         a2a: None,
+        model: None,
     }
 }
 
@@ -643,6 +660,168 @@ impl A2aPolicy {
     /// [`EgressPolicy::evaluate`], just evaluated over an agent id instead of a host.
     pub fn evaluate(&self, target_agent_id: &str) -> EgressDecision {
         self.allowlist.evaluate(target_agent_id)
+    }
+}
+
+// ─── Model-identity gate (F1, doc 28 §F1 / FRONTIER-EXECUTE-PROMPT.md §2 · §3 F1) ─────────────────
+//
+// `kriya-llm-proxy`'s policy dimension: gate a served completion on the RESOLVED digest of the
+// model that served it (never the model's self-reported name alone — a name is not an identity).
+// Deliberately NOT `EgressPolicy` reused wholesale, because the default posture differs on purpose:
+// egress is deny-by-default-capable: an operator-authored destination allowlist; this is
+// **observation-first** (doc 24 §11.5 — "enforcement verbs only where enforcement is real"): an
+// unrecognized LOCAL model never blocks by default, it only WARNS — via an explicit, signed
+// `kriya.model.gate` warn receipt, not silence — until the operator opts into `require-approval` or
+// `deny`. The per-digest `approved` allowlist DOES reuse [`EgressTier`] (the same allow/approval/deny
+// space an operator already knows from `egress:`), so authoring a specific digest's tier is the
+// familiar idiom; only the *default-for-everything-else* posture (`unknown_model`) is a new type.
+
+/// One approved model-identity rule: a resolved digest → tier. Mirrors an [`EgressRule`]'s shape
+/// (`host` → `digest`), reusing [`EgressTier`]'s allow/approval/deny space.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApprovedModelRule {
+    /// The resolved model digest (sha256 hex, no `sha256:` prefix) this rule matches exactly.
+    pub digest: String,
+    #[serde(default = "default_model_tier")]
+    pub tier: EgressTier,
+    /// Cosmetic-only human label (e.g. `"llama3.1:8b (verified 2026-07-24)"`) — never read by
+    /// [`ModelPolicy::evaluate`], carried only for the Console's display.
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+fn default_model_tier() -> EgressTier {
+    EgressTier::Allow
+}
+
+/// What happens to a served completion whose model digest matches no [`ApprovedModelRule`] —
+/// covering BOTH a resolved-but-unlisted digest and a digest the `llm-proxy` feature's manifest
+/// resolver couldn't resolve at all. Default `warn`: the fail-OPEN posture the F1 build spec
+/// requires — an unrecognized model is disclosed, never silently blocked, unless the operator
+/// explicitly opts into stricter enforcement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UnknownModelAction {
+    #[default]
+    Warn,
+    RequireApproval,
+    Deny,
+}
+
+/// The compiled model-identity policy for `kriya-llm-proxy`. Deserialized from the SAME
+/// `agent-policy.yaml` every other governed binary loads, under an optional `model:` key —
+/// `#[serde(default)]`'d on [`Policy`] so an agent-policy.yaml that never authored one round-trips
+/// unchanged (the same BC discipline `egress`/`detection`/`secrets` already established).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ModelPolicy {
+    #[serde(default)]
+    pub approved: Vec<ApprovedModelRule>,
+    #[serde(default)]
+    pub unknown_model: UnknownModelAction,
+}
+
+/// The outcome of gating one served completion by model identity. Distinct from [`EgressDecision`]
+/// because an unmatched digest WARNS by default rather than denies — see the module note above.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelGateDecision {
+    /// Proceed, no further comment. `rule` is the approved digest that matched (`None` only when
+    /// [`ModelPolicy::evaluate`] is called directly with an empty policy — practically unreachable
+    /// since an empty policy's `unknown_model` default is `Warn`, never `Allow`).
+    Allow { rule: Option<String> },
+    /// Proceed, but disclose: the observation-first default for an unrecognized model.
+    Warn { reason: String },
+    /// No synchronous approval channel exists in the v1 proxy (same honest limitation as
+    /// `mcp::contain`'s CONNECT tunnel) — refused, never silently allowed nor hung.
+    Approval { reason: String },
+    /// Block. `rule` is the specific approved-list digest that matched a `deny` tier (`None` for
+    /// the `unknown_model: deny` default path).
+    Deny {
+        rule: Option<String>,
+        reason: String,
+    },
+}
+
+impl ModelGateDecision {
+    /// The `decision` facet carried into the `kriya.model.gate` receipt — one of the four closed
+    /// values (never a fifth, same discipline as [`IoDecision::facet`](crate::mcp::executor::IoDecision)).
+    pub fn facet(&self) -> &'static str {
+        match self {
+            ModelGateDecision::Allow { .. } => "allow",
+            ModelGateDecision::Warn { .. } => "warn",
+            ModelGateDecision::Approval { .. } => "approval_required",
+            ModelGateDecision::Deny { .. } => "deny",
+        }
+    }
+
+    /// The approved-list digest that matched, if any (for the receipt's `matched_rule`).
+    pub fn matched_rule(&self) -> Option<&str> {
+        match self {
+            ModelGateDecision::Allow { rule } | ModelGateDecision::Deny { rule, .. } => {
+                rule.as_deref()
+            }
+            ModelGateDecision::Warn { .. } | ModelGateDecision::Approval { .. } => None,
+        }
+    }
+
+    /// The human-readable reason (for the receipt's `reason` and the proxy's error body on refusal).
+    pub fn reason(&self) -> String {
+        match self {
+            ModelGateDecision::Allow { rule: Some(r) } => {
+                format!("model digest {r} is on the approved allowlist")
+            }
+            ModelGateDecision::Allow { rule: None } => "no model policy configured".to_string(),
+            ModelGateDecision::Warn { reason }
+            | ModelGateDecision::Approval { reason }
+            | ModelGateDecision::Deny { reason, .. } => reason.clone(),
+        }
+    }
+
+    /// Whether this decision blocks the request. Only `Approval` (no sync approval channel in v1 —
+    /// refused honestly rather than hung or silently allowed) and `Deny` block; `Allow`/`Warn` never
+    /// do — the fail-OPEN default the F1 spec requires.
+    pub fn blocks(&self) -> bool {
+        matches!(
+            self,
+            ModelGateDecision::Approval { .. } | ModelGateDecision::Deny { .. }
+        )
+    }
+}
+
+impl ModelPolicy {
+    /// Decide what to do with a completion served by the model whose resolved digest is `digest`
+    /// (`None` when [`crate::llm::manifest`] couldn't resolve one — treated exactly like a
+    /// resolved-but-unlisted digest: the `unknown_model` default applies).
+    pub fn evaluate(&self, digest: Option<&str>) -> ModelGateDecision {
+        if let Some(d) = digest {
+            if let Some(rule) = self.approved.iter().find(|r| r.digest == d) {
+                return match rule.tier {
+                    EgressTier::Allow => ModelGateDecision::Allow {
+                        rule: Some(rule.digest.clone()),
+                    },
+                    EgressTier::Approval => ModelGateDecision::Approval {
+                        reason: format!("model digest {d} is approval-tier by policy"),
+                    },
+                    EgressTier::Deny => ModelGateDecision::Deny {
+                        rule: Some(rule.digest.clone()),
+                        reason: format!("model digest {d} is denied by policy"),
+                    },
+                };
+            }
+        }
+        match self.unknown_model {
+            UnknownModelAction::Warn => ModelGateDecision::Warn {
+                reason: "model digest is not on the approved allowlist (observation-only default \
+                         — set unknown_model: require-approval or deny to enforce)"
+                    .to_string(),
+            },
+            UnknownModelAction::RequireApproval => ModelGateDecision::Approval {
+                reason: "unapproved model requires approval by policy".to_string(),
+            },
+            UnknownModelAction::Deny => ModelGateDecision::Deny {
+                rule: None,
+                reason: "unapproved model denied by policy".to_string(),
+            },
+        }
     }
 }
 
@@ -2036,5 +2215,119 @@ detection: { read_only: ["widgets__*"] }"#,
         for p in [bare, glob] {
             assert_eq!(p.check("widgets__delete_item"), Decision::Deny);
         }
+    }
+
+    // ─── F1 model-identity gate (doc 28 §F1) ─────────────────────────────────────────────────────
+
+    #[test]
+    fn model_policy_default_warns_on_every_digest_never_blocking() {
+        let policy = ModelPolicy::default();
+        for digest in [Some("some-digest"), None] {
+            let d = policy.evaluate(digest);
+            assert!(matches!(d, ModelGateDecision::Warn { .. }), "{d:?}");
+            assert!(!d.blocks());
+            assert_eq!(d.facet(), "warn");
+        }
+    }
+
+    #[test]
+    fn model_policy_approved_digest_is_allowed() {
+        let policy = ModelPolicy {
+            approved: vec![ApprovedModelRule {
+                digest: "abc123".to_string(),
+                tier: EgressTier::Allow,
+                label: None,
+            }],
+            unknown_model: UnknownModelAction::Warn,
+        };
+        let d = policy.evaluate(Some("abc123"));
+        assert_eq!(
+            d,
+            ModelGateDecision::Allow {
+                rule: Some("abc123".to_string())
+            }
+        );
+        assert!(!d.blocks());
+        assert_eq!(d.facet(), "allow");
+        assert_eq!(d.matched_rule(), Some("abc123"));
+
+        // A DIFFERENT digest is still unknown -> the default (warn) applies.
+        let d2 = policy.evaluate(Some("other-digest"));
+        assert!(matches!(d2, ModelGateDecision::Warn { .. }));
+    }
+
+    #[test]
+    fn model_policy_per_digest_deny_and_approval_tiers_block() {
+        let policy = ModelPolicy {
+            approved: vec![
+                ApprovedModelRule {
+                    digest: "denied-digest".to_string(),
+                    tier: EgressTier::Deny,
+                    label: None,
+                },
+                ApprovedModelRule {
+                    digest: "approval-digest".to_string(),
+                    tier: EgressTier::Approval,
+                    label: None,
+                },
+            ],
+            unknown_model: UnknownModelAction::Warn,
+        };
+        let deny = policy.evaluate(Some("denied-digest"));
+        assert_eq!(deny.facet(), "deny");
+        assert!(deny.blocks());
+        assert_eq!(deny.matched_rule(), Some("denied-digest"));
+
+        let approval = policy.evaluate(Some("approval-digest"));
+        assert_eq!(approval.facet(), "approval_required");
+        assert!(
+            approval.blocks(),
+            "no sync approval channel in v1 — refused honestly"
+        );
+    }
+
+    #[test]
+    fn model_policy_unknown_model_deny_blocks_and_require_approval_blocks() {
+        let deny_policy = ModelPolicy {
+            approved: vec![],
+            unknown_model: UnknownModelAction::Deny,
+        };
+        let d = deny_policy.evaluate(None);
+        assert_eq!(d.facet(), "deny");
+        assert!(d.blocks());
+        assert_eq!(d.matched_rule(), None);
+
+        let approval_policy = ModelPolicy {
+            approved: vec![],
+            unknown_model: UnknownModelAction::RequireApproval,
+        };
+        let a = approval_policy.evaluate(Some("unresolved-but-present"));
+        assert_eq!(a.facet(), "approval_required");
+        assert!(a.blocks());
+    }
+
+    #[test]
+    fn model_policy_parses_from_the_same_agent_policy_yaml_shape() {
+        let yaml = r#"
+rules: [{action: "*", allow: true}]
+model:
+  approved:
+    - digest: "abc123"
+      tier: allow
+      label: "llama3.1:8b (verified)"
+  unknown_model: deny
+"#;
+        let policy: Policy = serde_yaml::from_str(yaml).expect("model: section parses");
+        let model = policy.model().expect("model policy present");
+        assert_eq!(model.approved.len(), 1);
+        assert_eq!(model.approved[0].digest, "abc123");
+        assert_eq!(model.unknown_model, UnknownModelAction::Deny);
+    }
+
+    #[test]
+    fn model_policy_absent_from_yaml_means_the_default_warn_posture() {
+        let yaml = "rules: [{action: \"*\", allow: true}]\n";
+        let policy: Policy = serde_yaml::from_str(yaml).expect("parses");
+        assert!(policy.model().is_none());
     }
 }

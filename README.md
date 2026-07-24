@@ -153,6 +153,54 @@ budgets need the long-running gateway, and hooks are a cooperative seam — whoe
 runs against **your own AWS Bedrock** (`CLAUDE_CODE_USE_BEDROCK=1`): the model stays in your cloud
 boundary, the action evidence stays on your machine.
 
+## Govern local inference — `kriya-llm-proxy` (F1)
+
+Sovereign/air-gapped orgs run models **locally** — Ollama, llama.cpp's server, vLLM's OpenAI-compat
+endpoint, LM Studio — and that traffic never touches an MCP client at all, so the gateway and hook
+above never see it. `kriya-llm-proxy` is a governed reverse proxy for exactly that: point any
+OpenAI-compatible or Ollama client at it instead of the model server's own port, and every completion
+it forwards signs a receipt (model identity, the policy verdict, usage/performance) — the same
+Ed25519, hash-chained signer path as everything else in this repo.
+
+```bash
+cargo install kriya --bin kriya-llm-proxy --no-default-features --features llm-proxy
+
+# in front of a local Ollama server (its default port, 11434):
+kriya-llm-proxy serve --listen 127.0.0.1:11435 --upstream http://localhost:11434
+```
+
+Point any client at the proxy's port instead of the model server's:
+
+```bash
+# OpenAI-compatible clients (OpenClaw, the openai SDK, LangChain, …):
+export OPENAI_BASE_URL=http://127.0.0.1:11435/v1
+
+# Ollama-native clients (Claude Code with a local-model backend, ollama-python, …):
+export OLLAMA_HOST=http://127.0.0.1:11435
+```
+
+Every governed completion signs three receipts: `kriya.model.identity` (first sight of a model — name
++ resolved sha256 digest, read from the Ollama registry manifest or an operator-precomputed file-hash
+cache, **never** by hashing a multi-GB weight file on the request path), `kriya.model.gate` (the
+policy verdict — `warn` by default for an unrecognized model, real enforcement once you opt into
+`require-approval`/`deny` in `agent-policy.yaml`'s `model:` section), and `kriya.model.serve` (usage:
+`gen_ai.request.model`, input/output token counts, sampler params, prompt/output as sha256 hashes —
+**never the text**). Streaming (SSE / Ollama's NDJSON) passes through live — the proxy hashes bytes as
+they relay, it doesn't buffer a full response before forwarding.
+
+Approve a known-good model's digest in the kriya Console's **Local Models** view, or precompute a
+digest for a raw model file ahead of time (off the request path):
+
+```bash
+kriya-llm-proxy hash-model /path/to/your-model.gguf
+```
+
+> **Bypass honesty.** This proxy governs ONLY clients pointed at it. A process that connects straight
+> to the upstream inference server's own port (e.g. `http://localhost:11434` directly) is invisible to
+> it — no receipt, no gate. Closing that gap is a watcher-ladder item, not this one; never claim "all
+> local inference" coverage from this proxy alone. **v1 scope:** observe + gate on model identity —
+> deterministic re-execution and OMS/Sigstore manifest verification are later phases, not built here.
+
 ## Why "kriya"?
 
 **kriya** (Sanskrit, क्रिया) means *action* — and, in grammar, *verb*. That is the whole idea: an
