@@ -163,11 +163,22 @@ fn post_hook_signs_the_real_outcome_from_extra_status() {
     );
     assert!(r_err.status.success());
 
+    // A4: each `post` invocation also emits one `kriya.crypto.module` self-attestation ahead of
+    // the action receipt (docs/design/a4-fips-lane.md D2) — additive and expected, so the action
+    // receipts are located by `action_id` rather than raw position.
     let text = std::fs::read_to_string(&log).unwrap();
-    let lines: Vec<&str> = text.lines().collect();
-    assert_eq!(lines.len(), 2);
-    let v1: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
-    let v2: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    let all_lines: Vec<serde_json::Value> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(all_lines.len(), 4, "attest+action per post invocation, twice");
+    let action_lines: Vec<&serde_json::Value> = all_lines
+        .iter()
+        .filter(|v| v["action_id"] != "kriya.crypto.module")
+        .collect();
+    assert_eq!(action_lines.len(), 2, "two action receipts");
+    let v1 = action_lines[0];
+    let v2 = action_lines[1];
     assert_eq!(v1["success"], true, "extra.status=ok → success");
     assert_eq!(v2["success"], false, "extra.status=error → failure");
     // Chained across two fresh processes (mirrors production: one process per hook fire).

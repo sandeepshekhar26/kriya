@@ -179,6 +179,9 @@ fn main() -> std::io::Result<()> {
     let executor = build_executor(args.exec.clone(), args.persistent);
 
     let actor = build_actor(args.actor.clone(), args.user.clone());
+    // A4 (doc 27 / docs/design/a4-fips-lane.md D2): consistency emission (low priority — the
+    // receipt is additive either way).
+    signer.attest_crypto_module("kriya-mcp", actor.clone());
     let governor = Governor::new(Arc::new(policy), signer.clone(), approval, executor)
         .with_actor(actor.clone());
     let mut server = Server::new(&args.name, SERVER_VERSION, schemas, governor);

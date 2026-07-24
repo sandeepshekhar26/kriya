@@ -94,6 +94,48 @@ jobs:
         working-directory: apps/task-manager/src-tauri
         run: cargo check --locked
 
+  fips-crypto:
+    name: fips-crypto (A4, doc 27 — opt-in aws-lc-rs fips lane)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # aws-lc-fips-sys needs CMake + Go (+ a C/C++ compiler, already present on the runner) at
+      # build time — see docs/design/a4-fips-lane.md D4. Off by default everywhere else, so this
+      # job is the ONLY place this toolchain is required.
+      - name: install FIPS build toolchain (CMake + Go)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake golang-go
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.90.0"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/kriya
+
+      - name: cargo build -p kriya --features fips-crypto
+        working-directory: crates/kriya
+        run: cargo build --features fips-crypto
+
+      - name: cargo test -p kriya --features fips-crypto (FIPS parity/interop + full suite)
+        working-directory: crates/kriya
+        run: cargo test --features fips-crypto
+
+      - name: cargo test -p kriya --features mcp-http,fips-crypto
+        working-directory: crates/kriya
+        run: cargo test --features mcp-http,fips-crypto
+
+      - name: build + test the offline verify-receipts CLI under fips-crypto
+        working-directory: tools/verify-receipts
+        run: |
+          cargo build --features fips-crypto
+          cargo test --features fips-crypto
+
   scaffolder-smoke:
     name: scaffolder (generate + tsc the output)
     runs-on: ubuntu-latest
