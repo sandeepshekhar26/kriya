@@ -1,0 +1,28 @@
+[package]
+name = "kriya-pq-parity"
+version = "0.0.0"
+publish = false
+edition = "2021"
+license = "MIT"
+description = "Test-only cross-implementation ML-DSA-87 parity harness for the kriya PQ lane (A5, doc 27, design D7). Standalone so `crates/kriya` carries NO dev-dependencies and stays `cargo test -p kriya`-able from the note-app workspace it is a non-member path dependency of."
+
+# Standalone test crate — NOTHING depends ON it. It exists solely to run the two
+# cross-implementation parity integration tests that a SECOND, INDEPENDENT ML-DSA-87
+# implementation (RustCrypto's unaudited `ml-dsa`, V4) verifies against the production
+# `aws-lc-rs` signer. Keeping these tests here (rather than as `crates/kriya` dev-deps)
+# is what lets `crates/kriya` have zero `[dev-dependencies]`, which in turn is required
+# for `cargo test -p kriya --locked` to work from `apps/note-app/src-tauri` (where
+# `kriya` is a non-member workspace path dependency): a package with ANY dev-dependencies
+# cannot be `cargo test -p`'d from a workspace it is not a member of.
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# The production PQ signer/verifier, PQ lane always on (the parity tests are unconditional here).
+kriya = { path = "../kriya", features = ["pq-crypto"] }
+
+[dev-dependencies]
+# The SECOND, INDEPENDENT ML-DSA-87 implementation — RustCrypto's `ml-dsa` is unaudited (V4),
+# which is acceptable for cross-implementation parity fixtures/tests and unacceptable for signing.
+# Only ever a test dependency; never a signing or verification dependency of any production path.
+ml-dsa = "0.1"

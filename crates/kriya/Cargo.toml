@@ -138,15 +138,10 @@ core-foundation = { version = "0.10", optional = true }
 # default `link` feature links the CoreGraphics framework (and unifies core-foundation's `link`).
 core-graphics = { version = "0.25", optional = true }
 
-# A5 (doc 27, PQ dual-signature receipts, design D7): a SECOND, INDEPENDENT ML-DSA-87
-# implementation, TEST-ONLY — never a signing or verification dependency of any production path.
-# RustCrypto's `ml-dsa` is unaudited (V4), which is acceptable for cross-implementation parity
-# fixtures/tests and unacceptable for signing; `aws-lc-rs` (behind `pq-crypto`, `unstable`) is the
-# only production PQ signer. This crate is NOT gated by any feature — it compiles only for
-# `cargo test`, so `cargo build` (no `--tests`) never touches it, and it adds no surface to any
-# shipped binary at all (dev-dependencies are excluded from `cargo build`'s dependency graph).
-# Default features only (`alloc`, `getrandom`, `pkcs8`) — deliberately NOT pinning `signature`/
-# `rand_core` separately, to avoid a duplicate `signature`-crate version conflict with
-# `aws-lc-rs`'s own (older) `signature` dependency.
-[dev-dependencies]
-ml-dsa = "0.1"
+# NOTE: `crates/kriya` deliberately carries NO `[dev-dependencies]`. A package with any dev-deps
+# cannot be `cargo test -p`'d from a workspace it is not a member of, and `apps/note-app/src-tauri`
+# (a workspace) depends on `kriya` as a non-member path dependency and runs `cargo test -p kriya
+# --locked` in CI. The A5 (doc 27, design D7) cross-implementation ML-DSA-87 parity tests — which
+# need RustCrypto's second, independent `ml-dsa` implementation — live in the standalone sibling
+# crate `crates/kriya-pq-parity` instead, so they add zero dev-deps here. Do NOT reintroduce a
+# `[dev-dependencies]` section here without accounting for that constraint.
