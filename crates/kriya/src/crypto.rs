@@ -431,47 +431,11 @@ mod tests {
         assert!(pq_verify(&pk, b"same message", &sig_b));
     }
 
-    /// A5 (design D7): cross-implementation parity — `aws-lc-rs` (production) signs, RustCrypto's
-    /// `ml-dsa` (test-only, unaudited — V4) independently verifies. See the reverse direction in
-    /// [`pq_cross_impl_rustcrypto_signs_aws_lc_verifies`]. Two independent ML-DSA-87
-    /// implementations agreeing is the strongest cross-impl assurance available without a JS build
-    /// of aws-lc (D7's rationale).
-    #[cfg(feature = "pq-crypto")]
-    #[test]
-    fn pq_cross_impl_aws_lc_signs_rustcrypto_verifies() {
-        use ml_dsa::{EncodedVerifyingKey, MlDsa87, Verifier as _, VerifyingKey};
-
-        let seed = [11u8; 32];
-        let key = PqSigningKey::from_seed(&seed).unwrap();
-        let pk_bytes = key.public_key();
-        let msg = b"kriya A5 cross-impl parity fixture (crates/kriya)";
-        let sig_bytes = key.sign(msg);
-        assert!(pq_verify(&pk_bytes, msg, &sig_bytes));
-
-        let encoded_vk = EncodedVerifyingKey::<MlDsa87>::try_from(pk_bytes.as_slice())
-            .expect("aws-lc-rs public key decodes as a valid RustCrypto verifying key");
-        let vk = VerifyingKey::<MlDsa87>::decode(&encoded_vk);
-        let sig = ml_dsa::Signature::<MlDsa87>::try_from(sig_bytes.as_slice())
-            .expect("aws-lc-rs signature decodes as a valid RustCrypto signature");
-        assert!(
-            vk.verify(msg, &sig).is_ok(),
-            "RustCrypto must independently verify an aws-lc-rs-produced ML-DSA-87 signature"
-        );
-    }
-
-    #[cfg(feature = "pq-crypto")]
-    #[test]
-    fn pq_cross_impl_rustcrypto_signs_aws_lc_verifies() {
-        use ml_dsa::{Generate, Keypair as _, MlDsa87, Signer as _, SigningKey};
-
-        let sk = SigningKey::<MlDsa87>::generate();
-        let msg = b"kriya A5 cross-impl parity fixture, reverse direction (crates/kriya)";
-        let sig = sk.sign(msg);
-        let pk_bytes: Vec<u8> = sk.verifying_key().encode().as_slice().to_vec();
-        let sig_bytes: Vec<u8> = sig.encode().as_slice().to_vec();
-        assert!(
-            pq_verify(&pk_bytes, msg, &sig_bytes),
-            "aws-lc-rs must independently verify a RustCrypto-produced ML-DSA-87 signature"
-        );
-    }
+    // A5 (design D7): the two cross-implementation ML-DSA-87 parity tests
+    // (`pq_cross_impl_aws_lc_signs_rustcrypto_verifies` and its reverse) that pit the production
+    // `aws-lc-rs` signer against RustCrypto's independent `ml-dsa` implementation live in the
+    // standalone sibling crate `crates/kriya-pq-parity` (integration tests). They were moved out
+    // of here so `crates/kriya` carries NO `[dev-dependencies]` — a package with any dev-deps
+    // cannot be `cargo test -p`'d from the `apps/note-app/src-tauri` workspace, where `kriya` is a
+    // non-member path dependency. CI runs the sibling crate in the `pq-crypto` job.
 }
