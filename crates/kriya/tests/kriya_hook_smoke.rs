@@ -85,6 +85,55 @@ fn sandbox() -> (PathBuf, PathBuf, PathBuf) {
     )
 }
 
+/// C2 (docs/design/c2-budget-gate-rereview.md F-C1 build note): a budget-gate test needs its state
+/// dir to resolve HERMETICALLY (`<audit-dir>/../state`, never colliding with another parallel test
+/// or the operator's real `~/.kriya/state`). The plain flat `sandbox()` above puts the log directly
+/// at `<dir>/audit.jsonl`, so `<audit-dir>/../state` would resolve OUTSIDE `<dir>` entirely. Nesting
+/// the log under an `audit/` subdir (mirroring production's `~/.kriya/audit/claude-code.jsonl`
+/// layout) makes `<audit-dir>/../state` land at a per-sandbox `<dir>/state` instead. Returns
+/// `(log, key, policy, state_dir)`.
+fn sandbox_with_state_dir() -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+    let dir = std::env::temp_dir().join(format!(
+        "kriya-hook-smoke-budget-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("audit")).unwrap();
+    (
+        dir.join("audit").join("claude-code.jsonl"),
+        dir.join("signing.key"),
+        dir.join("policy.yaml"),
+        dir.join("state"),
+    )
+}
+
+/// Write `<state_dir>/spend-live.json` with ONE session's pre-seal running total — the minimal C1
+/// heartbeat fixture a budget-gate smoke test needs (never touches the operator's real state dir).
+fn write_live_state(state_dir: &PathBuf, session_id: &str, observed_usd: f64, as_of_ms: u64) {
+    std::fs::create_dir_all(state_dir).unwrap();
+    let body = serde_json::json!({
+        "v": 1,
+        "as_of_ms": as_of_ms,
+        "pricing_sheet": "kriya-pricing-test",
+        "pricing_sheet_hash": "deadbeef",
+        "sessions": { session_id: { "observed_usd": observed_usd, "as_of_ms": as_of_ms } },
+        "rolling_day": { "observed_usd": observed_usd, "as_of_ms": as_of_ms },
+        "user": { "observed_usd": observed_usd, "as_of_ms": as_of_ms },
+    });
+    std::fs::write(state_dir.join("spend-live.json"), body.to_string()).unwrap();
+}
+
+/// The real wall-clock epoch-ms "now" — the hook's own budget consult calls `now_ms()` for real, so
+/// a fixture that wants to look FRESH (not stale) must carry an `as_of_ms` close to actual now, not
+/// an arbitrary small constant.
+fn fresh_as_of_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
 /// The real Claude Code `PreToolUse` stdin shape (see kriya-hook.rs's own module doc: `tool_name`,
 /// `tool_input`, and on PostToolUse `tool_response`).
 fn pre_payload(tool_name: &str, tool_input: &str) -> String {
@@ -585,4 +634,267 @@ fn pre_hook_fails_closed_on_malformed_stdin() {
     );
 
     let _ = std::fs::remove_dir_all(log.parent().unwrap());
+}
+
+// --- C2 (doc 27 §4 / docs/design/c2-budget-gate.md) — the endpoint budget gate ------------------
+// Real-process rows extending the B0 matrix (never weakening it): budget-breach blocks, approval
+// routes, fail-closed on missing/stale state, and — the airtight F-B1 regression — a budget deny
+// short-circuits BEFORE the credential-brokering block, so no Keychain secret is ever read/injected
+// for an action a budget is about to deny.
+
+fn budget_deny_policy_yaml(threshold_usd: f64) -> String {
+    format!(
+        "rules:\n  - {{ action: \"claude-code__bash\", allow: true }}\nbudgets:\n  rules:\n    - {{ id: \"session-cap\", scope: session, threshold_usd: {threshold_usd}, action: deny }}\n"
+    )
+}
+
+#[test]
+fn budget_deny_blocks_an_otherwise_allowed_action_and_signs_a_gate_deny_receipt() {
+    let bin = build_binary();
+    let (log, key, policy, state_dir) = sandbox_with_state_dir();
+    std::fs::write(&policy, budget_deny_policy_yaml(0.01)).unwrap();
+    let as_of = fresh_as_of_ms();
+    write_live_state(&state_dir, "s1", 0.02, as_of);
+
+    let r = run(
+        &bin,
+        "pre",
+        &[
+            "--policy",
+            policy.to_str().unwrap(),
+            "--audit-log",
+            log.to_str().unwrap(),
+            "--signing-key",
+            key.to_str().unwrap(),
+        ],
+        &pre_payload("Bash", r#"{"command":"echo hi"}"#),
+    );
+
+    assert_eq!(
+        r.status.code(),
+        Some(2),
+        "a deny-tier budget breach must block via exit 2: stderr={:?}",
+        r.stderr
+    );
+    let receipts = read_receipts(&log);
+    assert_eq!(receipts.len(), 1, "the blocked attempt is itself evidence");
+    assert_eq!(receipts[0]["action_id"], "kriya.spend.gate.deny");
+    assert_eq!(receipts[0]["success"], false);
+    assert_eq!(receipts[0]["params"]["budget_id"], "session-cap");
+    assert_eq!(receipts[0]["params"]["threshold_usd"], 0.01);
+    assert_eq!(receipts[0]["params"]["observed_usd"], 0.02);
+    assert_eq!(receipts[0]["params"]["state_source"], "live-tick");
+    assert_eq!(receipts[0]["params"]["state_as_of_ms"], as_of);
+    assert_eq!(receipts[0]["params"]["state_stale"], false);
+
+    let _ = std::fs::remove_dir_all(&state_dir);
+    let _ = std::fs::remove_dir_all(log.parent().unwrap().parent().unwrap());
+}
+
+#[test]
+fn budget_deny_is_never_reached_when_the_action_tier_already_allows_and_stays_under_threshold() {
+    let bin = build_binary();
+    let (log, key, policy, state_dir) = sandbox_with_state_dir();
+    std::fs::write(&policy, budget_deny_policy_yaml(5.0)).unwrap();
+    write_live_state(&state_dir, "s1", 0.02, fresh_as_of_ms());
+
+    let r = run(
+        &bin,
+        "pre",
+        &[
+            "--policy",
+            policy.to_str().unwrap(),
+            "--audit-log",
+            log.to_str().unwrap(),
+            "--signing-key",
+            key.to_str().unwrap(),
+        ],
+        &pre_payload("Bash", r#"{"command":"echo hi"}"#),
+    );
+
+    assert_eq!(r.status.code(), Some(0));
+    assert!(read_receipts(&log).is_empty(), "under threshold — no gate receipt");
+
+    let _ = std::fs::remove_dir_all(&state_dir);
+    let _ = std::fs::remove_dir_all(log.parent().unwrap().parent().unwrap());
+}
+
+#[test]
+fn budget_require_approval_denies_when_not_granted_and_allows_when_auto_approved() {
+    let bin = build_binary();
+    let policy_yaml = "rules:\n  - { action: \"claude-code__bash\", allow: true }\nbudgets:\n  rules:\n    - { id: \"daily-cap\", scope: rolling-day, threshold_usd: 0.01, action: require-approval }\n";
+
+    // Not granted (default --approval deny) -> blocks, signs gate.approval.
+    {
+        let (log, key, policy, state_dir) = sandbox_with_state_dir();
+        std::fs::write(&policy, policy_yaml).unwrap();
+        write_live_state(&state_dir, "s1", 1.0, fresh_as_of_ms());
+        let r = run(
+            &bin,
+            "pre",
+            &["--policy", policy.to_str().unwrap(), "--audit-log", log.to_str().unwrap(), "--signing-key", key.to_str().unwrap()],
+            &pre_payload("Bash", r#"{"command":"echo hi"}"#),
+        );
+        assert_eq!(r.status.code(), Some(2));
+        let receipts = read_receipts(&log);
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0]["action_id"], "kriya.spend.gate.approval");
+        assert_eq!(receipts[0]["success"], false);
+        let _ = std::fs::remove_dir_all(&state_dir);
+        let _ = std::fs::remove_dir_all(log.parent().unwrap().parent().unwrap());
+    }
+
+    // Granted (--approval auto) -> proceeds, signs nothing at pre-stage (mirrors the action tier's
+    // own "cleared approval signs nothing yet" convention).
+    {
+        let (log, key, policy, state_dir) = sandbox_with_state_dir();
+        std::fs::write(&policy, policy_yaml).unwrap();
+        write_live_state(&state_dir, "s1", 1.0, fresh_as_of_ms());
+        let r = run(
+            &bin,
+            "pre",
+            &["--policy", policy.to_str().unwrap(), "--approval", "auto", "--audit-log", log.to_str().unwrap(), "--signing-key", key.to_str().unwrap()],
+            &pre_payload("Bash", r#"{"command":"echo hi"}"#),
+        );
+        assert_eq!(r.status.code(), Some(0));
+        assert!(read_receipts(&log).is_empty());
+        let _ = std::fs::remove_dir_all(&state_dir);
+        let _ = std::fs::remove_dir_all(log.parent().unwrap().parent().unwrap());
+    }
+}
+
+#[test]
+fn budget_warn_never_blocks_but_still_signs_a_success_true_receipt() {
+    let bin = build_binary();
+    let (log, key, policy, state_dir) = sandbox_with_state_dir();
+    std::fs::write(
+        &policy,
+        "rules:\n  - { action: \"claude-code__bash\", allow: true }\nbudgets:\n  rules:\n    - { id: \"watch\", scope: user, threshold_usd: 0.01, action: warn }\n",
+    )
+    .unwrap();
+    write_live_state(&state_dir, "s1", 1.0, fresh_as_of_ms());
+
+    let r = run(
+        &bin,
+        "pre",
+        &["--policy", policy.to_str().unwrap(), "--audit-log", log.to_str().unwrap(), "--signing-key", key.to_str().unwrap()],
+        &pre_payload("Bash", r#"{"command":"echo hi"}"#),
+    );
+
+    assert_eq!(r.status.code(), Some(0), "warn is observe-only, never blocks");
+    let receipts = read_receipts(&log);
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0]["action_id"], "kriya.spend.gate.warn");
+    assert_eq!(receipts[0]["success"], true);
+
+    let _ = std::fs::remove_dir_all(&state_dir);
+    let _ = std::fs::remove_dir_all(log.parent().unwrap().parent().unwrap());
+}
+
+#[test]
+fn budget_deny_fails_closed_on_missing_state_never_silently_allows() {
+    let bin = build_binary();
+    // No spend-live.json written at all — the state dir doesn't even exist.
+    let (log, key, policy, state_dir) = sandbox_with_state_dir();
+    std::fs::write(&policy, budget_deny_policy_yaml(0.01)).unwrap();
+
+    let r = run(
+        &bin,
+        "pre",
+        &["--policy", policy.to_str().unwrap(), "--audit-log", log.to_str().unwrap(), "--signing-key", key.to_str().unwrap()],
+        &pre_payload("Bash", r#"{"command":"echo hi"}"#),
+    );
+
+    assert_eq!(r.status.code(), Some(2), "missing state on a deny rule must fail CLOSED");
+    let receipts = read_receipts(&log);
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0]["action_id"], "kriya.spend.gate.deny");
+    assert_eq!(receipts[0]["params"]["state_source"], "none");
+    assert_eq!(receipts[0]["params"]["state_stale"], true);
+    assert_eq!(receipts[0]["params"]["on_missing_state"], "fail-closed");
+
+    let _ = std::fs::remove_dir_all(&state_dir);
+    let _ = std::fs::remove_dir_all(log.parent().unwrap().parent().unwrap());
+}
+
+#[test]
+fn budget_deny_fails_closed_on_stale_state_older_than_max_staleness_secs() {
+    let bin = build_binary();
+    let (log, key, policy, state_dir) = sandbox_with_state_dir();
+    std::fs::write(
+        &policy,
+        "rules:\n  - { action: \"claude-code__bash\", allow: true }\nbudgets:\n  max_staleness_secs: 60\n  rules:\n    - { id: \"session-cap\", scope: session, threshold_usd: 0.01, action: deny }\n",
+    )
+    .unwrap();
+    // as_of_ms = 0 -> ~now (well over 60s) later, this state is stale by the time the hook runs.
+    write_live_state(&state_dir, "s1", 0.02, 0);
+
+    let r = run(
+        &bin,
+        "pre",
+        &["--policy", policy.to_str().unwrap(), "--audit-log", log.to_str().unwrap(), "--signing-key", key.to_str().unwrap()],
+        &pre_payload("Bash", r#"{"command":"echo hi"}"#),
+    );
+
+    assert_eq!(r.status.code(), Some(2), "stale state on a deny rule must fail CLOSED");
+    let receipts = read_receipts(&log);
+    assert_eq!(receipts[0]["action_id"], "kriya.spend.gate.deny");
+    assert_eq!(receipts[0]["params"]["state_stale"], true);
+
+    let _ = std::fs::remove_dir_all(&state_dir);
+    let _ = std::fs::remove_dir_all(log.parent().unwrap().parent().unwrap());
+}
+
+/// **THE F-B1 regression (the B0 fix, at the real process boundary).** A `$0.01` `deny` budget PLUS
+/// a `secrets:`-configured policy PLUS a `{{kriya:alias}}` placeholder in `tool_input` must exit 2
+/// with a signed `kriya.spend.gate.deny` receipt and print NO `updatedInput` on stdout — proving the
+/// budget consult fires BEFORE the credential-brokering block's early `return ExitCode::SUCCESS`
+/// (`kriya-hook.rs:767`), so no Keychain secret is ever read or injected for an action the budget is
+/// about to deny. If the consult were ever moved after the brokering block (the pre-review draft's
+/// mistake), this call would instead attempt Keychain substitution — the exact bug this row guards.
+#[test]
+fn f_b1_budget_deny_short_circuits_before_credential_brokering_no_secret_injected() {
+    let bin = build_binary();
+    let (log, key, policy, state_dir) = sandbox_with_state_dir();
+    std::fs::write(
+        &policy,
+        "rules:\n  - { action: \"claude-code__webfetch\", allow: true }\n\
+         budgets:\n  rules:\n    - { id: \"session-cap\", scope: session, threshold_usd: 0.01, action: deny }\n\
+         secrets:\n  aliases:\n    - alias: \"my-token\"\n      keychain_service: \"kriya-f-b1-test-service\"\n      keychain_account: \"kriya-f-b1-test-account\"\n      allowed_hosts:\n        - \"api.example.com\"\n",
+    )
+    .unwrap();
+    write_live_state(&state_dir, "s1", 0.02, fresh_as_of_ms());
+
+    let r = run(
+        &bin,
+        "pre",
+        &["--policy", policy.to_str().unwrap(), "--audit-log", log.to_str().unwrap(), "--signing-key", key.to_str().unwrap()],
+        &pre_payload(
+            "WebFetch",
+            r#"{"url":"https://api.example.com/data","headers":{"Authorization":"Bearer {{kriya:my-token}}"}}"#,
+        ),
+    );
+
+    assert_eq!(
+        r.status.code(),
+        Some(2),
+        "the budget deny must block before brokering ever runs: stderr={:?}",
+        r.stderr
+    );
+    assert!(
+        !r.stdout.contains("updatedInput"),
+        "no updatedInput may ever be printed for a budget-denied call: stdout={:?}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("{{kriya:"),
+        "no placeholder-bearing output either — nothing was ever substituted"
+    );
+    let receipts = read_receipts(&log);
+    assert_eq!(receipts.len(), 1, "exactly the gate.deny receipt — no brokering-deny, no action receipt");
+    assert_eq!(receipts[0]["action_id"], "kriya.spend.gate.deny");
+    assert_eq!(receipts[0]["success"], false);
+
+    let _ = std::fs::remove_dir_all(&state_dir);
+    let _ = std::fs::remove_dir_all(log.parent().unwrap().parent().unwrap());
 }

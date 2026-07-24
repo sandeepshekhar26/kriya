@@ -127,6 +127,13 @@ pub struct Policy {
     /// `detection`/`secrets` already established).
     #[serde(default)]
     model: Option<ModelPolicy>,
+    /// Optional **endpoint budget gate** (C2, doc 27 §4 / `docs/design/c2-budget-gate.md`): USD
+    /// spend budgets (session / rolling-day / user scope) the hook `pre` lane enforces
+    /// pre-execution against C1's trailing spend state. Absent by default → byte-identical to
+    /// pre-C2 behaviour (the same BC discipline `egress`/`detection`/`secrets`/`model` already
+    /// established).
+    #[serde(default)]
+    budgets: Option<BudgetPolicy>,
 }
 
 impl Default for Policy {
@@ -164,6 +171,7 @@ impl Default for Policy {
             secrets: None,
             a2a: None,
             model: None,
+            budgets: None,
         }
     }
 }
@@ -240,6 +248,12 @@ impl Policy {
     /// with [`ModelPolicy::default`] (`unknown_model: warn`) rather than any stricter posture.
     pub fn model(&self) -> Option<&ModelPolicy> {
         self.model.as_ref()
+    }
+
+    /// The endpoint budget gate (C2, doc 27 §4), if configured. `None` → the hook `pre` lane
+    /// performs no budget consult at all, byte-identical to pre-C2 behaviour.
+    pub fn budgets(&self) -> Option<&BudgetPolicy> {
+        self.budgets.as_ref()
     }
 
     pub fn check(&self, action_id: &str) -> Decision {
@@ -388,6 +402,7 @@ pub fn default_broker_policy(namespaces: &[String]) -> Policy {
         secrets: None,
         a2a: None,
         model: None,
+        budgets: None,
     }
 }
 
@@ -441,6 +456,7 @@ pub fn default_proxy_policy() -> Policy {
         secrets: None,
         a2a: None,
         model: None,
+        budgets: None,
     }
 }
 
@@ -1518,9 +1534,360 @@ impl DetectionPolicy {
     }
 }
 
+// ─── Endpoint budget gate (C2, doc 27 §4 / `docs/design/c2-budget-gate.md`) ────────────────────────
+//
+// A "trailing-state budget gate" — NEVER a hard cap (Red-team a / the naming-check test): it blocks
+// or routes-to-approval the NEXT gated action once C1's Console-written spend state (read-only,
+// [`crate::spend_state::SpendState`]) crosses an operator-authored USD threshold. This crate never
+// prices anything — every `observed_usd` figure here was already priced by the Console and copied
+// through a state file.
+//
+// Composition (D3, the tier-surprise guard, axiom 4): on the `kriya-hook pre` lane the action tier
+// (`Policy::check`) is the ONLY pre-execution tier that precedes this gate. A budget can escalate an
+// Allowed action to approval/deny; it can NEVER loosen an earlier Deny/ungranted-approval back to
+// allow — [`Policy::check`]'s own early returns already guarantee that (this gate is only ever
+// consulted once `check` resolved `Allow` or a GRANTED `RequiresApproval`).
+
+/// Which observed-spend key a budget rule is scoped against (D3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BudgetScope {
+    /// The current governed session (`session_id`/`run_id` from the hook payload).
+    Session,
+    /// The current UTC day's total across every session (F-MB: each session's whole priced total
+    /// attributes to the UTC day of its `window_end_ms` — a coarse, honest, never-split boundary;
+    /// see `docs/TRUST.md`).
+    RollingDay,
+    /// The OS user's cross-session total (this device's single local operator).
+    User,
+}
+
+impl BudgetScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BudgetScope::Session => "session",
+            BudgetScope::RollingDay => "rolling-day",
+            BudgetScope::User => "user",
+        }
+    }
+}
+
+/// What a breaching budget rule does (D3). Strictest-wins across rules: `deny` > `require-approval`
+/// > `warn`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BudgetBreachAction {
+    Deny,
+    RequireApproval,
+    Warn,
+}
+
+impl BudgetBreachAction {
+    fn kind(self) -> BreachKind {
+        match self {
+            BudgetBreachAction::Deny => BreachKind::Deny,
+            BudgetBreachAction::RequireApproval => BreachKind::Approval,
+            BudgetBreachAction::Warn => BreachKind::Warn,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BudgetBreachAction::Deny => "deny",
+            BudgetBreachAction::RequireApproval => "require-approval",
+            BudgetBreachAction::Warn => "warn",
+        }
+    }
+}
+
+/// What happens when the state needed to evaluate a rule is missing or stale (D2). Each rule's
+/// EFFECTIVE posture, when this is omitted, defaults per-tier from [`BudgetBreachAction`] — see
+/// [`default_on_missing`] — so every tier's fail-closed-by-default posture is exactly its own tier's
+/// natural behavior; an operator opting a `deny` rule INTO `fail-open` is an explicit, receipted
+/// loosening (never the default).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OnMissingState {
+    FailClosed,
+    FailOpen,
+    RequireApproval,
+}
+
+impl OnMissingState {
+    fn kind(self) -> BreachKind {
+        match self {
+            OnMissingState::FailClosed => BreachKind::Deny,
+            OnMissingState::RequireApproval => BreachKind::Approval,
+            OnMissingState::FailOpen => BreachKind::Warn,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OnMissingState::FailClosed => "fail-closed",
+            OnMissingState::FailOpen => "fail-open",
+            OnMissingState::RequireApproval => "require-approval",
+        }
+    }
+}
+
+/// The per-tier default `on_missing_state` posture (D2's table): `deny`'s default IS fail-closed,
+/// `require-approval`'s default IS route-to-approval, `warn`'s default IS fail-open — i.e. every
+/// tier's own natural behavior is ALSO its missing-state default. This is what makes B0's fail-closed
+/// matrix an EXTENSION rather than a new, separate posture to reason about.
+fn default_on_missing(action: BudgetBreachAction) -> OnMissingState {
+    match action {
+        BudgetBreachAction::Deny => OnMissingState::FailClosed,
+        BudgetBreachAction::RequireApproval => OnMissingState::RequireApproval,
+        BudgetBreachAction::Warn => OnMissingState::FailOpen,
+    }
+}
+
+/// One authored budget rule (D3 YAML shape).
+#[derive(Debug, Clone, Deserialize)]
+pub struct BudgetRule {
+    /// A stable id, surfaced on the receipt + the Console's UI.
+    pub id: String,
+    pub scope: BudgetScope,
+    pub threshold_usd: f64,
+    pub action: BudgetBreachAction,
+    /// Overrides the per-tier missing/stale-state default (D2). `None` = use [`default_on_missing`].
+    #[serde(default)]
+    pub on_missing_state: Option<OnMissingState>,
+}
+
+fn default_max_staleness_secs() -> u64 {
+    900
+}
+
+/// The budget gate's policy section (D3). Additive nullable — mirrors `egress`/`detection`/
+/// `secrets`/`model`'s `Option<...>` BC discipline exactly.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BudgetPolicy {
+    /// State older than this (seconds) is "stale" — treated exactly like missing state (D2).
+    #[serde(default = "default_max_staleness_secs")]
+    pub max_staleness_secs: u64,
+    #[serde(default)]
+    pub rules: Vec<BudgetRule>,
+}
+
+impl Default for BudgetPolicy {
+    fn default() -> Self {
+        BudgetPolicy { max_staleness_secs: default_max_staleness_secs(), rules: Vec::new() }
+    }
+}
+
+/// The evaluation context a budget check needs beyond the spend state itself — the scope keys
+/// [`BudgetScope::Session`]/[`BudgetScope::User`] resolve against.
+#[derive(Debug, Clone, Copy)]
+pub struct BudgetCtx<'a> {
+    pub session_id: Option<&'a str>,
+    pub os_user: &'a str,
+}
+
+/// The three receipt-shaped breach kinds — `deny` > `approval` > `warn` (strictest-wins, D3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BreachKind {
+    Deny,
+    Approval,
+    Warn,
+}
+impl BreachKind {
+    fn rank(self) -> u8 {
+        match self {
+            BreachKind::Deny => 2,
+            BreachKind::Approval => 1,
+            BreachKind::Warn => 0,
+        }
+    }
+}
+
+/// The full, privacy-audited param set for a `kriya.spend.gate.*` receipt (D4) — count/cost/hash/
+/// id/timestamp only, NEVER transcript content. `scope_key` is always a hash or a non-sensitive
+/// label, never a raw session id / OS username string.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BudgetGateRecord {
+    pub budget_id: String,
+    pub scope: BudgetScope,
+    pub scope_key: String,
+    pub threshold_usd: f64,
+    pub observed_usd: f64,
+    pub action: BudgetBreachAction,
+    pub state_source: &'static str, // "live-tick" | "statusline" | "none"
+    pub state_as_of_ms: u64,
+    pub state_stale: bool,
+    /// Set only when missing/stale state (rather than a fresh over-threshold reading) produced this
+    /// record (D2) — `None` on a native over-threshold breach.
+    pub on_missing_state: Option<OnMissingState>,
+    pub pricing_sheet: Option<String>,
+    pub pricing_sheet_hash: Option<String>,
+}
+
+/// The gate's decision for one `kriya-hook pre` call, over EVERY matching rule (strictest wins).
+#[derive(Debug, Clone, PartialEq)]
+pub enum BudgetGateDecision {
+    /// No rule breached at all (every rule is either absent, or resolved fresh-and-under-threshold).
+    /// The action proceeds with no gate receipt — the common case, byte-identical to no `budgets:`
+    /// section at all.
+    Pass,
+    /// A `warn`-shaped breach (fresh-and-over-threshold `warn` rule, or an explicit/default
+    /// fail-open posture on missing/stale state) — observe-only, never blocks.
+    Warn(BudgetGateRecord),
+    /// A `require-approval`-shaped breach — the caller must route through the SAME approval gate the
+    /// action tier uses; granted -> proceed, not granted -> block (D4).
+    Approval(BudgetGateRecord),
+    /// A `deny`-shaped breach — the caller must block immediately (exit 2 on the hook lane).
+    Deny(BudgetGateRecord),
+}
+
+fn utc_day_string(ms: u64) -> String {
+    let days = (ms / 86_400_000) as i64;
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
+    let y = y + if m <= 2 { 1 } else { 0 };
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+impl BudgetPolicy {
+    /// Evaluate EVERY matching rule against `state`, returning the single strictest-wins decision
+    /// (D3). Pure — no filesystem/signing here; the caller (the hook's `pre` lane) decides what to
+    /// DO with the decision (sign a receipt, exit 2, route through the approval gate).
+    pub fn check(
+        &self,
+        state: &crate::spend_state::SpendState,
+        ctx: &BudgetCtx,
+        now_ms: u64,
+    ) -> BudgetGateDecision {
+        let mut winner: Option<(BreachKind, BudgetGateRecord)> = None;
+
+        for rule in &self.rules {
+            let reading = state.resolve(rule.scope, ctx.session_id);
+            let (kind, record) = match reading {
+                None => {
+                    // Missing state — includes an unresolvable scope key (e.g. no session_id for a
+                    // session-scope rule), never silently skipped (Red-team b).
+                    // Missing state, on a `warn`-tier rule with no explicit override, still emits a
+                    // receipted warn (D2: "the chosen on_missing_state is written into the gate
+                    // receipt so the posture is auditable") — never a silent no-op.
+                    let posture = rule.on_missing_state.unwrap_or_else(|| default_on_missing(rule.action));
+                    let kind = posture.kind();
+                    let record = BudgetGateRecord {
+                        budget_id: rule.id.clone(),
+                        scope: rule.scope,
+                        scope_key: scope_key_for(rule.scope, ctx),
+                        threshold_usd: rule.threshold_usd,
+                        observed_usd: 0.0,
+                        action: rule.action,
+                        state_source: "none",
+                        state_as_of_ms: 0,
+                        state_stale: true,
+                        on_missing_state: Some(posture),
+                        pricing_sheet: None,
+                        pricing_sheet_hash: None,
+                    };
+                    (kind, record)
+                }
+                Some(r) => {
+                    let age_secs = now_ms.saturating_sub(r.as_of_ms) / 1000;
+                    let stale = age_secs > self.max_staleness_secs;
+                    if stale {
+                        let posture =
+                            rule.on_missing_state.unwrap_or_else(|| default_on_missing(rule.action));
+                        let record = BudgetGateRecord {
+                            budget_id: rule.id.clone(),
+                            scope: rule.scope,
+                            scope_key: scope_key_for(rule.scope, ctx),
+                            threshold_usd: rule.threshold_usd,
+                            observed_usd: r.observed_usd,
+                            action: rule.action,
+                            state_source: r.source.as_str(),
+                            state_as_of_ms: r.as_of_ms,
+                            state_stale: true,
+                            on_missing_state: Some(posture),
+                            pricing_sheet: r.pricing_sheet.clone(),
+                            pricing_sheet_hash: r.pricing_sheet_hash.clone(),
+                        };
+                        (posture.kind(), record)
+                    } else if r.observed_usd >= rule.threshold_usd {
+                        let record = BudgetGateRecord {
+                            budget_id: rule.id.clone(),
+                            scope: rule.scope,
+                            scope_key: scope_key_for(rule.scope, ctx),
+                            threshold_usd: rule.threshold_usd,
+                            observed_usd: r.observed_usd,
+                            action: rule.action,
+                            state_source: r.source.as_str(),
+                            state_as_of_ms: r.as_of_ms,
+                            state_stale: false,
+                            on_missing_state: None,
+                            pricing_sheet: r.pricing_sheet.clone(),
+                            pricing_sheet_hash: r.pricing_sheet_hash.clone(),
+                        };
+                        (rule.action.kind(), record)
+                    } else {
+                        continue; // fresh + under threshold — this rule does not fire
+                    }
+                }
+            };
+
+            let better = match &winner {
+                None => true,
+                Some((wk, _)) => kind.rank() > wk.rank(),
+            };
+            if better {
+                winner = Some((kind, record));
+            }
+        }
+
+        match winner {
+            None => BudgetGateDecision::Pass,
+            Some((BreachKind::Deny, r)) => BudgetGateDecision::Deny(r),
+            Some((BreachKind::Approval, r)) => BudgetGateDecision::Approval(r),
+            Some((BreachKind::Warn, r)) => BudgetGateDecision::Warn(r),
+        }
+    }
+}
+
+/// Lowercase-hex SHA-256 — a private copy of `audit.rs`'s helper (not itself `pub`) so `scope_key`
+/// never carries a raw session id / OS username, only a commitment to it (D4).
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
+/// The receipt's `scope_key` (D4): never a raw session id / OS username — always a hash (session,
+/// user) or a non-sensitive label (rolling-day: a UTC date string, not sensitive on its own).
+fn scope_key_for(scope: BudgetScope, ctx: &BudgetCtx) -> String {
+    match scope {
+        BudgetScope::Session => match ctx.session_id {
+            Some(sid) => sha256_hex(sid.as_bytes()),
+            None => "unresolved-session".to_string(),
+        },
+        BudgetScope::User => sha256_hex(ctx.os_user.as_bytes()),
+        BudgetScope::RollingDay => utc_day_string(now_for_day_label()),
+    }
+}
+
+/// The wall-clock "now", used ONLY to LABEL the rolling-day scope_key with today's UTC date — never
+/// to compute `observed_usd` (that number always comes straight from the state reading).
+fn now_for_day_label() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::spend_state::SpendState;
 
     #[test]
     fn default_policy_decisions() {
@@ -2329,5 +2696,306 @@ model:
         let yaml = "rules: [{action: \"*\", allow: true}]\n";
         let policy: Policy = serde_yaml::from_str(yaml).expect("parses");
         assert!(policy.model().is_none());
+    }
+
+    // ─── C2 — endpoint budget gate (doc 27 §4 / docs/design/c2-budget-gate.md) ───────────────────
+
+    #[test]
+    fn budgets_absent_from_yaml_means_no_gate_at_all() {
+        let yaml = "rules: [{action: \"*\", allow: true}]\n";
+        let policy: Policy = serde_yaml::from_str(yaml).expect("parses");
+        assert!(policy.budgets().is_none());
+    }
+
+    #[test]
+    fn budgets_parse_from_the_same_agent_policy_yaml_shape() {
+        let yaml = r#"
+rules: [{action: "*", allow: true}]
+budgets:
+  max_staleness_secs: 600
+  rules:
+    - id: "daily-cap"
+      scope: rolling-day
+      threshold_usd: 25.0
+      action: require-approval
+      on_missing_state: fail-closed
+"#;
+        let policy: Policy = serde_yaml::from_str(yaml).expect("budgets: section parses");
+        let budgets = policy.budgets().expect("budgets present");
+        assert_eq!(budgets.max_staleness_secs, 600);
+        assert_eq!(budgets.rules.len(), 1);
+        assert_eq!(budgets.rules[0].id, "daily-cap");
+        assert_eq!(budgets.rules[0].scope, BudgetScope::RollingDay);
+        assert_eq!(budgets.rules[0].action, BudgetBreachAction::RequireApproval);
+        assert_eq!(budgets.rules[0].on_missing_state, Some(OnMissingState::FailClosed));
+    }
+
+    #[test]
+    fn max_staleness_secs_defaults_to_900_when_omitted() {
+        let yaml = "rules: [{action: \"*\", allow: true}]\nbudgets:\n  rules: []\n";
+        let policy: Policy = serde_yaml::from_str(yaml).expect("parses");
+        assert_eq!(policy.budgets().unwrap().max_staleness_secs, 900);
+    }
+
+    fn ctx<'a>(session_id: Option<&'a str>) -> BudgetCtx<'a> {
+        BudgetCtx { session_id, os_user: "alice" }
+    }
+
+    #[test]
+    fn deny_tier_over_threshold_denies() {
+        let budgets = BudgetPolicy {
+            max_staleness_secs: 900,
+            rules: vec![BudgetRule {
+                id: "d1".into(),
+                scope: BudgetScope::Session,
+                threshold_usd: 0.01,
+                action: BudgetBreachAction::Deny,
+                on_missing_state: None,
+            }],
+        };
+        let state = SpendState::synthetic(Some("sheet-1"), Some("h1"), &[("s1", 0.02, 1_000)], None, None);
+        match budgets.check(&state, &ctx(Some("s1")), 1_500) {
+            BudgetGateDecision::Deny(r) => {
+                assert_eq!(r.budget_id, "d1");
+                assert_eq!(r.observed_usd, 0.02);
+                assert_eq!(r.threshold_usd, 0.01);
+                assert!(!r.state_stale);
+                assert_eq!(r.on_missing_state, None);
+                assert_eq!(r.state_source, "live-tick");
+            }
+            other => panic!("expected Deny, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn under_threshold_passes() {
+        let budgets = BudgetPolicy {
+            max_staleness_secs: 900,
+            rules: vec![BudgetRule {
+                id: "d1".into(),
+                scope: BudgetScope::Session,
+                threshold_usd: 5.0,
+                action: BudgetBreachAction::Deny,
+                on_missing_state: None,
+            }],
+        };
+        let state = SpendState::synthetic(None, None, &[("s1", 1.0, 1_000)], None, None);
+        assert_eq!(budgets.check(&state, &ctx(Some("s1")), 1_500), BudgetGateDecision::Pass);
+    }
+
+    #[test]
+    fn missing_state_on_a_deny_rule_fails_closed_by_default() {
+        let budgets = BudgetPolicy {
+            max_staleness_secs: 900,
+            rules: vec![BudgetRule {
+                id: "d1".into(),
+                scope: BudgetScope::Session,
+                threshold_usd: 0.01,
+                action: BudgetBreachAction::Deny,
+                on_missing_state: None,
+            }],
+        };
+        let state = SpendState::empty();
+        match budgets.check(&state, &ctx(Some("s1")), 1_500) {
+            BudgetGateDecision::Deny(r) => {
+                assert_eq!(r.on_missing_state, Some(OnMissingState::FailClosed));
+                assert!(r.state_stale);
+                assert_eq!(r.state_source, "none");
+            }
+            other => panic!("expected fail-closed Deny, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_state_on_a_require_approval_rule_routes_to_approval_by_default() {
+        let budgets = BudgetPolicy {
+            max_staleness_secs: 900,
+            rules: vec![BudgetRule {
+                id: "a1".into(),
+                scope: BudgetScope::RollingDay,
+                threshold_usd: 25.0,
+                action: BudgetBreachAction::RequireApproval,
+                on_missing_state: None,
+            }],
+        };
+        let state = SpendState::empty();
+        match budgets.check(&state, &ctx(None), 1_500) {
+            BudgetGateDecision::Approval(r) => {
+                assert_eq!(r.on_missing_state, Some(OnMissingState::RequireApproval));
+            }
+            other => panic!("expected Approval, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_state_on_a_warn_rule_fails_open_by_default_but_still_receipts() {
+        let budgets = BudgetPolicy {
+            max_staleness_secs: 900,
+            rules: vec![BudgetRule {
+                id: "w1".into(),
+                scope: BudgetScope::User,
+                threshold_usd: 100.0,
+                action: BudgetBreachAction::Warn,
+                on_missing_state: None,
+            }],
+        };
+        let state = SpendState::empty();
+        match budgets.check(&state, &ctx(None), 1_500) {
+            BudgetGateDecision::Warn(r) => {
+                assert_eq!(r.on_missing_state, Some(OnMissingState::FailOpen));
+            }
+            other => panic!("expected Warn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_explicit_fail_open_override_on_a_deny_rule_is_a_receipted_loosening_never_the_default() {
+        let budgets = BudgetPolicy {
+            max_staleness_secs: 900,
+            rules: vec![BudgetRule {
+                id: "d1".into(),
+                scope: BudgetScope::Session,
+                threshold_usd: 0.01,
+                action: BudgetBreachAction::Deny,
+                on_missing_state: Some(OnMissingState::FailOpen),
+            }],
+        };
+        let state = SpendState::empty();
+        match budgets.check(&state, &ctx(Some("s1")), 1_500) {
+            BudgetGateDecision::Warn(r) => {
+                assert_eq!(r.on_missing_state, Some(OnMissingState::FailOpen));
+                assert_eq!(r.action, BudgetBreachAction::Deny, "the rule's OWN tier is still deny");
+            }
+            other => panic!("expected an explicit fail-open Warn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stale_state_is_treated_exactly_like_missing_state() {
+        let budgets = BudgetPolicy {
+            max_staleness_secs: 60, // 1 minute
+            rules: vec![BudgetRule {
+                id: "d1".into(),
+                scope: BudgetScope::Session,
+                threshold_usd: 0.01,
+                action: BudgetBreachAction::Deny,
+                on_missing_state: None,
+            }],
+        };
+        // state as_of_ms = 0, now = 120_000ms (2 minutes) later -> 120s stale, > 60s max.
+        let state = SpendState::synthetic(None, None, &[("s1", 0.02, 0)], None, None);
+        match budgets.check(&state, &ctx(Some("s1")), 120_000) {
+            BudgetGateDecision::Deny(r) => {
+                assert!(r.state_stale);
+                assert_eq!(r.on_missing_state, Some(OnMissingState::FailClosed));
+            }
+            other => panic!("expected stale-state Deny, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_session_scope_rule_with_no_session_id_is_missing_state_never_silently_skipped() {
+        let budgets = BudgetPolicy {
+            max_staleness_secs: 900,
+            rules: vec![BudgetRule {
+                id: "d1".into(),
+                scope: BudgetScope::Session,
+                threshold_usd: 0.01,
+                action: BudgetBreachAction::Deny,
+                on_missing_state: None,
+            }],
+        };
+        let state = SpendState::synthetic(None, None, &[("s1", 100.0, 1_000)], None, None);
+        match budgets.check(&state, &ctx(None), 1_500) {
+            BudgetGateDecision::Deny(r) => {
+                assert_eq!(r.scope_key, "unresolved-session");
+            }
+            other => panic!("expected fail-closed Deny on unresolvable scope key, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn strictest_wins_across_multiple_breaching_rules() {
+        let budgets = BudgetPolicy {
+            max_staleness_secs: 900,
+            rules: vec![
+                BudgetRule {
+                    id: "warn-rule".into(),
+                    scope: BudgetScope::Session,
+                    threshold_usd: 1.0,
+                    action: BudgetBreachAction::Warn,
+                    on_missing_state: None,
+                },
+                BudgetRule {
+                    id: "approval-rule".into(),
+                    scope: BudgetScope::RollingDay,
+                    threshold_usd: 1.0,
+                    action: BudgetBreachAction::RequireApproval,
+                    on_missing_state: None,
+                },
+                BudgetRule {
+                    id: "deny-rule".into(),
+                    scope: BudgetScope::User,
+                    threshold_usd: 1.0,
+                    action: BudgetBreachAction::Deny,
+                    on_missing_state: None,
+                },
+            ],
+        };
+        let state = SpendState::synthetic(
+            None,
+            None,
+            &[("s1", 5.0, 1_000)],
+            Some((5.0, 1_000)),
+            Some((5.0, 1_000)),
+        );
+        match budgets.check(&state, &ctx(Some("s1")), 1_500) {
+            BudgetGateDecision::Deny(r) => assert_eq!(r.budget_id, "deny-rule"),
+            other => panic!("expected the strictest (deny) rule to win, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn action_allow_plus_budget_deny_denies_never_the_reverse() {
+        // Mirrors the hook-lane composition row (Red-team b): a budget can only ESCALATE an
+        // Allowed action — never loosen a prior deny (which this crate's Policy::check already
+        // guarantees by early-returning before the budget consult is ever reached).
+        let budgets = BudgetPolicy {
+            max_staleness_secs: 900,
+            rules: vec![BudgetRule {
+                id: "d1".into(),
+                scope: BudgetScope::Session,
+                threshold_usd: 0.01,
+                action: BudgetBreachAction::Deny,
+                on_missing_state: None,
+            }],
+        };
+        let state = SpendState::synthetic(None, None, &[("s1", 1.0, 1_000)], None, None);
+        assert!(matches!(
+            budgets.check(&state, &ctx(Some("s1")), 1_500),
+            BudgetGateDecision::Deny(_)
+        ));
+    }
+
+    #[test]
+    fn scope_key_is_hashed_never_the_raw_session_id_or_username() {
+        let budgets = BudgetPolicy {
+            max_staleness_secs: 900,
+            rules: vec![BudgetRule {
+                id: "d1".into(),
+                scope: BudgetScope::Session,
+                threshold_usd: 0.01,
+                action: BudgetBreachAction::Deny,
+                on_missing_state: None,
+            }],
+        };
+        let state = SpendState::synthetic(None, None, &[("super-secret-session-id", 1.0, 1_000)], None, None);
+        match budgets.check(&state, &ctx(Some("super-secret-session-id")), 1_500) {
+            BudgetGateDecision::Deny(r) => {
+                assert_ne!(r.scope_key, "super-secret-session-id");
+                assert_eq!(r.scope_key.len(), 64, "a sha256 hex digest");
+            }
+            other => panic!("expected Deny, got {other:?}"),
+        }
     }
 }
