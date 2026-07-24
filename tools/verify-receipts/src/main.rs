@@ -70,6 +70,16 @@ struct SignedReceipt {
     receipt: Receipt,
     public_key: String,
     signature: String,
+    /// A5 (design D2): additive top-level wire siblings — mirrors `kriya::audit::SignedReceipt`
+    /// exactly. `None` (omitted from the wire) on every pre-A5 / non-PQ receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pq_alg: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pq_public_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pq_sig: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pq_key_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -130,6 +140,23 @@ fn verify_line(line: &str) -> (String, String, Outcome) {
         }
     };
 
+    // Captured before `signed.receipt` is moved below — used by the PQ require-if-present check
+    // (design §5) after the Ed25519 verify. Cheap clone of up to four short hex strings.
+    #[cfg(feature = "pq-crypto")]
+    let (pq_alg_owned, pq_pk_owned, pq_sig_owned, pq_key_id_owned) = (
+        signed.pq_alg.clone(),
+        signed.pq_public_key.clone(),
+        signed.pq_sig.clone(),
+        signed.pq_key_id.clone(),
+    );
+    #[cfg(feature = "pq-crypto")]
+    let signed_pq = PqSiblings {
+        pq_alg: &pq_alg_owned,
+        pq_public_key: &pq_pk_owned,
+        pq_sig: &pq_sig_owned,
+        pq_key_id: &pq_key_id_owned,
+    };
+
     // ── canonical message — must byte-match what audit.rs signed ───────────
     // `serde_json::to_vec` of the unsigned Receipt struct (struct fields serialize in declaration
     // order: step_id, action_id, params, success, ts_ms, actor), with `params` object keys sorted
@@ -149,14 +176,79 @@ fn verify_line(line: &str) -> (String, String, Outcome) {
     };
 
     // ── verify (A4: routed through the shared crypto facade, kriya::crypto) ────────────────
-    if kriya::crypto::verify(&pub_bytes, &msg, &sig_bytes) {
-        (action_id, step_id, Outcome::Ok)
-    } else {
-        (
+    if !kriya::crypto::verify(&pub_bytes, &msg, &sig_bytes) {
+        return (
             action_id,
             step_id,
-            Outcome::Fail("bad signature".to_string()),
-        )
+            Outcome::Fail("signature does not match receipt".to_string()),
+        );
+    }
+
+    // A5 (design §5 verification matrix, rows 3/5/6): require-if-present PQ check. When this
+    // binary is NOT built with `pq-crypto`, `pq_*` siblings are ignored entirely (axiom §1.5 —
+    // old verifiers ignore unknown fields; this offline CLI without the feature behaves exactly
+    // like a pre-A5 verifier). Only checked when the feature IS compiled in.
+    #[cfg(feature = "pq-crypto")]
+    if let Outcome::Fail(reason) = pq_check(&signed_pq, &msg) {
+        return (action_id, step_id, Outcome::Fail(reason));
+    }
+
+    (action_id, step_id, Outcome::Ok)
+}
+
+/// A5 (design §5): the require-if-present PQ verdict for one line's `pq_*` siblings against the
+/// identical canonical `msg` bytes the Ed25519 signature covers. Absent-entirely is `Ok` (row 1);
+/// a complete, valid set is `Ok` (row 2); anything else is `Fail` with the design's exact reason
+/// string (rows 3/5/6). Free function (not a `SignedReceipt` method) so the caller can pass just
+/// the four `pq_*` fields — kept separate from `verify_line`'s early-return control flow above.
+#[cfg(feature = "pq-crypto")]
+struct PqSiblings<'a> {
+    pq_alg: &'a Option<String>,
+    pq_public_key: &'a Option<String>,
+    pq_sig: &'a Option<String>,
+    pq_key_id: &'a Option<String>,
+}
+
+#[cfg(feature = "pq-crypto")]
+fn pq_check(pq: &PqSiblings, msg: &[u8]) -> Outcome {
+    let any_present =
+        pq.pq_alg.is_some() || pq.pq_public_key.is_some() || pq.pq_sig.is_some() || pq.pq_key_id.is_some();
+    if !any_present {
+        return Outcome::Ok; // row 1 — no PQ material at all.
+    }
+    let (Some(alg), Some(pk_hex), Some(sig_hex), Some(key_id)) =
+        (pq.pq_alg, pq.pq_public_key, pq.pq_sig, pq.pq_key_id)
+    else {
+        let missing = if pq.pq_alg.is_none() {
+            "pq_alg"
+        } else if pq.pq_public_key.is_none() {
+            "pq_public_key"
+        } else if pq.pq_sig.is_none() {
+            "pq_sig"
+        } else {
+            "pq_key_id"
+        };
+        return Outcome::Fail(format!(
+            "incomplete or inconsistent PQ signature ({missing})"
+        ));
+    };
+    if alg != "ML-DSA-87" {
+        return Outcome::Fail(format!("unsupported pq_alg: {alg} (expected ML-DSA-87)"));
+    }
+    let Ok(pk) = hex::decode(pk_hex) else {
+        return Outcome::Fail("incomplete or inconsistent PQ signature (pq_public_key)".to_string());
+    };
+    let Ok(sig) = hex::decode(sig_hex) else {
+        return Outcome::Fail("incomplete or inconsistent PQ signature (pq_sig)".to_string());
+    };
+    let expected_key_id = sha256_hex(&pk)[..16].to_string();
+    if key_id != &expected_key_id {
+        return Outcome::Fail("incomplete or inconsistent PQ signature (pq_key_id)".to_string());
+    }
+    if kriya::crypto::pq_verify(&pk, msg, &sig) {
+        Outcome::Ok
+    } else {
+        Outcome::Fail("pq_sig (ML-DSA-87) does not match receipt".to_string())
     }
 }
 
@@ -305,7 +397,30 @@ mod tests {
             receipt: receipt.clone(),
             public_key,
             signature,
+            pq_alg: None,
+            pq_public_key: None,
+            pq_sig: None,
+            pq_key_id: None,
         }
+    }
+
+    /// A5: sign `receipt` with BOTH Ed25519 (`key`) and ML-DSA-87 (`pq_key`) — the per-receipt
+    /// dual-sign wire shape (design D2).
+    #[cfg(feature = "pq-crypto")]
+    fn sign_receipt_dual(
+        key: &SigningKey,
+        pq_key: &kriya::crypto::PqSigningKey,
+        receipt: &Receipt,
+    ) -> SignedReceipt {
+        let mut signed = sign_receipt(key, receipt);
+        let msg = serde_json::to_vec(receipt).expect("serialize receipt");
+        let pq_sig = pq_key.sign(&msg);
+        let pq_public_key = pq_key.public_key();
+        signed.pq_alg = Some("ML-DSA-87".to_string());
+        signed.pq_key_id = Some(sha256_hex(&pq_public_key)[..16].to_string());
+        signed.pq_public_key = Some(hex::encode(pq_public_key));
+        signed.pq_sig = Some(hex::encode(pq_sig));
+        signed
     }
 
     fn make_receipt() -> Receipt {
@@ -555,6 +670,175 @@ mod tests {
             verify_log(&format!("{bogus}\n")).2,
             1,
             "only a retention checkpoint earns the seal exemption"
+        );
+    }
+
+    // ── A5 (design docs/design/a5-pq-dual-sig.md §5 verification matrix) ────────────────────
+
+    #[cfg(feature = "pq-crypto")]
+    #[test]
+    fn dual_signed_receipt_verifies_row2() {
+        let key = SigningKey::from_seed(&KEY_A);
+        let (_seed, pq_key) = kriya::crypto::PqSigningKey::generate();
+        let signed = sign_receipt_dual(&key, &pq_key, &make_receipt());
+        let line = serde_json::to_string(&signed).unwrap();
+        let (_, _, outcome) = verify_line(&line);
+        assert_eq!(outcome, Outcome::Ok, "a valid dual-signed receipt must verify (row 2)");
+    }
+
+    #[cfg(feature = "pq-crypto")]
+    #[test]
+    fn pq_tampered_sig_fails_distinctly_row3() {
+        let key = SigningKey::from_seed(&KEY_A);
+        let (_seed, pq_key) = kriya::crypto::PqSigningKey::generate();
+        let mut signed = sign_receipt_dual(&key, &pq_key, &make_receipt());
+        signed.pq_sig = Some("00".repeat(4627));
+        let line = serde_json::to_string(&signed).unwrap();
+        let (_, _, outcome) = verify_line(&line);
+        match outcome {
+            Outcome::Fail(reason) => assert!(
+                reason.contains("pq_sig") && reason.contains("does not match"),
+                "unexpected reason: {reason}"
+            ),
+            Outcome::Ok => panic!("a tampered PQ signature must not verify"),
+        }
+    }
+
+    #[cfg(feature = "pq-crypto")]
+    #[test]
+    fn ed25519_tamper_fails_even_with_valid_pq_row4() {
+        let key = SigningKey::from_seed(&KEY_A);
+        let (_seed, pq_key) = kriya::crypto::PqSigningKey::generate();
+        let signed = sign_receipt_dual(&key, &pq_key, &make_receipt());
+        let mut obj: serde_json::Map<String, Value> =
+            serde_json::from_str(&serde_json::to_string(&signed).unwrap()).unwrap();
+        obj.insert("action_id".to_string(), json!("something-else"));
+        let line = serde_json::to_string(&obj).unwrap();
+        let (_, _, outcome) = verify_line(&line);
+        match outcome {
+            Outcome::Fail(reason) => assert!(
+                reason.contains("signature does not match receipt"),
+                "unexpected reason: {reason}"
+            ),
+            Outcome::Ok => panic!("an Ed25519 tamper must fail regardless of PQ presence"),
+        }
+    }
+
+    #[cfg(feature = "pq-crypto")]
+    #[test]
+    fn incomplete_pq_set_fails_distinctly_row5() {
+        let key = SigningKey::from_seed(&KEY_A);
+        let (_seed, pq_key) = kriya::crypto::PqSigningKey::generate();
+        let mut signed = sign_receipt_dual(&key, &pq_key, &make_receipt());
+        signed.pq_sig = None; // strip one of the four required siblings
+        let line = serde_json::to_string(&signed).unwrap();
+        let (_, _, outcome) = verify_line(&line);
+        match outcome {
+            Outcome::Fail(reason) => assert!(
+                reason.contains("incomplete or inconsistent PQ signature") && reason.contains("pq_sig"),
+                "unexpected reason: {reason}"
+            ),
+            Outcome::Ok => panic!("a partial PQ set must not verify"),
+        }
+    }
+
+    #[cfg(feature = "pq-crypto")]
+    #[test]
+    fn mismatched_pq_key_id_fails_distinctly_row5() {
+        let key = SigningKey::from_seed(&KEY_A);
+        let (_seed, pq_key) = kriya::crypto::PqSigningKey::generate();
+        let mut signed = sign_receipt_dual(&key, &pq_key, &make_receipt());
+        signed.pq_key_id = Some("0".repeat(16));
+        let line = serde_json::to_string(&signed).unwrap();
+        let (_, _, outcome) = verify_line(&line);
+        match outcome {
+            Outcome::Fail(reason) => assert!(
+                reason.contains("incomplete or inconsistent PQ signature") && reason.contains("pq_key_id"),
+                "unexpected reason: {reason}"
+            ),
+            Outcome::Ok => panic!("a pq_key_id that doesn't hash-match must not verify"),
+        }
+    }
+
+    #[cfg(feature = "pq-crypto")]
+    #[test]
+    fn unknown_pq_alg_fails_distinctly_row6() {
+        let key = SigningKey::from_seed(&KEY_A);
+        let (_seed, pq_key) = kriya::crypto::PqSigningKey::generate();
+        let mut signed = sign_receipt_dual(&key, &pq_key, &make_receipt());
+        signed.pq_alg = Some("ML-DSA-44".to_string());
+        let line = serde_json::to_string(&signed).unwrap();
+        let (_, _, outcome) = verify_line(&line);
+        match outcome {
+            Outcome::Fail(reason) => assert!(
+                reason.contains("unsupported pq_alg"),
+                "unexpected reason: {reason}"
+            ),
+            Outcome::Ok => panic!("an unsupported pq_alg must not verify"),
+        }
+    }
+
+    #[cfg(feature = "pq-crypto")]
+    #[test]
+    fn ed25519_only_receipt_still_verifies_unchanged_row1() {
+        // No pq_crypto build awareness needed on the SIGNING side — a receipt with no pq_*
+        // material at all must verify identically whether or not this binary was built with
+        // pq-crypto (frozen-schema / interop — design RT2.1, acceptance #1).
+        let key = SigningKey::from_seed(&KEY_A);
+        let signed = sign_receipt(&key, &make_receipt());
+        let line = serde_json::to_string(&signed).unwrap();
+        assert!(!line.contains("pq_"));
+        let (_, _, outcome) = verify_line(&line);
+        assert_eq!(outcome, Outcome::Ok);
+    }
+
+    /// A5 (design D7): cross-implementation parity. `aws-lc-rs` (this crate's production PQ
+    /// signer, via `kriya::crypto::PqSigningKey`) signs; RustCrypto's `ml-dsa` (test-only,
+    /// unaudited — V4) independently verifies. And vice-versa. Two independent ML-DSA-87
+    /// implementations agreeing is the strongest cross-impl assurance available without a JS
+    /// build of aws-lc (design D7's rationale for why this lives here, Rust-side, not in TS).
+    #[cfg(feature = "pq-crypto")]
+    #[test]
+    fn cross_impl_parity_aws_lc_signs_rustcrypto_verifies() {
+        use ml_dsa::{EncodedVerifyingKey, MlDsa87, Verifier as _, VerifyingKey};
+
+        let (_seed, pq_key) = kriya::crypto::PqSigningKey::generate();
+        let pk_bytes = pq_key.public_key();
+        let msg = b"kriya A5 cross-impl parity fixture";
+        let sig_bytes = pq_key.sign(msg);
+
+        // aws-lc-rs verifies its own signature (sanity).
+        assert!(kriya::crypto::pq_verify(&pk_bytes, msg, &sig_bytes));
+
+        // RustCrypto independently re-verifies the SAME signature over the SAME message under
+        // the SAME public key.
+        let encoded_vk = EncodedVerifyingKey::<MlDsa87>::try_from(pk_bytes.as_slice())
+            .expect("aws-lc-rs public key decodes as a valid RustCrypto ML-DSA-87 verifying key");
+        let vk = VerifyingKey::<MlDsa87>::decode(&encoded_vk);
+        let sig = ml_dsa::Signature::<MlDsa87>::try_from(sig_bytes.as_slice())
+            .expect("aws-lc-rs signature decodes as a valid RustCrypto ML-DSA-87 signature");
+        assert!(
+            vk.verify(msg, &sig).is_ok(),
+            "RustCrypto must independently verify an aws-lc-rs-produced ML-DSA-87 signature"
+        );
+    }
+
+    #[cfg(feature = "pq-crypto")]
+    #[test]
+    fn cross_impl_parity_rustcrypto_signs_aws_lc_verifies() {
+        use ml_dsa::{Generate, Keypair as _, MlDsa87, Signer as _, SigningKey};
+
+        // `Generate` uses the OS RNG under ml-dsa's default `getrandom` feature.
+        let sk = SigningKey::<MlDsa87>::generate();
+        let msg = b"kriya A5 cross-impl parity fixture, reverse direction";
+        let sig = sk.sign(msg);
+
+        let pk_bytes: Vec<u8> = sk.verifying_key().encode().as_slice().to_vec();
+        let sig_bytes: Vec<u8> = sig.encode().as_slice().to_vec();
+
+        assert!(
+            kriya::crypto::pq_verify(&pk_bytes, msg, &sig_bytes),
+            "aws-lc-rs must independently verify a RustCrypto-produced ML-DSA-87 signature"
         );
     }
 }

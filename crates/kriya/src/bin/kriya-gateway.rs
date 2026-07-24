@@ -357,11 +357,41 @@ fn build_approval(kind: &str) -> Box<dyn ApprovalGate> {
 fn build_signer(audit_log: &Path, signing_key: &Option<PathBuf>) -> Arc<Signer> {
     match signing_key {
         Some(key) => match Signer::with_identity(key, audit_log.to_path_buf()) {
-            Ok(s) => Arc::new(s),
+            Ok(s) => Arc::new(maybe_attach_pq(s, key)),
             Err(e) => usage_and_exit(&format!("cannot use --signing-key {key:?}: {e}")),
         },
         None => Arc::new(Signer::with_log_path(audit_log.to_path_buf())),
     }
+}
+
+/// A5 (design D3, `pq-crypto` feature only): attach a PQ (ML-DSA-87) identity beside a persisted
+/// Ed25519 one, at a seed file colocated with `signing_key` (`<dir>/pq-signing.seed`). Only called
+/// for a **durable** identity (mirrors the `attest_crypto_module`/on-device-attestation gating
+/// below: an ephemeral per-process key's PQ attestation would be equally unverifiable across
+/// runs). Checkpoint-only mode (`dual_sign_enabled = false`) — the design D1 default; per-receipt
+/// dual-sign is reserved for the low-volume signers the Console's control-plane paths use, not
+/// this gateway's potentially-high-volume proxied traffic. On any PQ-key error, logs to stderr and
+/// continues WITHOUT the PQ lane (fail-open, matching this binary's overall audit posture) — a
+/// broken PQ key file must never take down the governed proxy.
+#[cfg(feature = "pq-crypto")]
+fn maybe_attach_pq(signer: Signer, signing_key: &Path) -> Signer {
+    let pq_seed_path = signing_key
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("pq-signing.seed");
+    match signer.with_pq(&pq_seed_path, false) {
+        Ok(s) => s,
+        Err((s, e)) => {
+            eprintln!(
+                "[kriya-gateway] PQ (ML-DSA-87) identity unavailable, continuing without it: {e}"
+            );
+            s
+        }
+    }
+}
+#[cfg(not(feature = "pq-crypto"))]
+fn maybe_attach_pq(signer: Signer, _signing_key: &Path) -> Signer {
+    signer
 }
 
 /// Resolve the audit-log path for a front (R27 / D-018). An explicit `--audit-log` (or the config
@@ -462,6 +492,13 @@ fn write_startup_attestation(signer: &Signer, durable_key: bool, actor: &Option<
     // either. Additive, new `action_id`; never affects the chain a verifier without A4 awareness
     // already accepts.
     signer.attest_crypto_module("kriya-gateway", actor.clone());
+    // A5 (doc 27 / docs/design/a5-pq-dual-sig.md §4.2): attest the PQ (ML-DSA-87) public key
+    // under the pinned Ed25519 identity, once at startup — a no-op when this signer has no PQ
+    // key loaded (`pq-crypto` off, or `maybe_attach_pq` failed and logged already).
+    #[cfg(feature = "pq-crypto")]
+    if let Err(e) = signer.attest_pq_key("kriya-gateway", actor.clone()) {
+        eprintln!("[kriya-gateway] skipping PQ key attestation: {e}");
+    }
 }
 
 fn run_proxy(args: ProxyArgs) -> std::io::Result<()> {
