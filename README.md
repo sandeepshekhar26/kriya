@@ -1,7 +1,7 @@
 # kriya — govern everything your AI agents do, and prove it
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Console](https://img.shields.io/badge/kriya%20Console-v0.2.3-orange)](https://kriyanative.com/download/)
+[![Console](https://img.shields.io/badge/kriya%20Console-v0.3.2-orange)](https://kriyanative.com/download/)
 [![Verifier](https://img.shields.io/badge/kriya--audit-v0.1.0-blue)](https://github.com/governex/kriya/releases/tag/audit-v0.1.0)
 [![Website](https://img.shields.io/badge/kriyanative.com-docs-8A2BE2)](https://kriyanative.com/docs/)
 
@@ -17,7 +17,7 @@
 
 **Get it:**
 [⬇ kriya Console for macOS](https://kriyanative.com/download/)
-(free, signed + notarized, universal — v0.2.3) ·
+(free, signed + notarized, universal — v0.3.2) ·
 [⬇ `kriya-audit` verifier](https://github.com/governex/kriya/releases/tag/audit-v0.1.0)
 (free, macOS + Linux) ·
 [Govern Claude Code in 5 minutes](https://kriyanative.com/docs/claude-code/) ·
@@ -201,6 +201,36 @@ kriya-llm-proxy hash-model /path/to/your-model.gguf
 > local inference" coverage from this proxy alone. **v1 scope:** observe + gate on model identity —
 > deterministic re-execution and OMS/Sigstore manifest verification are later phases, not built here.
 
+## Deterministic execution — `kriya-run-wasm` (F4)
+
+"Here is the receipt" is good. "Re-run it yourself and get the same bytes" is better. This lane runs
+a tool as a **WASI-p2 component** under a pinned Wasmtime (`=41.0.4`) configured so the result cannot
+drift: fuel metering on, NaN canonicalization on, threads and relaxed-SIMD off, and **no ambient
+clocks or randomness** — `wasi:clocks/*` and both `wasi:random/*` interfaces are virtualized
+functions of a recorded seed and epoch.
+
+```bash
+cargo install kriya --bin kriya-run-wasm --no-default-features --features wasm-exec
+
+kriya-run-wasm run ./text-transform.wasm -- --upper < input.txt   # → kriya-exec-bundle/1 + receipt
+kriya-run-wasm --verify run-abc123.exec-bundle.json               # re-executes, hash-compares
+```
+
+Every run is captured as a `kriya-exec-bundle/1` (module sha256, exact Wasmtime version, a digest of
+every deterministic knob, args/env/stdin as re-runnable bytes *and* hashes, fuel consumed,
+stdout/stderr hashes) plus a signed `kriya.exec.deterministic` receipt binding the bundle's hash —
+never raw content. The Console's free `kriya-audit --verify-exec` re-verifies the same bundle from an
+**independently written** Rust implementation, so agreement means two codebases agree, not one.
+
+Policy opts in per action via `exec.prefer_deterministic_lane` + `exec.wasm_variants`; an allowed
+action with a registered WASM variant routes through the deterministic executor instead of its normal
+one. Off by default, and BC-safe like every other optional policy dimension.
+
+**Honest scope:** this is re-**execution**, and only for tools that ran *in this lane*. It is not a
+general claim about shell-command determinism, and it is a different, narrower thing than the
+Console's Verified Replay (which re-**derives** a timeline from signed receipts and re-runs nothing).
+Two example governed tools live in [`examples/f4-wasm-tools/`](examples/f4-wasm-tools/).
+
 ## Why "kriya"?
 
 **kriya** (Sanskrit, क्रिया) means *action* — and, in grammar, *verb*. That is the whole idea: an
@@ -271,8 +301,13 @@ past it.
   1. **Permission** — a deny-by-default policy: allow / require-approval / deny.
   2. **Human approval** — guarded actions pause for an Approve/Deny decision in *your* app's UI.
   3. **Budget** — a per-minute action cap *and* a per-hour inference-call cap stop a runaway or
-     looping agent (the second bounds model cost, not just action bursts).
+     looping agent (the second bounds model cost, not just action bursts). The endpoint can also
+     consult a **dollar** budget before the next action runs, so a breach denies it, routes it to a
+     human, or warns — a trailing-state gate on settled spend, deliberately not a hard cap.
   4. **Signed audit** — an Ed25519 receipt per action → append-only log, verifiable offline.
+     Optional build lanes swap the signer for a **FIPS 140-3 validated module** (AWS-LC-FIPS, CMVP
+     cert #5298) or add a **post-quantum** ML-DSA-87 co-signature (CNSA 2.0-aligned); the two are
+     mutually exclusive, and both are off by default.
 
   Plus persistent **memory** across runs, policy **linting**, and **step-through** debugging.
 - **Speaks MCP.** Your actions become MCP tools; the governed `kriya-mcp` server lets any external
@@ -362,7 +397,11 @@ Code's whole tool lane) · `kriya-hermes-hook` (Hermes' native tools) · `kriya-
 server — external agents drive your app through the gates) · `kriya-govern` (per-call govern + sign
 over stdio — the one signer the SDK middleware delegates to) · [`kriya-ci`](docs/GOVERNED-CI-LANE.md)
 (the governed CI lane — run an agent step in CI under a repo policy; fail the build on a block; signed
-receipts as a re-verifiable artifact) · `kriya-host` (the stdio sidecar) ·
+receipts as a re-verifiable artifact) · `kriya-llm-proxy` (govern **local inference** — receipt every
+completion from Ollama / llama.cpp / vLLM / LM Studio with its model digest, token usage, and
+prompt/output hashes; gate on approved model identity) · `kriya-run-wasm` (the **deterministic
+execution lane** — run a WASI-p2 tool under pinned Wasmtime with virtualized clocks and randomness,
+then `--verify` re-runs it and hash-compares bit-for-bit) · `kriya-host` (the stdio sidecar) ·
 [`tools/verify-receipts`](tools/verify-receipts/) (offline audit-log verifier).
 
 **SDK middleware** (govern in-process agent-framework tool calls — no MCP hop, no crypto in the
