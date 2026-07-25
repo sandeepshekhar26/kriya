@@ -69,6 +69,12 @@ pub mod registry;
 pub mod secrets;
 pub mod sidecar;
 pub mod spend_state;
+// F4-wasm (doc 28 §F4): the Deterministic Execution lane. Off by default — pulls in `wasmtime` +
+// `wasmtime-wasi`, the only heavy dependency this crate has ever added — see `wasmexec/mod.rs`'s
+// module doc for the naming law vs B1 "Verified Replay" and the full deterministic-configuration
+// rationale.
+#[cfg(feature = "wasm-exec")]
+pub mod wasmexec;
 
 pub use registry::{json_result, Action, Param, ParamType, Params, Registry};
 
