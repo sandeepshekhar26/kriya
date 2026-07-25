@@ -93,11 +93,14 @@ use kriya::mcp::{
     ApprovalGate, AutoApprove, DenyApproval, HashScheme, IoDecision, IoDirection, IoKind, IoRecord,
     TtyApproval,
 };
-use kriya::permissions::{url_host, Decision, Policy};
+use kriya::permissions::{
+    url_host, BudgetCtx, BudgetGateDecision, BudgetGateRecord, Decision, Policy,
+};
 use kriya::secrets::{
     find_placeholder_aliases, json_escape_inner, read_keychain_secret, redact_broker_values,
     substitute_placeholders,
 };
+use kriya::spend_state::{state_dir_for_audit_log, SpendState};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -223,17 +226,22 @@ fn approval_gate(mode: &str) -> Result<Box<dyn ApprovalGate>, String> {
     }
 }
 
+/// `<audit-dir>/claude-code.jsonl` (default) or the operator's `--audit-log` override — computed
+/// once here so both [`signer_for`] and the C2 budget-gate consult (which derives the state dir as
+/// `<audit-dir>/../state`, F-C1) agree on exactly the same path, no new flag involved.
+fn resolved_audit_log_path(args: &Args) -> PathBuf {
+    match &args.audit_log {
+        Some(p) => p.clone(),
+        None => default_audit_dir().join("claude-code.jsonl"),
+    }
+}
+
 /// The stable per-front audit log + persisted signing identity (defaults; flags override).
 fn signer_for(args: &Args) -> Result<Signer, String> {
-    let log_path = match &args.audit_log {
-        Some(p) => p.clone(),
-        None => {
-            let dir = default_audit_dir();
-            std::fs::create_dir_all(&dir)
-                .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-            dir.join("claude-code.jsonl")
-        }
-    };
+    let log_path = resolved_audit_log_path(args);
+    if let Some(dir) = log_path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    }
     let key_path = match &args.signing_key {
         Some(p) => p.clone(),
         None => {
@@ -273,6 +281,27 @@ fn maybe_attach_pq(signer: Signer, key_path: &Path) -> Signer {
 #[cfg(not(feature = "pq-crypto"))]
 fn maybe_attach_pq(signer: Signer, _key_path: &Path) -> Signer {
     signer
+}
+
+/// Build the `kriya.spend.gate.*` receipt `params` (D4) — count/cost/hash/id/timestamp only, never
+/// transcript content. The runtime never prices: `observed_usd`/`pricing_sheet`/`pricing_sheet_hash`
+/// are copied straight through from the Console-written state file the [`BudgetGateRecord`] carries.
+fn budget_gate_params(r: &BudgetGateRecord) -> Value {
+    serde_json::json!({
+        "v": 1,
+        "budget_id": r.budget_id,
+        "scope": r.scope.as_str(),
+        "scope_key": r.scope_key,
+        "threshold_usd": r.threshold_usd,
+        "observed_usd": r.observed_usd,
+        "action": r.action.as_str(),
+        "state_source": r.state_source,
+        "state_as_of_ms": r.state_as_of_ms,
+        "state_stale": r.state_stale,
+        "on_missing_state": r.on_missing_state.map(|s| s.as_str()),
+        "pricing_sheet": r.pricing_sheet,
+        "pricing_sheet_hash": r.pricing_sheet_hash,
+    })
 }
 
 /// Sign the action receipt and return its `step_id` so a correlated `kriya.io.*` receipt can carry
@@ -699,6 +728,83 @@ fn main() -> ExitCode {
                          the blocked attempt was recorded."
                     );
                     return ExitCode::from(2);
+                }
+            }
+
+            // C2 (doc 27 §4 / docs/design/c2-budget-gate.md D6/F-B1) — the endpoint budget gate.
+            // Placed HERE, immediately after the action-tier `Decision::Allow` / granted-approval
+            // resolution above and BEFORE the credential-brokering block below (`if let Some(secrets)
+            // = policy.secrets()`) — never after it. The brokering block returns early on a
+            // successful `{{kriya:*}}` substitution, so a consult placed after it would never run
+            // for a credential-brokered call, silently failing the `deny` tier open on exactly the
+            // highest-privilege (secret-injecting) calls (the B0 fix, F-B1). A budget can only ever
+            // ESCALATE this already-resolved Allow/granted-approval to approval/deny — it can never
+            // loosen the deny/ungranted-approval outcomes above, which already returned.
+            if let Some(budgets) = policy.budgets() {
+                let log_path = resolved_audit_log_path(&args);
+                let state_dir = state_dir_for_audit_log(&log_path);
+                let state = SpendState::load(&state_dir);
+                let ctx = BudgetCtx { session_id: payload.session_id.as_deref(), os_user: &actor.user };
+                match budgets.check(&state, &ctx, now_ms() as u64) {
+                    BudgetGateDecision::Pass => {}
+                    BudgetGateDecision::Warn(r) => {
+                        record(
+                            &signer,
+                            &actor,
+                            "kriya.spend.gate.warn",
+                            budget_gate_params(&r),
+                            true,
+                            &corr,
+                        );
+                    }
+                    BudgetGateDecision::Approval(r) => {
+                        let gate = match approval_gate(&args.approval) {
+                            Ok(g) => g,
+                            Err(e) => {
+                                eprintln!("kriya-hook: {e} — blocking (fail closed)");
+                                return ExitCode::from(2);
+                            }
+                        };
+                        if !gate.request(&action_id, &params) {
+                            record(
+                                &signer,
+                                &actor,
+                                "kriya.spend.gate.approval",
+                                budget_gate_params(&r),
+                                false,
+                                &corr,
+                            );
+                            eprintln!(
+                                "kriya-hook: budget '{}' requires human approval and was not \
+                                 approved (observed ${:.2} >= threshold ${:.2}; approval mode: {}). \
+                                 A signed receipt of the blocked attempt was recorded.",
+                                r.budget_id, r.observed_usd, r.threshold_usd, args.approval
+                            );
+                            return ExitCode::from(2);
+                        }
+                    }
+                    BudgetGateDecision::Deny(r) => {
+                        record(
+                            &signer,
+                            &actor,
+                            "kriya.spend.gate.deny",
+                            budget_gate_params(&r),
+                            false,
+                            &corr,
+                        );
+                        eprintln!(
+                            "kriya-hook: budget '{}' is denied — observed ${:.2} {} threshold \
+                             ${:.2} (trailing-state, gated on state as of {}; source: {}). A signed \
+                             receipt of the blocked attempt was recorded.",
+                            r.budget_id,
+                            r.observed_usd,
+                            if r.state_stale { "vs (stale/missing)" } else { ">=" },
+                            r.threshold_usd,
+                            r.state_as_of_ms,
+                            r.state_source
+                        );
+                        return ExitCode::from(2);
+                    }
                 }
             }
 

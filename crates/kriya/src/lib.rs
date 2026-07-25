@@ -68,6 +68,7 @@ pub mod protocol;
 pub mod registry;
 pub mod secrets;
 pub mod sidecar;
+pub mod spend_state;
 
 pub use registry::{json_result, Action, Param, ParamType, Params, Registry};
 
