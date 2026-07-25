@@ -66,9 +66,11 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use kriya::audit::{default_audit_dir, now_ms, Actor, Receipt, Signer};
+use kriya::corr::Correlation;
 #[cfg(target_os = "macos")]
 use kriya::mcp::GuiApproval;
 use kriya::mcp::{ApprovalGate, AutoApprove, DenyApproval, TtyApproval};
+use kriya::memwrite;
 use kriya::permissions::{Decision, Policy};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -202,6 +204,21 @@ fn signer_for(args: &Args) -> Result<Signer, String> {
     Signer::with_identity(&key_path, log_path)
 }
 
+/// D1: where this binary's device-local HMAC salt lives — same directory + filename convention
+/// as `kriya-hook.rs`'s `load_or_create_ingress_salt` (co-located with the signing key), so a
+/// default-path install of BOTH hooks shares one salt file under `~/.kriya/keys/` — `path_hmac`s
+/// for the same file correlate across the Claude Code and Hermes lanes.
+fn memory_salt_path(args: &Args) -> PathBuf {
+    match &args.signing_key {
+        Some(p) => p.with_file_name("ingress-hmac.salt"),
+        None => default_audit_dir()
+            .parent()
+            .map(|p| p.join("keys"))
+            .unwrap_or_else(|| PathBuf::from(".kriya-keys"))
+            .join("ingress-hmac.salt"),
+    }
+}
+
 fn record(signer: &Signer, actor: &Actor, action_id: &str, params: Value, success: bool) {
     signer.record(
         Receipt::new(
@@ -264,7 +281,16 @@ fn main() -> ExitCode {
         .or_else(|| std::env::var("USER").ok())
         .unwrap_or_else(|| "unknown".into());
     let actor = Actor::new(args.actor.clone(), user);
-    let _ = &payload.session_id; // reserved: session correlation, mirrors kriya-hook's own reserve
+    // D1 (doc 27 §4 / docs/design/d1-memory-receipts.md D-4): `session_id` was previously reserved
+    // and unused (this binary's base action receipt still carries no `kriya.corr` — that remains
+    // untouched, a pre-existing gap, not something D1 widens). D1's OWN new `kriya.memory.*`
+    // receipt is the first thing on this lane to use it, via the shared, seam-authoritative
+    // `corr::attach` — exactly the same run-scoping `kriya-hook.rs` does for its own receipts.
+    let mem_corr = Correlation {
+        run_id: payload.session_id.clone().filter(|s| !s.is_empty()),
+        parent_step_id: None,
+        agent_id: None,
+    };
 
     let signer = match signer_for(&args) {
         Ok(s) => s,
@@ -329,6 +355,35 @@ fn main() -> ExitCode {
             // already accepts.
             signer.attest_crypto_module("kriya-hermes-hook", Some(actor.clone()));
             let success = outcome_success(payload.extra.as_ref());
+            // D1 (doc 27 §4 / docs/design/d1-memory-receipts.md D-4): identical treatment to
+            // `kriya-hook.rs`'s Claude Code lane — classify + emit a `kriya.memory.*` receipt for
+            // a write to a governed persistent-memory surface, unconditional, hash-only. Computed
+            // BEFORE `record` below moves `params`.
+            if let Some(surface) = memwrite::memory_surface_for(tool_name, &params) {
+                let salt = memwrite::load_or_create_salt(&memory_salt_path(&args));
+                let (mut verb, mut basis) = memwrite::base_verb_for(tool_name);
+                if verb == memwrite::MemoryVerb::Write {
+                    if let (Some(run_id), Some(path)) = (mem_corr.run_id.as_deref(), surface.path.as_deref()) {
+                        let path_hmac = memwrite::path_hmac_hex(&salt, path);
+                        if memwrite::prior_write_seen(signer.log_path(), run_id, &path_hmac, 500) {
+                            verb = memwrite::MemoryVerb::Update;
+                            basis = memwrite::VerbBasis::PriorWriteSeen;
+                        }
+                    }
+                }
+                let content = memwrite::file_write_content(&params);
+                memwrite::emit_memory_receipt(
+                    &signer,
+                    Some(&actor),
+                    verb,
+                    basis,
+                    &surface,
+                    &content,
+                    success,
+                    &mem_corr,
+                    &salt,
+                );
+            }
             record(&signer, &actor, &action_id, params, success);
             ExitCode::SUCCESS
         }

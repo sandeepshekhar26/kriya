@@ -141,6 +141,13 @@ pub struct Policy {
     /// discipline `egress`/`detection`/`secrets`/`model`/`budgets` already established).
     #[serde(default)]
     exec: Option<ExecPolicy>,
+    /// D1 (doc 27 §4 / `docs/design/d1-memory-receipts.md` §D-1/§D-6): the broker's memory-tool
+    /// registry — a `kriya.memory.*` receipt is minted for a REGISTERED tool only, never a bare
+    /// name-looks-like-memory heuristic (the honest default). Absent `memory:` ⇒ no broker call
+    /// is ever treated as memory, byte-identical to pre-D1 behaviour (the same BC discipline
+    /// `egress`/`detection`/`secrets`/`model`/`budgets`/`exec` already established).
+    #[serde(default)]
+    memory: Option<Vec<MemoryRegistryEntry>>,
 }
 
 impl Default for Policy {
@@ -180,8 +187,25 @@ impl Default for Policy {
             model: None,
             budgets: None,
             exec: None,
+            memory: None,
         }
     }
+}
+
+/// D1: one registered MCP memory tool ({server, tool, op, content_field?}, §D-6 item 5). Mirrors
+/// [`crate::memwrite::MemoryOp`]'s `create`/`update`/`delete` vocabulary exactly.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MemoryRegistryEntry {
+    /// The broker namespace (upstream name) this tool is served under.
+    pub server: String,
+    /// The un-namespaced tool name.
+    pub tool: String,
+    /// §D-1: `create→write, update→update, delete→delete` (`MemoryOp::verb`).
+    pub op: crate::memwrite::MemoryOp,
+    /// The argument name carrying the memory content, hashed at emission (§D-3). `None` ⇒ hash
+    /// the full canonical `arguments` instead — still content-free either way.
+    #[serde(default)]
+    pub content_field: Option<String>,
 }
 
 impl Policy {
@@ -262,6 +286,18 @@ impl Policy {
     /// performs no budget consult at all, byte-identical to pre-C2 behaviour.
     pub fn budgets(&self) -> Option<&BudgetPolicy> {
         self.budgets.as_ref()
+    }
+
+    /// D1: the registered memory-tool list (doc 27 §4), if configured. `None` → the broker treats
+    /// no MCP call as a memory write, byte-identical to pre-D1 behaviour.
+    pub fn memory(&self) -> Option<&[MemoryRegistryEntry]> {
+        self.memory.as_deref()
+    }
+
+    /// D1: look up whether `(server, tool)` is a REGISTERED memory tool (§D-1's honest default —
+    /// never a bare name heuristic). `None` when `memory:` is absent or the pair isn't listed.
+    pub fn memory_registered_for(&self, server: &str, tool: &str) -> Option<&MemoryRegistryEntry> {
+        self.memory.as_ref()?.iter().find(|e| e.server == server && e.tool == tool)
     }
 
     /// The deterministic-execution lane routing policy (F4-wasm, doc 28 §F4), if configured.
@@ -433,6 +469,7 @@ pub fn default_broker_policy(namespaces: &[String]) -> Policy {
         model: None,
         budgets: None,
         exec: None,
+        memory: None,
     }
 }
 
@@ -488,6 +525,7 @@ pub fn default_proxy_policy() -> Policy {
         model: None,
         budgets: None,
         exec: None,
+        memory: None,
     }
 }
 
@@ -3117,5 +3155,45 @@ budgets:
             }
             other => panic!("expected Deny, got {other:?}"),
         }
+    }
+
+    // ── D1 (doc 27 §4 / docs/design/d1-memory-receipts.md D-6): the `memory:` registry ────────────
+
+    #[test]
+    fn memory_absent_when_never_authored_bc3() {
+        let p: Policy = serde_yaml::from_str("rules:\n  - action: \"*\"\n    allow: true\n").unwrap();
+        assert!(p.memory().is_none(), "no `memory:` key authored ⇒ None, byte-identical to pre-D1");
+        assert!(p.memory_registered_for("notes", "create_entities").is_none());
+    }
+
+    #[test]
+    fn memory_registry_parses_and_looks_up_by_server_and_tool() {
+        let yaml = "rules:\n  - action: \"*\"\n    allow: true\nmemory:\n  - server: notes\n    tool: create_entities\n    op: create\n    content_field: entity\n  - server: notes\n    tool: delete_entities\n    op: delete\n";
+        let p: Policy = serde_yaml::from_str(yaml).unwrap();
+        let entries = p.memory().expect("memory: section present");
+        assert_eq!(entries.len(), 2);
+
+        let create = p.memory_registered_for("notes", "create_entities").expect("registered");
+        assert_eq!(create.op, crate::memwrite::MemoryOp::Create);
+        assert_eq!(create.content_field.as_deref(), Some("entity"));
+        assert_eq!(create.op.verb(), crate::memwrite::MemoryVerb::Write);
+
+        let delete = p.memory_registered_for("notes", "delete_entities").expect("registered");
+        assert_eq!(delete.op, crate::memwrite::MemoryOp::Delete);
+        assert!(delete.content_field.is_none());
+
+        // A bare name-looks-like-memory tool that was never registered is NOT found (§D-1's
+        // honest default — the heuristic-honesty invariant starts here, at the policy layer).
+        assert!(p.memory_registered_for("notes", "save").is_none());
+        assert!(p.memory_registered_for("other-server", "create_entities").is_none());
+    }
+
+    #[test]
+    fn memory_empty_list_is_present_but_matches_nothing() {
+        // `memory: []` (explicitly authored, empty) is distinct from absent — still `Some(&[])`,
+        // never confused with "not configured".
+        let p: Policy = serde_yaml::from_str("rules:\n  - action: \"*\"\n    allow: true\nmemory: []\n").unwrap();
+        assert!(p.memory().is_some(), "explicitly empty ⇒ Some(&[]), distinct from absent");
+        assert_eq!(p.memory().unwrap().len(), 0);
     }
 }
