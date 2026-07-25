@@ -413,6 +413,45 @@ impl Governor {
             self.emit_io_ingress(&server, decision, &flags, &action_step_id);
         }
 
+        // 8. D1 (doc 27 §4 / docs/design/d1-memory-receipts.md D-4): a REGISTERED memory tool
+        //    (§D-1's honest default — never a bare name-looks-like heuristic) gets an additional
+        //    `kriya.memory.<verb>` receipt, correlated the same way, hashing the registry-named
+        //    content field (or the full request arguments when unnamed) — the REQUEST, because a
+        //    memory write's content is in `arguments`, which the broker sees in full, unlike the
+        //    response (`emit_io_ingress` above never hashes response content, §D-4). `success`
+        //    mirrors the action's own outcome, exactly like the base receipt above.
+        if let Some((server, tool)) = action_id.split_once("__") {
+            if let Some(entry) = self.policy.memory_registered_for(server, tool) {
+                let content = crate::memwrite::mcp_memory_content(params, entry.content_field.as_deref());
+                // The MCP lane's verb is OPERATOR-DECLARED (the registry's `op`), never inferred
+                // from tool shape or an in-run scan — there is no ambiguity for `prior_write_seen`
+                // to resolve here. Reusing `ToolEdit`/`ToolWrite` (never `PriorWriteSeen`, which
+                // would falsely claim a scan happened) is the closest honest fit within the
+                // existing three-value `verb_basis` enum: it marks "not a scanned upgrade",
+                // exactly what's true, keyed off the registry's own update-vs-not distinction.
+                let basis = if entry.op == crate::memwrite::MemoryOp::Update {
+                    crate::memwrite::VerbBasis::ToolEdit
+                } else {
+                    crate::memwrite::VerbBasis::ToolWrite
+                };
+                crate::memwrite::emit_memory_receipt(
+                    &self.signer,
+                    self.actor.as_ref(),
+                    entry.op.verb(),
+                    basis,
+                    &crate::memwrite::mcp_surface(server, tool, entry.op),
+                    &content,
+                    outcome.success,
+                    &crate::corr::Correlation {
+                        run_id: self.run_id.clone(),
+                        parent_step_id: None,
+                        agent_id: None,
+                    },
+                    &[],
+                );
+            }
+        }
+
         DispatchOutcome::Executed { outcome, receipt }
     }
 
@@ -2216,5 +2255,105 @@ budget:
         ));
         assert_eq!(ran.load(Ordering::SeqCst), 1);
         assert!(io_lines(&log)[0]["params"].get("flags").is_none());
+    }
+
+    // ── D1 (doc 27 §4 / docs/design/d1-memory-receipts.md D-4): broker memory-tool registry ──────
+
+    fn memory_lines(log: &std::path::Path) -> Vec<Value> {
+        read_receipts(log)
+            .into_iter()
+            .filter(|v| v["action_id"].as_str().map(|a| a.starts_with("kriya.memory.")).unwrap_or(false))
+            .collect()
+    }
+
+    /// A policy that allows `notes__*` and registers `notes/create_entities` as a memory tool
+    /// (`op: create`, `content_field: entity`) — the §5 test-plan fixture (d).
+    fn policy_with_registered_memory_tool() -> Arc<Policy> {
+        Arc::new(
+            serde_yaml::from_str(
+                "rules:\n  - action: \"notes__*\"\n    allow: true\nmemory:\n  - server: notes\n    tool: create_entities\n    op: create\n    content_field: entity\n",
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn registered_memory_tool_call_emits_a_kriya_memory_write_receipt_hash_only() {
+        let (s, log) = signer_with_log();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let mut g = Governor::new(
+            policy_with_registered_memory_tool(),
+            s,
+            Box::new(DenyApproval),
+            counting_executor(ran.clone()),
+        )
+        .with_run_correlation(Some("run-mem-1".into()));
+
+        let sentinel = "the actual memory content, never on the wire";
+        match g.dispatch("notes__create_entities", &json!({ "entity": sentinel, "kind": "person" })) {
+            DispatchOutcome::Executed { .. } => {}
+            other => panic!("expected Executed, got {other:?}"),
+        }
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+
+        let mem = memory_lines(&log);
+        assert_eq!(mem.len(), 1, "exactly one kriya.memory.* receipt for the registered call");
+        let r = &mem[0];
+        assert_eq!(r["action_id"], json!("kriya.memory.write"), "op create -> verb write (§D-1)");
+        assert_eq!(r["success"], json!(true));
+        let m = &r["params"]["kriya.memory"];
+        assert_eq!(m["class"], json!("mcp-registered"));
+        assert_eq!(m["surface"], json!("mcp-tool"));
+        assert_eq!(m["tool_ref"]["server"], json!("notes"));
+        assert_eq!(m["tool_ref"]["tool"], json!("create_entities"));
+        assert_eq!(m["tool_ref"]["op"], json!("create"));
+        assert_eq!(
+            m["content_sha256"].as_str().unwrap(),
+            &{
+                use sha2::{Digest, Sha256};
+                hex::encode(Sha256::digest(sentinel.as_bytes()))
+            }
+        );
+        assert_eq!(m["content_bytes"], json!(sentinel.len() as u64));
+        assert_eq!(r["params"]["kriya.corr"]["run_id"], json!("run-mem-1"));
+
+        // Hash-not-content (acceptance #2): the sentinel never appears in the `kriya.memory.*`
+        // receipt itself (the base action receipt is a SEPARATE, pre-existing, disclosed lane
+        // that already records full `arguments` verbatim — §D-7 — unchanged and out of scope
+        // here; D1's OWN receipt is the thing under test).
+        let mem_wire = serde_json::to_string(r).unwrap();
+        assert!(!mem_wire.contains(sentinel), "the memory content leaked into D1's own receipt");
+    }
+
+    #[test]
+    fn unregistered_memory_looking_tool_emits_no_kriya_memory_receipt_heuristic_honesty() {
+        // A tool NAMED like memory (`__save`) but never registered in `memory:` — §D-1's honest
+        // default: a bare name-looks-like-memory heuristic never mints a signed receipt.
+        let (s, log) = signer_with_log();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let policy: Arc<Policy> = Arc::new(
+            serde_yaml::from_str("rules:\n  - action: \"memory__*\"\n    allow: true\n").unwrap(),
+        );
+        let mut g = Governor::new(policy, s, Box::new(DenyApproval), counting_executor(ran.clone()));
+
+        match g.dispatch("memory__save", &json!({ "text": "looks like memory but isn't registered" })) {
+            DispatchOutcome::Executed { .. } => {}
+            other => panic!("expected Executed, got {other:?}"),
+        }
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+        assert!(memory_lines(&log).is_empty(), "an unregistered tool must never mint kriya.memory.*");
+    }
+
+    #[test]
+    fn absent_memory_section_round_trips_to_no_receipts_ever() {
+        // BC-3: a policy that never authored `memory:` at all.
+        let (s, log) = signer_with_log();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let mut g = Governor::new(allow_all(), s, Box::new(DenyApproval), counting_executor(ran));
+        match g.dispatch("create_note", &json!({"title": "hi"})) {
+            DispatchOutcome::Executed { .. } => {}
+            other => panic!("expected Executed, got {other:?}"),
+        }
+        assert!(memory_lines(&log).is_empty());
     }
 }

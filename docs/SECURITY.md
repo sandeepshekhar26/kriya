@@ -51,6 +51,17 @@ The host also emits one special receipt type: the **on-device attestation** (R13
 `action_id` of `kriya.attestation.on_device`, signed the same way — a verifiable record that a run
 executed under a sealed policy with no remote egress.
 
+**Memory-write receipts (D1).** A write to a **governed persistent-memory surface** — on the
+Claude Code/Hermes hook lane, `CLAUDE.md`/`CLAUDE.local.md`, a `.claude/**/memory/**` file, or a
+`.claude/settings*.json` standing-config file; on the MCP broker lane, a tool the operator has
+explicitly **registered** in a `memory:` policy section — signs an additive
+`kriya.memory.write` / `.update` / `.delete` receipt (`crates/kriya/src/memwrite.rs`). It is
+**hash-only**: the receipt carries the SHA-256 and byte size of the written content plus a class,
+a keyed path reference, and correlation to the writing session/action — **never the content
+itself**. It is **governed-lane-only**: a bare shell redirection, a subprocess, an ungoverned MCP
+server's own store, and a tool merely *named* like memory (never registered) mint no receipt — the
+runtime records evidence, it does not infer semantics beyond what the detection basis supports.
+
 ## The cryptography
 
 - **Algorithm:** Ed25519 (`ed25519-dalek`). 64-byte detached signatures, 32-byte public keys.
