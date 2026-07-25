@@ -148,6 +148,14 @@ fn post_payload(tool_name: &str, tool_response: &str) -> String {
     )
 }
 
+/// Like [`post_payload`], but with an explicit `tool_input` and `session_id` — D1's memory-write
+/// receipt fixtures need real `file_path`/`content` shapes and a stable run id to join on.
+fn post_payload_full(tool_name: &str, tool_input: &str, tool_response: &str, session_id: &str) -> String {
+    format!(
+        r#"{{"hook_event_name":"PostToolUse","tool_name":"{tool_name}","tool_input":{tool_input},"tool_response":{tool_response},"session_id":"{session_id}"}}"#
+    )
+}
+
 fn read_receipts(log: &PathBuf) -> Vec<serde_json::Value> {
     match std::fs::read_to_string(log) {
         Ok(text) => text
@@ -897,4 +905,199 @@ fn f_b1_budget_deny_short_circuits_before_credential_brokering_no_secret_injecte
 
     let _ = std::fs::remove_dir_all(&state_dir);
     let _ = std::fs::remove_dir_all(log.parent().unwrap().parent().unwrap());
+}
+
+// =============================================================================================
+// D1 (doc 27 §4 / docs/design/d1-memory-receipts.md) — memory-write receipts, end-to-end through
+// the real compiled `kriya-hook` binary (§5 test-plan fixtures a/b/c, at the process boundary).
+// =============================================================================================
+
+fn memory_receipt<'a>(receipts: &'a [serde_json::Value]) -> &'a serde_json::Value {
+    receipts
+        .iter()
+        .find(|r| r["action_id"].as_str().unwrap_or("").starts_with("kriya.memory."))
+        .expect("expected a kriya.memory.* receipt")
+}
+
+#[test]
+fn claude_md_write_emits_a_kriya_memory_write_receipt_class_claude_md() {
+    let bin = build_binary();
+    let (log, key, _policy) = sandbox();
+
+    let r = run(
+        &bin,
+        "post",
+        &["--audit-log", log.to_str().unwrap(), "--signing-key", key.to_str().unwrap()],
+        &post_payload_full(
+            "Write",
+            r#"{"file_path":"CLAUDE.md","content":"Standing instructions: always verify before claiming done."}"#,
+            r#"{"success":true}"#,
+            "sess-d1-a",
+        ),
+    );
+    assert_eq!(r.status.code(), Some(0), "stderr={}", r.stderr);
+
+    let receipts = read_receipts(&log);
+    let mem = memory_receipt(&receipts);
+    assert_eq!(mem["action_id"], "kriya.memory.write");
+    assert_eq!(mem["success"], true);
+    let m = &mem["params"]["kriya.memory"];
+    assert_eq!(m["class"], "claude-md");
+    assert_eq!(m["surface"], "file");
+    assert_eq!(m["verb_basis"], "tool-write");
+    assert_eq!(m["path"], "CLAUDE.md");
+    assert!(m["path_hmac"].as_str().unwrap().len() == 64);
+    assert_eq!(mem["params"]["kriya.corr"]["run_id"], "sess-d1-a");
+
+    let _ = std::fs::remove_dir_all(log.parent().unwrap());
+}
+
+#[test]
+fn claude_memory_dir_edit_emits_a_kriya_memory_update_receipt() {
+    let bin = build_binary();
+    let (log, key, _policy) = sandbox();
+
+    let r = run(
+        &bin,
+        "post",
+        &["--audit-log", log.to_str().unwrap(), "--signing-key", key.to_str().unwrap()],
+        &post_payload_full(
+            "Edit",
+            r#"{"file_path":"/Users/ci/.claude/projects/x/memory/MEMORY.md","old_string":"a","new_string":"b"}"#,
+            r#"{"success":true}"#,
+            "sess-d1-b",
+        ),
+    );
+    assert_eq!(r.status.code(), Some(0), "stderr={}", r.stderr);
+
+    let receipts = read_receipts(&log);
+    let mem = memory_receipt(&receipts);
+    assert_eq!(mem["action_id"], "kriya.memory.update");
+    let m = &mem["params"]["kriya.memory"];
+    assert_eq!(m["class"], "claude-memory-dir");
+    assert_eq!(m["verb_basis"], "tool-edit");
+    assert_eq!(m["root"], "user-home");
+
+    let _ = std::fs::remove_dir_all(log.parent().unwrap());
+}
+
+#[test]
+fn claude_settings_write_emits_a_kriya_memory_write_receipt_class_claude_settings() {
+    let bin = build_binary();
+    let (log, key, _policy) = sandbox();
+
+    let r = run(
+        &bin,
+        "post",
+        &["--audit-log", log.to_str().unwrap(), "--signing-key", key.to_str().unwrap()],
+        &post_payload_full(
+            "Write",
+            r#"{"file_path":".claude/settings.json","content":"{\"permissions\":{}}"}"#,
+            r#"{"success":true}"#,
+            "sess-d1-c",
+        ),
+    );
+    assert_eq!(r.status.code(), Some(0), "stderr={}", r.stderr);
+
+    let receipts = read_receipts(&log);
+    let mem = memory_receipt(&receipts);
+    assert_eq!(mem["action_id"], "kriya.memory.write");
+    let m = &mem["params"]["kriya.memory"];
+    assert_eq!(m["class"], "claude-settings");
+    assert_eq!(m["root"], "project");
+
+    let _ = std::fs::remove_dir_all(log.parent().unwrap());
+}
+
+#[test]
+fn a_second_write_to_the_same_path_in_the_same_run_upgrades_to_update_prior_write_seen() {
+    let bin = build_binary();
+    let (log, key, _policy) = sandbox();
+    let args = ["--audit-log", log.to_str().unwrap(), "--signing-key", key.to_str().unwrap()];
+    let write_payload = post_payload_full(
+        "Write",
+        r#"{"file_path":"CLAUDE.md","content":"first"}"#,
+        r#"{"success":true}"#,
+        "sess-d1-scan",
+    );
+
+    let r1 = run(&bin, "post", &args, &write_payload);
+    assert_eq!(r1.status.code(), Some(0), "stderr={}", r1.stderr);
+    let r2 = run(&bin, "post", &args, &write_payload);
+    assert_eq!(r2.status.code(), Some(0), "stderr={}", r2.stderr);
+
+    let receipts = read_receipts(&log);
+    let mem_receipts: Vec<_> = receipts
+        .iter()
+        .filter(|r| r["action_id"].as_str().unwrap_or("").starts_with("kriya.memory."))
+        .collect();
+    assert_eq!(mem_receipts.len(), 2);
+    assert_eq!(mem_receipts[0]["action_id"], "kriya.memory.write");
+    assert_eq!(mem_receipts[0]["params"]["kriya.memory"]["verb_basis"], "tool-write");
+    assert_eq!(
+        mem_receipts[1]["action_id"], "kriya.memory.update",
+        "the second write to the SAME path in the SAME run is honestly upgraded to update"
+    );
+    assert_eq!(mem_receipts[1]["params"]["kriya.memory"]["verb_basis"], "prior-write-seen");
+
+    let _ = std::fs::remove_dir_all(log.parent().unwrap());
+}
+
+#[test]
+fn hash_not_content_the_written_sentinel_never_appears_in_the_memory_receipt() {
+    let bin = build_binary();
+    let (log, key, _policy) = sandbox();
+    let sentinel = "TOP-SECRET-END-TO-END-SENTINEL-4a91";
+
+    let r = run(
+        &bin,
+        "post",
+        &["--audit-log", log.to_str().unwrap(), "--signing-key", key.to_str().unwrap()],
+        &post_payload_full(
+            "Write",
+            &format!(r#"{{"file_path":"CLAUDE.md","content":"{sentinel}"}}"#),
+            r#"{"success":true}"#,
+            "sess-d1-hash",
+        ),
+    );
+    assert_eq!(r.status.code(), Some(0), "stderr={}", r.stderr);
+
+    let receipts = read_receipts(&log);
+    let mem = memory_receipt(&receipts);
+    let mem_wire = serde_json::to_string(mem).unwrap();
+    assert!(!mem_wire.contains(sentinel), "the sentinel leaked into the memory receipt");
+    let expected_hash = {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(sentinel.as_bytes()))
+    };
+    assert_eq!(mem["params"]["kriya.memory"]["content_sha256"], expected_hash);
+    assert_eq!(mem["params"]["kriya.memory"]["content_bytes"], sentinel.len());
+
+    let _ = std::fs::remove_dir_all(log.parent().unwrap());
+}
+
+#[test]
+fn a_non_memory_file_write_emits_no_kriya_memory_receipt() {
+    let bin = build_binary();
+    let (log, key, _policy) = sandbox();
+
+    let r = run(
+        &bin,
+        "post",
+        &["--audit-log", log.to_str().unwrap(), "--signing-key", key.to_str().unwrap()],
+        &post_payload_full(
+            "Write",
+            r#"{"file_path":"src/main.rs","content":"fn main() {}"}"#,
+            r#"{"success":true}"#,
+            "sess-d1-nonmem",
+        ),
+    );
+    assert_eq!(r.status.code(), Some(0), "stderr={}", r.stderr);
+    let receipts = read_receipts(&log);
+    assert!(
+        !receipts.iter().any(|r| r["action_id"].as_str().unwrap_or("").starts_with("kriya.memory.")),
+        "an ordinary source file write must never mint kriya.memory.*"
+    );
+
+    let _ = std::fs::remove_dir_all(log.parent().unwrap());
 }

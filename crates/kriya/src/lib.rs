@@ -63,6 +63,12 @@ pub mod crypto;
 pub mod llm;
 pub mod mcp;
 pub mod memory;
+// D1 (doc 27 §4 / docs/design/d1-memory-receipts.md): memory-write receipt classifier + emitter,
+// shared by the Claude Code hook (`bin/kriya-hook.rs`), the Hermes hook
+// (`bin/kriya-hermes-hook.rs`), and the MCP broker (`mcp/governor.rs`). NOT the same thing as
+// `memory` above (that's the in-process agent's own episodic SQLite recall) — see this module's
+// doc comment for the distinction.
+pub mod memwrite;
 pub mod permissions;
 pub mod protocol;
 pub mod registry;

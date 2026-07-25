@@ -70,6 +70,24 @@ pub const PQ_CHECKPOINT: &str = "kriya.crypto.pq_checkpoint";
 /// checkpoints/dual-signed receipts stay self-verifying under their inline old `pq_public_key`.
 pub const PQ_KEY: &str = "kriya.crypto.pq_key";
 
+/// Reserved `action_id`s for the D1 memory-write receipt family (doc 27 §4 /
+/// `docs/design/d1-memory-receipts.md` §D-3) — a signed, hash-only record that a governed
+/// persistent-memory surface (Claude Code's `CLAUDE.md`/memory-dir/settings files, or an
+/// operator-registered MCP memory tool) was written to. Three verbs, each a fully additive new
+/// `action_id`: no existing receipt or verifier changes shape (the doc-27 §3.1 pattern the
+/// `kriya.crypto.*`/`kriya.retention.*`/`kriya.spend.*` constants already follow). All fields ride
+/// in `params` under the reserved `kriya.memory` sub-key (mirrors `kriya.corr::RESERVED_KEY`'s
+/// placement discipline) — content is NEVER recorded, only its SHA-256 + byte size (§D-3/§3 red
+/// team). See [`crate::memwrite`] for the classifier + emitter.
+pub const MEMORY_WRITE: &str = "kriya.memory.write";
+/// See [`MEMORY_WRITE`]. An existing memory mutated (`claude-code__edit`; a `Write` to a
+/// previously-seen path in this run; an MCP `update` op).
+pub const MEMORY_UPDATE: &str = "kriya.memory.update";
+/// See [`MEMORY_WRITE`]. A memory removed — mainly the MCP registry's `delete` op; Claude Code's
+/// hook lane cannot observe a file-class delete (`Write`/`Edit` cannot delete, and `Bash` is opaque
+/// to the hook), an honest gap disclosed in `docs/TRUST.md`, not filled by a guess here.
+pub const MEMORY_DELETE: &str = "kriya.memory.delete";
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Receipt {
     pub step_id: String,
