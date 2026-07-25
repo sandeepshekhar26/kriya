@@ -87,6 +87,7 @@ use std::process::ExitCode;
 
 use kriya::audit::{default_audit_dir, now_ms, Actor, Receipt, Signer};
 use kriya::corr::{self, Correlation};
+use kriya::memwrite;
 #[cfg(target_os = "macos")]
 use kriya::mcp::GuiApproval;
 use kriya::mcp::{
@@ -933,6 +934,38 @@ fn main() -> ExitCode {
                 success,
                 &corr,
             );
+            // D1 (doc 27 §4 / docs/design/d1-memory-receipts.md D-4): classify + emit a
+            // `kriya.memory.*` receipt for a write to a governed persistent-memory surface —
+            // unconditional (no policy opt-in), mirroring the base action receipt's own always-on
+            // posture; hash-only, never content (§D-3/acceptance #2). No-op for anything not
+            // write-shaped or whose path matches none of the four confirmed classes (§D-1).
+            if let Some(surface) = memwrite::memory_surface_for(tool_name, &safe_params) {
+                let salt = load_or_create_ingress_salt(&args);
+                let (mut verb, mut basis) = memwrite::base_verb_for(tool_name);
+                if verb == memwrite::MemoryVerb::Write {
+                    if let (Some(run_id), Some(path)) = (corr.run_id.as_deref(), surface.path.as_deref()) {
+                        let path_hmac = memwrite::path_hmac_hex(&salt, path);
+                        // F4: bounded tail scan (500 lines) — never an unbounded log walk; the
+                        // fallback (basis stays tool-write) is itself honest, not a loosening.
+                        if memwrite::prior_write_seen(&resolved_audit_log_path(&args), run_id, &path_hmac, 500) {
+                            verb = memwrite::MemoryVerb::Update;
+                            basis = memwrite::VerbBasis::PriorWriteSeen;
+                        }
+                    }
+                }
+                let content = memwrite::file_write_content(&safe_params);
+                memwrite::emit_memory_receipt(
+                    &signer,
+                    Some(&actor),
+                    verb,
+                    basis,
+                    &surface,
+                    &content,
+                    success,
+                    &corr,
+                    &salt,
+                );
+            }
             // kriya.io.* receipts (doc 24 §7.3): recorded only when the policy opts in via an
             // `egress:` section, and only for a tool whose destination is knowable (WebFetch host,
             // mcp server) — Bash and file tools produce none (doc 24 §4.1).

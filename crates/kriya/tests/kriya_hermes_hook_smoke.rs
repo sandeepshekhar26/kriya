@@ -84,6 +84,14 @@ fn post_payload(tool_name: &str, status: &str) -> String {
     )
 }
 
+/// Like [`post_payload`], but with an explicit `tool_input` and `session_id` — D1's memory-write
+/// receipt fixtures need real `file_path`/`content` shapes and a stable run id to join on.
+fn post_payload_full(tool_name: &str, tool_input: &str, status: &str, session_id: &str) -> String {
+    format!(
+        r#"{{"hook_event_name":"post_tool_call","tool_name":"{tool_name}","tool_input":{tool_input},"session_id":"{session_id}","cwd":"/tmp","extra":{{"status":"{status}","result":"ok","duration_ms":12}}}}"#
+    )
+}
+
 #[test]
 fn pre_hook_actually_blocks_a_terminal_call_end_to_end() {
     let bin = build_binary();
@@ -186,4 +194,75 @@ fn post_hook_signs_the_real_outcome_from_extra_status() {
 
     let _ = std::fs::remove_dir_all(log.parent().unwrap());
     let _ = policy;
+}
+
+// =============================================================================================
+// D1 (doc 27 §4 / docs/design/d1-memory-receipts.md D-4): identical treatment on the Hermes lane
+// as `kriya-hook.rs`'s Claude Code lane — same classifier, same hash-only emitter.
+// =============================================================================================
+
+#[test]
+fn hermes_write_file_to_claude_md_emits_a_kriya_memory_write_receipt() {
+    let bin = build_binary();
+    let (log, key, _policy) = sandbox();
+
+    let r = run(
+        &bin,
+        "post",
+        &["--audit-log", log.to_str().unwrap(), "--signing-key", key.to_str().unwrap()],
+        &post_payload_full(
+            "write_file",
+            r#"{"file_path":"CLAUDE.md","content":"hermes-lane standing instructions"}"#,
+            "ok",
+            "hermes-sess-d1",
+        ),
+    );
+    assert!(r.status.success(), "stderr={}", r.stderr);
+
+    let text = std::fs::read_to_string(&log).unwrap();
+    let lines: Vec<serde_json::Value> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    let mem = lines
+        .iter()
+        .find(|v| v["action_id"].as_str().unwrap_or("").starts_with("kriya.memory."))
+        .expect("expected a kriya.memory.* receipt");
+    assert_eq!(mem["action_id"], "kriya.memory.write");
+    let m = &mem["params"]["kriya.memory"];
+    assert_eq!(m["class"], "claude-md");
+    assert_eq!(m["verb_basis"], "tool-write");
+    assert_eq!(mem["params"]["kriya.corr"]["run_id"], "hermes-sess-d1");
+    // Hash-only — the content string never appears on the wire in D1's own receipt.
+    assert!(!serde_json::to_string(mem).unwrap().contains("hermes-lane standing instructions"));
+
+    let _ = std::fs::remove_dir_all(log.parent().unwrap());
+}
+
+#[test]
+fn hermes_patch_to_a_memory_dir_file_emits_a_kriya_memory_update_receipt() {
+    let bin = build_binary();
+    let (log, key, _policy) = sandbox();
+
+    let r = run(
+        &bin,
+        "post",
+        &["--audit-log", log.to_str().unwrap(), "--signing-key", key.to_str().unwrap()],
+        &post_payload_full(
+            "patch",
+            r#"{"file_path":"/Users/ci/.claude/projects/x/memory/MEMORY.md","new_string":"updated"}"#,
+            "ok",
+            "hermes-sess-d1b",
+        ),
+    );
+    assert!(r.status.success(), "stderr={}", r.stderr);
+
+    let text = std::fs::read_to_string(&log).unwrap();
+    let lines: Vec<serde_json::Value> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    let mem = lines
+        .iter()
+        .find(|v| v["action_id"].as_str().unwrap_or("").starts_with("kriya.memory."))
+        .expect("expected a kriya.memory.* receipt");
+    assert_eq!(mem["action_id"], "kriya.memory.update");
+    assert_eq!(mem["params"]["kriya.memory"]["class"], "claude-memory-dir");
+    assert_eq!(mem["params"]["kriya.memory"]["verb_basis"], "tool-edit");
+
+    let _ = std::fs::remove_dir_all(log.parent().unwrap());
 }
