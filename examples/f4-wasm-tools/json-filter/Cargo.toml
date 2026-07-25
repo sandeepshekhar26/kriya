@@ -1,0 +1,16 @@
+[package]
+name = "json-filter"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "F4-wasm (doc 28 §F4) example governed tool #2 — a WASI-p2 JSON filter, built to run under kriya-run-wasm's Deterministic Execution lane. Not published; a fixture/demo binary."
+
+[[bin]]
+name = "json-filter"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"

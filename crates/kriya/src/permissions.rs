@@ -134,6 +134,13 @@ pub struct Policy {
     /// established).
     #[serde(default)]
     budgets: Option<BudgetPolicy>,
+    /// Optional **deterministic-execution lane routing** (F4-wasm, doc 28 §F4): when a tool has a
+    /// registered WASM variant AND `prefer_deterministic_lane` is on, governed calls to it route
+    /// through `kriya-run-wasm`'s engine instead of the tool's normal executor — see
+    /// [`ExecPolicy`]. Absent by default → byte-identical to pre-F4-wasm behaviour (the same BC
+    /// discipline `egress`/`detection`/`secrets`/`model`/`budgets` already established).
+    #[serde(default)]
+    exec: Option<ExecPolicy>,
 }
 
 impl Default for Policy {
@@ -172,6 +179,7 @@ impl Default for Policy {
             a2a: None,
             model: None,
             budgets: None,
+            exec: None,
         }
     }
 }
@@ -254,6 +262,27 @@ impl Policy {
     /// performs no budget consult at all, byte-identical to pre-C2 behaviour.
     pub fn budgets(&self) -> Option<&BudgetPolicy> {
         self.budgets.as_ref()
+    }
+
+    /// The deterministic-execution lane routing policy (F4-wasm, doc 28 §F4), if configured.
+    /// `None` → no action is ever routed to the WASM lane, byte-identical to pre-F4-wasm.
+    pub fn exec(&self) -> Option<&ExecPolicy> {
+        self.exec.as_ref()
+    }
+
+    /// The WASI-p2 component path registered for `action_id`'s deterministic-execution variant,
+    /// IF `prefer_deterministic_lane` is on AND a variant is registered — `None` in every other
+    /// case (no `exec:` section, the lane is off, or this action has no registered variant), which
+    /// is exactly "route to it when a WASM variant is registered; receipted either way" (doc 28
+    /// §F4 build spec item 4): whichever path a caller takes, the existing action receipt (or, on
+    /// the WASM lane, the `kriya.exec.deterministic` receipt alongside it) still gets emitted —
+    /// this method only decides WHICH executor runs, never whether a receipt is signed.
+    pub fn resolve_wasm_variant(&self, action_id: &str) -> Option<&str> {
+        let exec = self.exec.as_ref()?;
+        if !exec.prefer_deterministic_lane {
+            return None;
+        }
+        exec.wasm_variants.get(action_id).map(String::as_str)
     }
 
     pub fn check(&self, action_id: &str) -> Decision {
@@ -403,6 +432,7 @@ pub fn default_broker_policy(namespaces: &[String]) -> Policy {
         a2a: None,
         model: None,
         budgets: None,
+        exec: None,
     }
 }
 
@@ -457,6 +487,7 @@ pub fn default_proxy_policy() -> Policy {
         a2a: None,
         model: None,
         budgets: None,
+        exec: None,
     }
 }
 
@@ -839,6 +870,32 @@ impl ModelPolicy {
             },
         }
     }
+}
+
+// ─── F4-wasm (doc 28 §F4): deterministic-execution lane routing ──────────────────────────────
+//
+// Deliberately the SIMPLEST policy shape in this file: no tiers, no allow/approval/deny space —
+// this is a ROUTING decision (which executor runs a cleared action), not a NEW gate. The action
+// still goes through `Policy::check` exactly as before; a registered WASM variant only changes
+// HOW an already-allowed action executes, and either path signs a receipt (the normal action
+// receipt, or that PLUS `kriya.exec.deterministic` on the WASM lane) — see
+// `Policy::resolve_wasm_variant`.
+
+/// The deterministic-execution lane routing policy (F4-wasm). Deserialized from the SAME
+/// `agent-policy.yaml` every other governed binary loads, under an optional `exec:` key.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ExecPolicy {
+    /// The tier switch (doc 28 §F4 build spec item 4: "a tier option 'prefer deterministic
+    /// lane'"). `false` (default) → `wasm_variants` is inert even if populated, so authoring the
+    /// registry ahead of flipping this on is safe (no surprise routing change from an
+    /// otherwise-unrelated edit).
+    #[serde(default)]
+    pub prefer_deterministic_lane: bool,
+    /// `action_id` → path to a WASI-p2 component implementing the SAME action, built for
+    /// `kriya-run-wasm`. An action with no entry here never routes to the WASM lane regardless of
+    /// `prefer_deterministic_lane`.
+    #[serde(default)]
+    pub wasm_variants: std::collections::BTreeMap<String, String>,
 }
 
 /// Match an operator-authored **host pattern** against a concrete host — the internal compile
@@ -2696,6 +2753,69 @@ model:
         let yaml = "rules: [{action: \"*\", allow: true}]\n";
         let policy: Policy = serde_yaml::from_str(yaml).expect("parses");
         assert!(policy.model().is_none());
+    }
+
+    // ─── F4-wasm — deterministic-execution lane routing (doc 28 §F4) ─────────────────────────────
+
+    #[test]
+    fn exec_absent_from_yaml_means_no_routing_at_all() {
+        let yaml = "rules: [{action: \"*\", allow: true}]\n";
+        let policy: Policy = serde_yaml::from_str(yaml).expect("parses");
+        assert!(policy.exec().is_none());
+        assert_eq!(policy.resolve_wasm_variant("summarize_text"), None);
+    }
+
+    #[test]
+    fn exec_policy_parses_from_the_same_agent_policy_yaml_shape() {
+        let yaml = r#"
+rules: [{action: "*", allow: true}]
+exec:
+  prefer_deterministic_lane: true
+  wasm_variants:
+    summarize_text: "tools/text-transform.wasm"
+    filter_records: "tools/json-filter.wasm"
+"#;
+        let policy: Policy = serde_yaml::from_str(yaml).expect("exec: section parses");
+        let exec = policy.exec().expect("exec policy present");
+        assert!(exec.prefer_deterministic_lane);
+        assert_eq!(exec.wasm_variants.len(), 2);
+        assert_eq!(
+            policy.resolve_wasm_variant("summarize_text"),
+            Some("tools/text-transform.wasm")
+        );
+        assert_eq!(policy.resolve_wasm_variant("filter_records"), Some("tools/json-filter.wasm"));
+    }
+
+    #[test]
+    fn exec_policy_never_routes_an_unregistered_action() {
+        let yaml = r#"
+rules: [{action: "*", allow: true}]
+exec:
+  prefer_deterministic_lane: true
+  wasm_variants:
+    summarize_text: "tools/text-transform.wasm"
+"#;
+        let policy: Policy = serde_yaml::from_str(yaml).expect("parses");
+        assert_eq!(policy.resolve_wasm_variant("some_other_action"), None);
+    }
+
+    #[test]
+    fn exec_policy_registry_is_inert_when_the_tier_switch_is_off() {
+        // Authoring the registry ahead of flipping the switch must be safe — no surprise routing
+        // change just from listing variants.
+        let yaml = r#"
+rules: [{action: "*", allow: true}]
+exec:
+  wasm_variants:
+    summarize_text: "tools/text-transform.wasm"
+"#;
+        let policy: Policy = serde_yaml::from_str(yaml).expect("parses");
+        assert!(!policy.exec().unwrap().prefer_deterministic_lane, "default is off");
+        assert_eq!(
+            policy.resolve_wasm_variant("summarize_text"),
+            None,
+            "a registered variant must not route while the tier switch is off"
+        );
     }
 
     // ─── C2 — endpoint budget gate (doc 27 §4 / docs/design/c2-budget-gate.md) ───────────────────

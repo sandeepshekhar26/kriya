@@ -30,6 +30,14 @@ name = "kriya-llm-proxy"
 path = "src/bin/kriya-llm-proxy.rs"
 required-features = ["llm-proxy"]
 
+# F4-wasm (doc 28 §F4): the Deterministic Execution lane — record + re-verify a WASI-p2 component
+# run under pinned Wasmtime with the deterministic configuration. Same declared-binary convention;
+# built only when `wasm-exec` is on.
+[[bin]]
+name = "kriya-run-wasm"
+path = "src/bin/kriya-run-wasm.rs"
+required-features = ["wasm-exec"]
+
 [features]
 # Full host by default — existing Tauri apps and the cloud LLM backends keep working unchanged.
 default = ["tauri-host", "http-inference"]
@@ -103,6 +111,21 @@ pq-crypto = ["dep:aws-lc-rs", "aws-lc-rs/unstable"]
 # already use for the proxy's OUTBOUND leg — the inbound listener is hand-rolled std `TcpListener`,
 # same idiom as `mcp::contain::ConnectProxy`, so no HTTP-server crate is pulled in either).
 llm-proxy = ["dep:ureq"]
+# F4-wasm (doc 28 §F4, "Deterministic Execution" — re-EXECUTION, never confused with B1's
+# "Verified Replay" re-DERIVATION, see the module doc): the `wasmexec` module + `kriya-run-wasm`
+# binary — executes a WASI-p2 component under pinned-version Wasmtime with the deterministic
+# configuration (fuel metering, NaN canonicalization, no threads/relaxed-SIMD, virtualized
+# clocks/random) and re-runs it to hash-compare on `--verify`. Off by default; pulls in `wasmtime`
+# + `wasmtime-wasi` (the ONLY heavy new dependency this crate has ever added — accepted because it
+# is the deterministic-execution engine itself, not incidental). Pinned to the exact `41.0.4`
+# release — the newest wasmtime line whose declared MSRV (1.90.0) still matches this repo's pinned
+# `rust-toolchain.toml` (verified against every wasmtime release's `rust-version`: 42+ all require
+# rustc ≥1.91, up to 47.0.2 needing 1.94 — bumping the shared toolchain would ripple into
+# apps/note-app and apps/task-manager's "builds uniformly" pin, which this feature has no reason to
+# force). Convenient bonus: wasmtime-wasi 41.0.4 depends on the SAME `rand` 0.8 line this crate
+# already uses elsewhere, so `WasiCtxBuilder::secure_random`/`insecure_random`'s seeded RNGs are
+# built from the crate's existing `rand` dependency — no second `rand` version needed.
+wasm-exec = ["dep:wasmtime", "dep:wasmtime-wasi"]
 
 [dependencies]
 tauri = { version = "2", features = [], optional = true }
@@ -131,6 +154,12 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 # Front 3 (computer-use) only — base64-encode the screenshot PNG into the tool's image result.
 # Cross-platform + optional, pulled solely by the `computer-use` feature; default build never sees it.
 base64 = { version = "0.22", optional = true }
+# F4-wasm only (see the `wasm-exec` feature note above). Pinned to an exact patch (`=41.0.4` — the
+# rustc-1.90-compatible line, see the feature comment) so the recorded `wasmtime_version` +
+# `config_digest` in a run bundle are reproducible build-to-build, not silently drifting under a
+# caret range.
+wasmtime = { version = "=41.0.4", optional = true }
+wasmtime-wasi = { version = "=41.0.4", optional = true }
 
 # Unix-only: advisory flock on the audit log so CONCURRENT writers of one chain (e.g. parallel
 # kriya-hook invocations, each a fresh process) serialize their [re-seed tail -> append] and the
