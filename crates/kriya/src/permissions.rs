@@ -2,7 +2,7 @@
 //! before the host asks the app to run it. Default is deny-unknown; deletes require
 //! human approval (no approval queue exists yet in Phase 0, so they are held/denied).
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::agent::inference::retry::RetryPolicy;
@@ -148,6 +148,13 @@ pub struct Policy {
     /// `egress`/`detection`/`secrets`/`model`/`budgets`/`exec` already established).
     #[serde(default)]
     memory: Option<Vec<MemoryRegistryEntry>>,
+    /// B4 (doc 27 §4 / `docs/design/b4-temporal-conditions.md`): a small, closed set of
+    /// session-scoped, cross-event preconditions layered on top of the action tier ("deny X unless
+    /// Y happened/succeeded earlier this session"). Absent `temporal:` ⇒ the hook `pre` lane performs
+    /// no temporal consult at all, byte-identical to pre-B4 behaviour (the same BC discipline
+    /// `egress`/`detection`/`secrets`/`model`/`budgets`/`exec`/`memory` already established).
+    #[serde(default)]
+    temporal: Option<TemporalPolicy>,
 }
 
 impl Default for Policy {
@@ -188,6 +195,7 @@ impl Default for Policy {
             budgets: None,
             exec: None,
             memory: None,
+            temporal: None,
         }
     }
 }
@@ -319,6 +327,12 @@ impl Policy {
             return None;
         }
         exec.wasm_variants.get(action_id).map(String::as_str)
+    }
+
+    /// B4 (doc 27 §4): the temporal-conditions policy, if configured. `None` → the hook `pre` lane
+    /// performs no temporal consult at all, byte-identical to pre-B4 behaviour.
+    pub fn temporal(&self) -> Option<&TemporalPolicy> {
+        self.temporal.as_ref()
     }
 
     pub fn check(&self, action_id: &str) -> Decision {
@@ -470,6 +484,7 @@ pub fn default_broker_policy(namespaces: &[String]) -> Policy {
         budgets: None,
         exec: None,
         memory: None,
+        temporal: None,
     }
 }
 
@@ -526,6 +541,7 @@ pub fn default_proxy_policy() -> Policy {
         budgets: None,
         exec: None,
         memory: None,
+        temporal: None,
     }
 }
 
@@ -1977,6 +1993,696 @@ fn now_for_day_label() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+// ─── B4 — Temporal policy conditions (doc 27 §4 / docs/design/b4-temporal-conditions.md) ─────────
+//
+// A small, CLOSED set of session-scoped, cross-event preconditions layered on top of the action
+// tier: "deny X unless Y happened/succeeded earlier this session" (axiom 5 — TIGHTEN-ONLY: a
+// temporal rule can only escalate the `Decision` `Policy::check` already resolved above, never
+// re-open a Deny/ungranted-approval; `Policy::check`, `Rule`, and every existing `Rule {…}` literal
+// are UNTOUCHED by this section). Evidence is a fold over THIS SESSION's own verified, GOVERNED
+// receipts (axiom 3) — never an unbounded or cross-session scan. [`crate::session_cond::SessionEvent`]
+// (the fold's OUTPUT type) is defined in that sibling module, not here — exactly like
+// `BudgetPolicy::check` takes a `&crate::spend_state::SpendState` it does not itself define; this
+// module owns only the pure schema + evaluator (D1/D3), `session_cond` owns the fold/cache/
+// governance-filter/verification half.
+
+use crate::session_cond::SessionEvent;
+
+/// A case-sensitive literal SUBSTRING match on a Bash-lane `command` (D1, Red-team b) — never
+/// glob/regex, and never argv parsing (env-assignments/pipes/`&&`/quoting make that non-
+/// deterministic, a worse ambiguity than substring). `contains: "test"` also matches `latest`; the
+/// documented mitigation is operator precision, surfaced by the Console's authoring lint.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CommandMatch {
+    pub contains: String,
+}
+
+/// Filters a selector's match SET by the prior receipt's `success` bool (D1). Meaningless for the
+/// rule's own subject selector (matching the CURRENT, not-yet-executed action, which has no
+/// `success` yet — axiom 2) — only ever consulted for a condition's selector over prior events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Outcome {
+    Any,
+    Success,
+    Failure,
+}
+
+impl Default for Outcome {
+    fn default() -> Self {
+        Outcome::Any
+    }
+}
+
+/// The closed, two-dimension selector (D1) — always operator-authored, never agent free-text.
+/// `action` reuses the SAME glob semantics as a policy `Rule.action` ([`matches`], this module).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Selector {
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<CommandMatch>,
+    #[serde(default)]
+    pub outcome: Outcome,
+}
+
+impl Selector {
+    /// D1: does `event` (a folded prior receipt) match this selector?
+    fn matches_event(&self, event: &SessionEvent) -> bool {
+        if !matches(&self.action, &event.action_id) {
+            return false;
+        }
+        if let Some(cm) = &self.command {
+            match &event.command {
+                Some(c) if c.contains(&cm.contains) => {}
+                _ => return false,
+            }
+        }
+        match self.outcome {
+            Outcome::Any => true,
+            Outcome::Success => event.success,
+            Outcome::Failure => !event.success,
+        }
+    }
+
+    /// Does this selector match the CURRENT gated action (not a folded session event)? There is no
+    /// `success`/`ts_ms` for an in-flight action (axiom 2), so `outcome` never applies here — only
+    /// `action`/`command` are meaningful for a rule's subject selector.
+    fn matches_current(&self, action_id: &str, command: Option<&str>) -> bool {
+        if !matches(&self.action, action_id) {
+            return false;
+        }
+        if let Some(cm) = &self.command {
+            match command {
+                Some(c) if c.contains(&cm.contains) => {}
+                _ => return false,
+            }
+        }
+        true
+    }
+}
+
+/// D1: does `event` match `selector`? A free function (not just the `Selector` method) so a fixture
+/// test can call the fold-agnostic matcher directly, matching this module's exported shape.
+pub fn matches_selector(event: &SessionEvent, selector: &Selector) -> bool {
+    selector.matches_event(event)
+}
+
+/// happened | succeeded | count | since_minutes (D1) — one shared primitive (a fold + match set),
+/// four names. `succeeded(S)` is the sugar `happened(S, outcome=success)`: it reads the match set
+/// under `S` with `outcome` FORCED to `success` regardless of what the operator's own selector says
+/// (see [`effective_selector_for`]) — the receipt trace echoes that effective selector (D4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Predicate {
+    Happened,
+    Succeeded,
+    Count,
+    SinceMinutes,
+}
+
+/// satisfied (default) | unsatisfied — the closed-set stand-in for a NOT operator (D1). A rule's
+/// `when:` is a conjunction: it matches only when EVERY condition's `observed` boolean equals its
+/// own `expect`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Expect {
+    Satisfied,
+    Unsatisfied,
+}
+
+impl Default for Expect {
+    fn default() -> Self {
+        Expect::Satisfied
+    }
+}
+
+/// `>=` | `<=` | `==` — meaningful only for `count`/`since_minutes` (D1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Cmp {
+    #[serde(rename = ">=")]
+    Ge,
+    #[serde(rename = "<=")]
+    Le,
+    #[serde(rename = "==")]
+    Eq,
+}
+
+/// One condition inside a rule's `when:` (D1/D3). `cmp`/`n` are `count`'s own fields; `cmp`/`t`
+/// (minutes) are `since_minutes`'s — both are `Option` since only one predicate ever reads them
+/// (unused-for-this-predicate fields are simply ignored, never a parse error).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Condition {
+    pub predicate: Predicate,
+    pub selector: Selector,
+    #[serde(default)]
+    pub expect: Expect,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cmp: Option<Cmp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub n: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub t: Option<i64>,
+}
+
+/// fail-closed | fail-open | require-approval — the posture when the session fold itself is
+/// UNAVAILABLE (D2: the log is unreadable — an I/O error, never merely "empty"). `None` on a rule
+/// defaults per-tier via [`default_on_unavailable`], mirroring `OnMissingState`'s per-tier default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OnUnavailable {
+    FailClosed,
+    FailOpen,
+    RequireApproval,
+}
+
+/// Per-tier default `on_unavailable` posture (D2), mirroring `default_on_missing`: a `deny` rule
+/// defaults fail-closed, `approval` defaults to routing through approval. `allow` is unreachable in
+/// practice (a `tier: allow` temporal rule is a rejected no-op at authoring time, D3) but still
+/// needs a total mapping; fail-open is the honest answer (there is nothing to tighten either way).
+pub fn default_on_unavailable(tier: Tier) -> OnUnavailable {
+    match tier {
+        Tier::Deny => OnUnavailable::FailClosed,
+        Tier::Approval => OnUnavailable::RequireApproval,
+        Tier::Allow => OnUnavailable::FailOpen,
+    }
+}
+
+/// allow | approval | deny (D3) — reuses the SAME tier space a `Rule`'s decision resolves to; a
+/// matched temporal rule may only ESCALATE the already-resolved action-tier decision, never loosen
+/// it (axiom 5). `Tier::Allow` is retained here for schema completeness (an authored rule can name
+/// it) but [`TemporalPolicy::evaluate`] treats a matched `allow`-tier rule as a no-op `Pass` —
+/// defense in depth alongside the Console authoring lint that rejects it up front.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Tier {
+    Allow,
+    Approval,
+    Deny,
+}
+
+/// One temporal rule (D1/D3): a subject `selector` matching the CURRENT action, a `tier` to
+/// escalate to when every `when:` condition holds, and the posture when the session fold can't be
+/// computed.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct TemporalRule {
+    pub id: String,
+    pub selector: Selector,
+    pub tier: Tier,
+    #[serde(default)]
+    pub when: Vec<Condition>,
+    #[serde(default)]
+    pub on_unavailable: Option<OnUnavailable>,
+}
+
+impl TemporalRule {
+    /// The EFFECTIVE `on_unavailable` posture: the authored override, or this rule's per-tier
+    /// default (D2).
+    pub fn on_unavailable_posture(&self) -> OnUnavailable {
+        self.on_unavailable.unwrap_or_else(|| default_on_unavailable(self.tier))
+    }
+}
+
+/// The `temporal:` policy section (D3) — additive nullable, exactly like `budgets`/`memory` before
+/// it (BC-3: no `temporal:` key when unauthored — a pre-B4 policy round-trips byte-identically).
+/// First-match-wins over `rules`, same discipline as the action tier.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct TemporalPolicy {
+    #[serde(default)]
+    pub rules: Vec<TemporalRule>,
+}
+
+impl TemporalPolicy {
+    /// The FIRST rule (first-match-wins order) whose subject selector matches the current gated
+    /// action, if any — used both by `evaluate` below and by the hook's `on_unavailable` handling
+    /// when the session fold itself could not be computed (so there is no `events` to evaluate
+    /// `when:` against, but the CURRENT-action match is still knowable without it).
+    pub fn first_matching_rule(&self, action_id: &str, command: Option<&str>) -> Option<&TemporalRule> {
+        self.rules.iter().find(|r| r.selector.matches_current(action_id, command))
+    }
+}
+
+/// One evaluated condition's full trace — the privacy-audited param set for a `kriya.policy.cond.*`
+/// receipt (D4): ids/patterns/counts/bools/timestamps only, NEVER the agent's command content.
+/// `selector` here is the EFFECTIVE selector actually evaluated (for `succeeded`, `outcome` forced
+/// to `success` — see [`effective_selector_for`]), so the receipt shows exactly what was checked.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ConditionRecord {
+    pub predicate: Predicate,
+    pub selector: Selector,
+    pub expect: Expect,
+    /// The predicate's raw boolean (before comparing against `expect`).
+    pub observed: bool,
+    /// Size of the match set the predicate read (metadata, never content).
+    pub match_count: u64,
+    /// The most-recent matching event's `ts_ms`, if any (`since_minutes` support).
+    pub last_match_ms: Option<u64>,
+    /// `observed == (expect == Satisfied)` — whether this condition contributed to the rule match.
+    pub result: bool,
+}
+
+/// The full `kriya.policy.cond.*` receipt trace for one matched temporal rule (D4). `index_as_of_ms`
+/// / `index_source` describe the FOLD's freshness (honesty, like C2's `state_as_of_ms`) — set here
+/// to a live-gate-appropriate default (`now_ms` / `"cache"`) and patched by the caller when it knows
+/// better (e.g. `"rebuilt"` after a cold-cache full refold, or `"unavailable"` on a fold failure).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CondRecord {
+    pub rule_id: String,
+    pub action_id: String,
+    pub subject_selector: Selector,
+    pub tier: Tier,
+    pub conditions: Vec<ConditionRecord>,
+    pub now_ms: u64,
+    pub index_as_of_ms: u64,
+    pub index_source: &'static str, // "cache" | "rebuilt" | "unavailable"
+}
+
+/// The temporal gate's decision for one `kriya-hook pre` call (D3/D4) — mirrors the shape of
+/// `BudgetGateDecision`. **No `Warn` variant (M-1):** the observe-only path is a reserved v2 lever;
+/// `kriya.policy.cond.warn` is reserved-not-emitted and this enum has no arm to construct it in v1.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TemporalDecision {
+    /// No rule matched (or the one matched rule was `tier: allow`, D3's no-op case) — the action
+    /// proceeds; no receipt is signed for a temporal `Pass` (mirrors the budget gate's `Pass`).
+    Pass,
+    /// A `tier: approval` rule matched — the caller must route through the SAME approval gate the
+    /// action tier / C2 budget gate use.
+    Approval(CondRecord),
+    /// A `tier: deny` rule matched — the caller must block immediately (exit 2 on the hook lane).
+    Deny(CondRecord),
+}
+
+/// The selector actually evaluated for `condition` — `succeeded` FORCES `outcome: success`
+/// regardless of what the operator's own selector says (D1: "succeeded(S) is the sugar
+/// happened(S, outcome=success)"); every other predicate uses the selector exactly as authored.
+fn effective_selector_for(condition: &Condition) -> Selector {
+    if condition.predicate == Predicate::Succeeded {
+        Selector { outcome: Outcome::Success, ..condition.selector.clone() }
+    } else {
+        condition.selector.clone()
+    }
+}
+
+/// D1: evaluate one `Condition`'s boolean over `events` as of `now_ms` — the fold-agnostic
+/// evaluator a fixture test can call directly. `now_ms` is the ONLY clock this whole feature reads,
+/// and only for `since_minutes`, and only via this explicit parameter (D2's determinism seam: same
+/// `events` + same `now_ms` ⇒ same verdict, on any platform, at any time the replay is run).
+pub fn evaluate_condition(events: &[SessionEvent], condition: &Condition, now_ms: u64) -> bool {
+    trace_condition(events, condition, now_ms).0
+}
+
+/// Same evaluation as [`evaluate_condition`], but also returns the full trace a `ConditionRecord`
+/// needs: `(observed, match_count, last_match_ms, effective_selector)`. One implementation, two
+/// callers — the bare boolean above, and [`TemporalPolicy::evaluate`] below.
+fn trace_condition(events: &[SessionEvent], condition: &Condition, now_ms: u64) -> (bool, u64, Option<u64>, Selector) {
+    let effective = effective_selector_for(condition);
+    let match_events: Vec<&SessionEvent> = events.iter().filter(|e| matches_selector(e, &effective)).collect();
+    let match_count = match_events.len() as u64;
+    let last_match_ms = match_events.iter().map(|e| e.ts_ms).max();
+
+    let observed = match condition.predicate {
+        // `succeeded` shares `happened`'s ">= 1 match" shape — the only difference is that its
+        // `effective` selector above already forced `outcome: success` onto the match set.
+        Predicate::Happened | Predicate::Succeeded => match_count >= 1,
+        Predicate::Count => {
+            let n = condition.n.unwrap_or(0);
+            let count = match_count as i64;
+            match condition.cmp.unwrap_or(Cmp::Ge) {
+                Cmp::Ge => count >= n,
+                Cmp::Le => count <= n,
+                Cmp::Eq => count == n,
+            }
+        }
+        Predicate::SinceMinutes => {
+            // No match ⇒ age = +∞ (D1) — an absent precondition is "infinitely long ago," never
+            // "just happened," so `since_minutes(S) <= t` correctly reads false with no match.
+            let age_minutes: i64 = match last_match_ms {
+                Some(ts) => ((now_ms.saturating_sub(ts)) / 60_000) as i64,
+                None => i64::MAX,
+            };
+            let t = condition.t.unwrap_or(0);
+            match condition.cmp.unwrap_or(Cmp::Le) {
+                Cmp::Ge => age_minutes >= t,
+                Cmp::Le => age_minutes <= t,
+                Cmp::Eq => age_minutes == t,
+            }
+        }
+    };
+    (observed, match_count, last_match_ms, effective)
+}
+
+impl TemporalPolicy {
+    /// D1/D3: evaluate this session's temporal rules against the CURRENT gated action
+    /// (`action_id`/`command`), over `events` (this session's already-folded, verified, governed
+    /// PRIOR receipts — axiom 3 / [`crate::session_cond`]), as of `now_ms`. Pure: no I/O, no clock
+    /// read except via the explicit `now_ms` parameter (D2). First-match-wins over `rules`, the
+    /// same discipline [`Policy::check`] uses for the action tier.
+    pub fn evaluate(
+        &self,
+        events: &[SessionEvent],
+        action_id: &str,
+        command: Option<&str>,
+        now_ms: u64,
+    ) -> TemporalDecision {
+        for rule in &self.rules {
+            if !rule.selector.matches_current(action_id, command) {
+                continue;
+            }
+            let mut conditions = Vec::with_capacity(rule.when.len());
+            let mut all_hold = true;
+            for cond in &rule.when {
+                let (observed, match_count, last_match_ms, effective_selector) =
+                    trace_condition(events, cond, now_ms);
+                let result = observed == (cond.expect == Expect::Satisfied);
+                if !result {
+                    all_hold = false;
+                }
+                conditions.push(ConditionRecord {
+                    predicate: cond.predicate,
+                    selector: effective_selector,
+                    expect: cond.expect,
+                    observed,
+                    match_count,
+                    last_match_ms,
+                    result,
+                });
+            }
+            if !all_hold {
+                continue; // this rule's `when:` did not fully hold — not a match, try the next rule
+            }
+            // Matched. Tighten-only (axiom 5, D3): the authoring-time lint is what actually keeps a
+            // `tier: allow` rule from being authored in the first place; treating a matched
+            // `allow`-tier rule as a no-op `Pass` here is defense in depth, never a behavior an
+            // operator can rely on to loosen anything (there is nothing to loosen — `evaluate` is
+            // only ever consulted after `Policy::check` already resolved Allow/granted-approval).
+            if rule.tier == Tier::Allow {
+                return TemporalDecision::Pass;
+            }
+            let record = CondRecord {
+                rule_id: rule.id.clone(),
+                action_id: action_id.to_string(),
+                subject_selector: rule.selector.clone(),
+                tier: rule.tier,
+                conditions,
+                now_ms,
+                index_as_of_ms: now_ms,
+                index_source: "cache",
+            };
+            return match rule.tier {
+                Tier::Allow => unreachable!("handled above"),
+                Tier::Approval => TemporalDecision::Approval(record),
+                Tier::Deny => TemporalDecision::Deny(record),
+            };
+        }
+        TemporalDecision::Pass
+    }
+}
+
+#[cfg(test)]
+mod temporal_tests {
+    use super::*;
+
+    fn ev(action_id: &str, success: bool, ts_ms: u64, command: Option<&str>) -> SessionEvent {
+        SessionEvent { action_id: action_id.to_string(), success, ts_ms, command: command.map(str::to_string) }
+    }
+
+    fn sel(action: &str, command_contains: Option<&str>) -> Selector {
+        Selector {
+            action: action.to_string(),
+            command: command_contains.map(|c| CommandMatch { contains: c.to_string() }),
+            outcome: Outcome::Any,
+        }
+    }
+
+    fn cond(predicate: Predicate, selector: Selector, expect: Expect) -> Condition {
+        Condition { predicate, selector, expect, cmp: None, n: None, t: None }
+    }
+
+    // ── happened / succeeded ──────────────────────────────────────────────────────────────────
+    #[test]
+    fn happened_true_iff_at_least_one_prior_match() {
+        let events = vec![ev("claude-code__bash", false, 100, Some("npm test"))];
+        let c = cond(Predicate::Happened, sel("claude-code__bash", Some("npm test")), Expect::Satisfied);
+        assert!(evaluate_condition(&events, &c, 200));
+
+        let c2 = cond(Predicate::Happened, sel("claude-code__bash", Some("npm lint")), Expect::Satisfied);
+        assert!(!evaluate_condition(&events, &c2, 200));
+    }
+
+    #[test]
+    fn succeeded_requires_success_even_when_a_matching_failure_exists() {
+        let events = vec![
+            ev("claude-code__bash", false, 100, Some("npm test")), // matches but FAILED
+        ];
+        let c = cond(Predicate::Succeeded, sel("claude-code__bash", Some("npm test")), Expect::Satisfied);
+        assert!(!evaluate_condition(&events, &c, 200), "a failed matching event must not satisfy succeeded()");
+
+        let events2 = vec![
+            ev("claude-code__bash", false, 100, Some("npm test")),
+            ev("claude-code__bash", true, 150, Some("npm test")),
+        ];
+        assert!(evaluate_condition(&events2, &c, 200), "a later successful match must satisfy succeeded()");
+    }
+
+    #[test]
+    fn succeeded_ignores_an_authored_outcome_failure_by_forcing_success() {
+        // succeeded(S) is the sugar happened(S, outcome=success) regardless of what the operator's
+        // own selector.outcome says (D1) — an authored outcome:failure never makes succeeded() see
+        // a successful event as satisfying it via some OR-of-filters confusion.
+        let mut s = sel("claude-code__bash", Some("npm test"));
+        s.outcome = Outcome::Failure;
+        let events = vec![ev("claude-code__bash", true, 100, Some("npm test"))];
+        let c = cond(Predicate::Succeeded, s, Expect::Satisfied);
+        assert!(evaluate_condition(&events, &c, 200));
+    }
+
+    // ── count ──────────────────────────────────────────────────────────────────────────────────
+    #[test]
+    fn count_ge_le_eq_comparators() {
+        let events = vec![
+            ev("claude-code__bash", true, 100, Some("npm test")),
+            ev("claude-code__bash", true, 200, Some("npm test")),
+            ev("claude-code__bash", false, 300, Some("npm test")),
+        ];
+        let mut c = cond(Predicate::Count, sel("claude-code__bash", Some("npm test")), Expect::Satisfied);
+        c.cmp = Some(Cmp::Ge);
+        c.n = Some(3);
+        assert!(evaluate_condition(&events, &c, 400));
+
+        c.cmp = Some(Cmp::Le);
+        c.n = Some(2);
+        assert!(!evaluate_condition(&events, &c, 400));
+
+        c.cmp = Some(Cmp::Eq);
+        c.n = Some(3);
+        assert!(evaluate_condition(&events, &c, 400));
+    }
+
+    #[test]
+    fn count_reads_every_match_not_just_successes() {
+        // count(S) is |match(S)| — attempts, not successes (D1); narrow with outcome: success.
+        let events = vec![
+            ev("claude-code__bash", false, 100, Some("npm test")),
+            ev("claude-code__bash", false, 200, Some("npm test")),
+        ];
+        let mut c = cond(Predicate::Count, sel("claude-code__bash", Some("npm test")), Expect::Satisfied);
+        c.cmp = Some(Cmp::Ge);
+        c.n = Some(2);
+        assert!(evaluate_condition(&events, &c, 300));
+    }
+
+    // ── since_minutes ──────────────────────────────────────────────────────────────────────────
+    #[test]
+    fn since_minutes_no_match_is_plus_infinity() {
+        let events: Vec<SessionEvent> = vec![];
+        let mut c = cond(Predicate::SinceMinutes, sel("claude-code__bash", Some("npm test")), Expect::Satisfied);
+        c.cmp = Some(Cmp::Le);
+        c.t = Some(30);
+        assert!(!evaluate_condition(&events, &c, 1_000_000), "no match ever satisfies a <= age bound");
+    }
+
+    #[test]
+    fn since_minutes_reads_the_most_recent_match() {
+        let events = vec![
+            ev("claude-code__bash", true, 0, Some("npm test")),
+            ev("claude-code__bash", true, 10 * 60_000, Some("npm test")), // 10 min after epoch
+        ];
+        let mut c = cond(Predicate::SinceMinutes, sel("claude-code__bash", Some("npm test")), Expect::Satisfied);
+        c.cmp = Some(Cmp::Le);
+        c.t = Some(15);
+        // now = 20 minutes after epoch -> most recent match (10 min) is 10 minutes ago -> <= 15 holds
+        assert!(evaluate_condition(&events, &c, 20 * 60_000));
+        c.t = Some(5);
+        assert!(!evaluate_condition(&events, &c, 20 * 60_000));
+    }
+
+    // ── the canonical demo: deny git push unless npm test succeeded ───────────────────────────────
+    fn canonical_policy() -> TemporalPolicy {
+        TemporalPolicy {
+            rules: vec![TemporalRule {
+                id: "deny-push-without-tests".to_string(),
+                selector: sel("claude-code__bash", Some("git push")),
+                tier: Tier::Deny,
+                when: vec![Condition {
+                    predicate: Predicate::Succeeded,
+                    selector: sel("claude-code__bash", Some("npm test")),
+                    expect: Expect::Unsatisfied,
+                    cmp: None,
+                    n: None,
+                    t: None,
+                }],
+                on_unavailable: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn canonical_demo_denies_push_with_no_prior_successful_test() {
+        let policy = canonical_policy();
+        let events: Vec<SessionEvent> = vec![];
+        let decision = policy.evaluate(&events, "claude-code__bash", Some("git push origin main"), 1000);
+        match decision {
+            TemporalDecision::Deny(rec) => {
+                assert_eq!(rec.rule_id, "deny-push-without-tests");
+                assert_eq!(rec.conditions.len(), 1);
+                assert!(!rec.conditions[0].observed);
+                assert_eq!(rec.conditions[0].match_count, 0);
+                assert!(rec.conditions[0].result, "unsatisfied expected + observed=false -> result true -> rule matches");
+            }
+            other => panic!("expected Deny, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn canonical_demo_allows_push_after_a_successful_test_this_session() {
+        let policy = canonical_policy();
+        let events = vec![ev("claude-code__bash", true, 500, Some("npm test"))];
+        let decision = policy.evaluate(&events, "claude-code__bash", Some("git push origin main"), 1000);
+        assert_eq!(decision, TemporalDecision::Pass);
+    }
+
+    #[test]
+    fn a_non_matching_action_never_triggers_the_rule() {
+        let policy = canonical_policy();
+        let decision = policy.evaluate(&[], "claude-code__write", None, 1000);
+        assert_eq!(decision, TemporalDecision::Pass);
+    }
+
+    #[test]
+    fn command_matching_is_case_sensitive_substring_not_glob() {
+        let s = sel("claude-code__bash", Some("npm test"));
+        assert!(s.matches_current("claude-code__bash", Some("cd repo && npm test -- --watch")));
+        assert!(!s.matches_current("claude-code__bash", Some("NPM TEST")), "case-sensitive");
+        assert!(!s.matches_current("claude-code__bash", Some("npm run test")), "literal substring, not token-aware");
+    }
+
+    // ── conjunction: every `when:` condition must hold ────────────────────────────────────────────
+    #[test]
+    fn when_is_a_conjunction_of_every_condition() {
+        let mut policy = canonical_policy();
+        // Add a second condition that can never be satisfied.
+        policy.rules[0].when.push(Condition {
+            predicate: Predicate::Happened,
+            selector: sel("claude-code__bash", Some("impossible-command-xyz")),
+            expect: Expect::Satisfied,
+            cmp: None,
+            n: None,
+            t: None,
+        });
+        let events = vec![ev("claude-code__bash", true, 500, Some("npm test"))];
+        // First condition (succeeded npm test, expect unsatisfied) is now FALSE (test did succeed).
+        // Second condition (happened impossible-command, expect satisfied) is also FALSE.
+        // Neither condition holds its `expect` -> rule does not match -> Pass either way here,
+        // but flip to a scenario where the FIRST holds and the SECOND does not:
+        let decision = policy.evaluate(&events, "claude-code__bash", Some("git push"), 1000);
+        assert_eq!(decision, TemporalDecision::Pass, "the impossible second condition can never hold, so the AND never matches");
+    }
+
+    // ── tighten-only (axiom 5) ─────────────────────────────────────────────────────────────────────
+    #[test]
+    fn a_matched_allow_tier_rule_is_always_a_no_op_pass() {
+        let policy = TemporalPolicy {
+            rules: vec![TemporalRule {
+                id: "loosen-attempt".to_string(),
+                selector: sel("claude-code__bash", None),
+                tier: Tier::Allow,
+                when: vec![],
+                on_unavailable: None,
+            }],
+        };
+        // No `when:` conditions at all -> trivially "matches" -> still must be Pass, never anything
+        // that could be read as re-opening a base Deny.
+        let decision = policy.evaluate(&[], "claude-code__bash", Some("anything"), 1000);
+        assert_eq!(decision, TemporalDecision::Pass);
+    }
+
+    #[test]
+    fn first_match_wins_across_multiple_rules() {
+        let policy = TemporalPolicy {
+            rules: vec![
+                TemporalRule {
+                    id: "first".to_string(),
+                    selector: sel("claude-code__bash", Some("git push")),
+                    tier: Tier::Deny,
+                    when: vec![],
+                    on_unavailable: None,
+                },
+                TemporalRule {
+                    id: "second".to_string(),
+                    selector: sel("claude-code__bash", Some("git push")),
+                    tier: Tier::Approval,
+                    when: vec![],
+                    on_unavailable: None,
+                },
+            ],
+        };
+        let decision = policy.evaluate(&[], "claude-code__bash", Some("git push"), 1000);
+        match decision {
+            TemporalDecision::Deny(rec) => assert_eq!(rec.rule_id, "first"),
+            other => panic!("expected the FIRST rule to win, got {other:?}"),
+        }
+    }
+
+    // ── on_unavailable defaults (D2) ───────────────────────────────────────────────────────────────
+    #[test]
+    fn on_unavailable_defaults_per_tier() {
+        assert_eq!(default_on_unavailable(Tier::Deny), OnUnavailable::FailClosed);
+        assert_eq!(default_on_unavailable(Tier::Approval), OnUnavailable::RequireApproval);
+        assert_eq!(default_on_unavailable(Tier::Allow), OnUnavailable::FailOpen);
+    }
+
+    #[test]
+    fn on_unavailable_posture_uses_authored_override_when_present() {
+        let rule = TemporalRule {
+            id: "x".to_string(),
+            selector: sel("claude-code__bash", Some("git push")),
+            tier: Tier::Deny,
+            when: vec![],
+            on_unavailable: Some(OnUnavailable::FailOpen),
+        };
+        assert_eq!(rule.on_unavailable_posture(), OnUnavailable::FailOpen);
+    }
+
+    #[test]
+    fn first_matching_rule_finds_the_first_rule_whose_subject_matches_the_current_action() {
+        let policy = canonical_policy();
+        assert!(policy.first_matching_rule("claude-code__bash", Some("git push origin main")).is_some());
+        assert!(policy.first_matching_rule("claude-code__write", None).is_none());
+    }
+
+    // ── the receipt trace is content-free (D4) ────────────────────────────────────────────────────
+    #[test]
+    fn cond_record_never_carries_the_agents_command_text_as_a_bare_field() {
+        let policy = canonical_policy();
+        let decision = policy.evaluate(&[], "claude-code__bash", Some("git push origin main --force"), 1000);
+        let TemporalDecision::Deny(rec) = decision else { panic!("expected Deny") };
+        let json = serde_json::to_value(&rec).unwrap();
+        let text = json.to_string();
+        // The subject selector and condition selectors are operator-authored PATTERNS ("git push",
+        // "npm test") — those are expected. The agent's actual command ("--force") must not appear.
+        assert!(!text.contains("--force"), "the agent's own command text leaked into the receipt: {text}");
+    }
 }
 
 #[cfg(test)]
