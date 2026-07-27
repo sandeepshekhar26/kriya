@@ -234,11 +234,23 @@ fn the_committed_f_a_fixture_still_folds_to_its_own_expected_events() {
 fn f_c_ids() -> (Vec<&'static str>, Vec<&'static str>) {
     let internal = vec![
         // The shipped base predicate's own four ids (Console `policy_sim.rs::is_governance_internal`).
+        // `kriya.io.` / `kriya.policy.` are PREFIX-matched by that predicate, so every real emitted id
+        // under each prefix is enumerated individually here — not just one representative example —
+        // because F-C's byte-identity check against the Console mirror is a literal RAW-STRING compare
+        // (`test/governance-filter.test.ts`: `expect(mine).toBe(theirs)`, on file text, not parsed
+        // JSON), so both membership AND array order must match exactly. This file auto-regenerates its
+        // own JSON from this vec on every `cargo test` (see `generates_the_governance_filter_ids_fixture`
+        // below) — the Console copy is kept as a byte-for-byte copy of whatever this side produces.
         "kriya.attestation.on_device",
         "kriya.coverage.snapshot",
-        "kriya.io.egress.http.allow",
+        "kriya.io.run.start",
+        "kriya.io.run.exit",
         "kriya.policy.applied",
+        "kriya.policy.stale",
+        "kriya.policy.sim.result",
         "kriya.policy.cond.deny",
+        "kriya.policy.cond.approval",
+        "kriya.policy.cond.warn",
         // B4 additions — kriya's OWN bookkeeping about an agent action that already has its own receipt.
         "kriya.spend.gate.warn",
         "kriya.spend.gate.approval",
@@ -267,6 +279,42 @@ fn f_c_ids() -> (Vec<&'static str>, Vec<&'static str>) {
         "kriya.watch.heartbeat",
         "kriya.watch.run.start",
         "kriya.watch.run.exit",
+        // The remaining `kriya.io.` PREFIX members — enumerated individually (base predicate coverage
+        // is spot-checked separately below via `base_covered`; this full list exists for the Console
+        // mirror's byte-identity requirement, since the registry-derived TS test on that side asserts
+        // every REGISTERED vocabulary — including every emitted io facet — has a disposition here).
+        "kriya.io.egress.mcp.allow",
+        "kriya.io.egress.mcp.deny",
+        "kriya.io.egress.mcp.approve",
+        "kriya.io.egress.http.allow",
+        "kriya.io.egress.http.deny",
+        "kriya.io.egress.http.approve",
+        "kriya.io.egress.model.allow",
+        "kriya.io.egress.model.deny",
+        "kriya.io.egress.model.approve",
+        "kriya.io.egress.file.allow",
+        "kriya.io.egress.file.deny",
+        "kriya.io.egress.file.approve",
+        "kriya.io.ingress.mcp.allow",
+        "kriya.io.ingress.mcp.deny",
+        "kriya.io.ingress.mcp.approve",
+        "kriya.io.ingress.http.allow",
+        "kriya.io.ingress.http.deny",
+        "kriya.io.ingress.http.approve",
+        "kriya.io.ingress.model.allow",
+        "kriya.io.ingress.model.deny",
+        "kriya.io.ingress.model.approve",
+        "kriya.io.ingress.file.allow",
+        "kriya.io.ingress.file.deny",
+        "kriya.io.ingress.file.approve",
+        // B3 (doc 27 §4 / docs/design/b3-drift-sentinel.md D2's cross-item build-order trap): the
+        // local drift sentinel's own two vocabularies — excluded from B4's corpus automatically by
+        // the SAME namespace default-exclude rule (no predicate change on this side; B3 touches no
+        // runtime source at all). Required here too, or THIS generator test would silently
+        // regenerate the fixture below without them the next time `cargo test` runs, clobbering B3's
+        // fixture edit.
+        "kriya.drift.observation",
+        "kriya.drift.baseline",
     ];
     let governed = vec![
         "claude-code__bash",
