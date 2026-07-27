@@ -73,6 +73,10 @@ pub mod permissions;
 pub mod protocol;
 pub mod registry;
 pub mod secrets;
+// B4 (doc 27 §4 / docs/design/b4-temporal-conditions.md D2): the session-scoped event fold + cache
+// feeding `permissions::TemporalPolicy::evaluate`. Always compiled (no feature gate) — the hook's
+// `pre` gate needs it unconditionally, exactly like `spend_state` below.
+pub mod session_cond;
 pub mod sidecar;
 pub mod spend_state;
 // F4-wasm (doc 28 §F4): the Deterministic Execution lane. Off by default — pulls in `wasmtime` +

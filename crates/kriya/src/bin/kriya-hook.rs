@@ -95,12 +95,14 @@ use kriya::mcp::{
     TtyApproval,
 };
 use kriya::permissions::{
-    url_host, BudgetCtx, BudgetGateDecision, BudgetGateRecord, Decision, Policy,
+    url_host, BudgetCtx, BudgetGateDecision, BudgetGateRecord, CondRecord, Decision,
+    OnUnavailable, Policy, TemporalDecision,
 };
 use kriya::secrets::{
     find_placeholder_aliases, json_escape_inner, read_keychain_secret, redact_broker_values,
     substitute_placeholders,
 };
+use kriya::session_cond;
 use kriya::spend_state::{state_dir_for_audit_log, SpendState};
 use serde::Deserialize;
 use serde_json::Value;
@@ -303,6 +305,25 @@ fn budget_gate_params(r: &BudgetGateRecord) -> Value {
         "pricing_sheet": r.pricing_sheet,
         "pricing_sheet_hash": r.pricing_sheet_hash,
     })
+}
+
+/// B4 (doc 27 §4 / docs/design/b4-temporal-conditions.md D4) — the `kriya.policy.cond.*` receipt
+/// `params`. `CondRecord` derives `Serialize` with field names that already match the D4 shape
+/// (`rule_id`/`action_id`/`subject_selector`/`tier`/`conditions`/`now_ms`/`index_as_of_ms`/
+/// `index_source`) — this only adds the schema-version marker every field-set here is
+/// ids/patterns/counts/bools/timestamps, NEVER the agent's command content (D4's privacy audit).
+fn cond_params(r: &CondRecord) -> Value {
+    let mut v = serde_json::to_value(r).unwrap_or(Value::Null);
+    if let Value::Object(ref mut map) = v {
+        map.insert("v".to_string(), serde_json::json!(1));
+    }
+    v
+}
+
+/// B4: `params.command` when present (the Bash lane) — `None` for every other tool. The C2
+/// `egress_target_for`/`budget_gate_params` sibling.
+fn command_of(params: &Value) -> Option<&str> {
+    params.get("command").and_then(Value::as_str)
 }
 
 /// Sign the action receipt and return its `step_id` so a correlated `kriya.io.*` receipt can carry
@@ -729,6 +750,90 @@ fn main() -> ExitCode {
                          the blocked attempt was recorded."
                     );
                     return ExitCode::from(2);
+                }
+            }
+
+            // B4 (doc 27 §4 / docs/design/b4-temporal-conditions.md D3) — temporal policy
+            // conditions. Placed HERE, immediately after the action-tier `Decision::Allow` /
+            // granted-approval resolution above and BEFORE the C2 budget gate below (temporal is a
+            // *workflow-ordering* precondition — cheaper, no external state producer — so a
+            // workflow-illegal action is blocked before any spend/keychain work runs at all).
+            // Tighten-only (axiom 5): a temporal rule can only ESCALATE this already-resolved
+            // Allow/granted-approval to approval/deny; it can never loosen the deny/ungranted-
+            // approval outcomes above, which already returned.
+            if let Some(temporal) = policy.temporal() {
+                let log_path = resolved_audit_log_path(&args);
+                let state_dir = state_dir_for_audit_log(&log_path);
+                let run_id = payload.session_id.clone().unwrap_or_default();
+                let command = command_of(&params);
+
+                let decision = match session_cond::load_or_build(&state_dir, &run_id, &log_path) {
+                    Ok(fold) => {
+                        let mut decision =
+                            temporal.evaluate(&fold.events, &action_id, command, now_ms() as u64);
+                        if let TemporalDecision::Approval(ref mut rec) | TemporalDecision::Deny(ref mut rec) =
+                            decision
+                        {
+                            rec.index_source = fold.source;
+                        }
+                        decision
+                    }
+                    Err(_unavailable) => match temporal.first_matching_rule(&action_id, command) {
+                        None => TemporalDecision::Pass, // no rule even concerns this action
+                        Some(rule) => {
+                            let unavailable_record = CondRecord {
+                                rule_id: rule.id.clone(),
+                                action_id: action_id.clone(),
+                                subject_selector: rule.selector.clone(),
+                                tier: rule.tier,
+                                conditions: Vec::new(),
+                                now_ms: now_ms() as u64,
+                                index_as_of_ms: now_ms() as u64,
+                                index_source: "unavailable",
+                            };
+                            match rule.on_unavailable_posture() {
+                                OnUnavailable::FailOpen => TemporalDecision::Pass,
+                                OnUnavailable::RequireApproval => {
+                                    TemporalDecision::Approval(unavailable_record)
+                                }
+                                OnUnavailable::FailClosed => {
+                                    TemporalDecision::Deny(unavailable_record)
+                                }
+                            }
+                        }
+                    },
+                };
+
+                match decision {
+                    TemporalDecision::Pass => {}
+                    TemporalDecision::Approval(rec) => {
+                        let gate = match approval_gate(&args.approval) {
+                            Ok(g) => g,
+                            Err(e) => {
+                                eprintln!("kriya-hook: {e} — blocking (fail closed)");
+                                return ExitCode::from(2);
+                            }
+                        };
+                        if !gate.request(&action_id, &params) {
+                            record(&signer, &actor, "kriya.policy.cond.approval", cond_params(&rec), false, &corr);
+                            eprintln!(
+                                "kriya-hook: temporal rule '{}' requires human approval and was not \
+                                 approved (approval mode: {}). A signed receipt of the blocked \
+                                 attempt was recorded.",
+                                rec.rule_id, args.approval
+                            );
+                            return ExitCode::from(2);
+                        }
+                    }
+                    TemporalDecision::Deny(rec) => {
+                        record(&signer, &actor, "kriya.policy.cond.deny", cond_params(&rec), false, &corr);
+                        eprintln!(
+                            "kriya-hook: temporal rule '{}' denied '{action_id}' — a signed receipt \
+                             of the blocked attempt was recorded.",
+                            rec.rule_id
+                        );
+                        return ExitCode::from(2);
+                    }
                 }
             }
 
