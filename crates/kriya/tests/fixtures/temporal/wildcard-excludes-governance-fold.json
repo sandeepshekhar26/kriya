@@ -1,0 +1,119 @@
+{
+  "expected_events": [
+    {
+      "action_id": "claude-code__bash",
+      "command": "npm test",
+      "success": true,
+      "ts_ms": 1700300000000
+    },
+    {
+      "action_id": "claude-code__bash",
+      "command": "git push origin main",
+      "success": false,
+      "ts_ms": 1700300000000
+    }
+  ],
+  "raw_receipts": [
+    {
+      "action_id": "claude-code__bash",
+      "actor": {
+        "agent": "claude-code",
+        "user": "platform-eng"
+      },
+      "params": {
+        "command": "npm test",
+        "kriya.corr": {
+          "run_id": "run-fixture-f-a"
+        }
+      },
+      "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+      "signature": "4217c830753a80df1bb6d88fe2fa6de8b7b102f092fb9891c6d9c5c356736a449928025a7752d182f4d475032e0e417c9e62f4b162140492d5280717cd791f0c",
+      "step_id": "bash-1",
+      "success": true,
+      "ts_ms": 1700300000000
+    },
+    {
+      "action_id": "claude-code__bash",
+      "actor": {
+        "agent": "claude-code",
+        "user": "platform-eng"
+      },
+      "params": {
+        "command": "git push origin main",
+        "kriya.corr": {
+          "run_id": "run-fixture-f-a"
+        }
+      },
+      "prev_hash": "7fc9ce834c076fc3d100148745106f185d3024e0b740ed96a3714f2ec756bcf5",
+      "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+      "signature": "dd8730df3617a504c4c2ba07a8a19da228b8da6236336ab38996e762477768134f19dd143fd9be7382b81b08134f309ae9bdaf25531a29dccc62d279d8127008",
+      "step_id": "bash-2",
+      "success": false,
+      "ts_ms": 1700300000000
+    },
+    {
+      "action_id": "kriya.spend.gate.warn",
+      "actor": {
+        "agent": "claude-code",
+        "user": "platform-eng"
+      },
+      "params": {
+        "budget_id": "session-cap",
+        "kriya.corr": {
+          "run_id": "run-fixture-f-a"
+        },
+        "scope": "session"
+      },
+      "prev_hash": "2e400e8ef42e755702b98f4f16c6115530b88d36988ae9e4766079b00514bf7f",
+      "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+      "signature": "977084d6b1dfe57566b5b4f5fbc3af9251119ea1ffeb39d57e729063d9c046a676d617e8663dd69ef1fdf5f98cb1a5369d0ec226a063b88aa78818b1865d7e0b",
+      "step_id": "spend-warn",
+      "success": true,
+      "ts_ms": 1700300000001
+    },
+    {
+      "action_id": "kriya.memory.write",
+      "actor": {
+        "agent": "claude-code",
+        "user": "platform-eng"
+      },
+      "params": {
+        "kriya.corr": {
+          "run_id": "run-fixture-f-a"
+        },
+        "kriya.memory": {
+          "class": "claude-md",
+          "surface": "file"
+        }
+      },
+      "prev_hash": "06ba20045864cb21cda1896b6467a950c4b1a34aaef586f36c64498be516c0e9",
+      "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+      "signature": "5299f6bcfeb9f7aae8392decef8319dda7c4fed2581e533ecebb95613e1c537fdac4c9a7e0230a35c9bae16be8f41393d008b77f4b096f0760b5ffa947fe530f",
+      "step_id": "mem-write",
+      "success": true,
+      "ts_ms": 1700300000002
+    },
+    {
+      "action_id": "kriya.artifact.provenance",
+      "actor": {
+        "agent": "claude-code",
+        "user": "platform-eng"
+      },
+      "params": {
+        "kriya.corr": {
+          "run_id": "run-fixture-f-a"
+        },
+        "manifest_hash": "deadbeef"
+      },
+      "prev_hash": "9833f72274e3e7bd2854536f8742050f9690ac749eb79c74aa83e8fa8a5aec28",
+      "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+      "signature": "847e486388df27d37bc0bc40224a0558ce58351741f01cc21b9696b6f1a9916e3099b3db1a54dde5bc19532e7a6703ba2598ebab99ab28935b179861115af802",
+      "step_id": "artifact-prov",
+      "success": true,
+      "ts_ms": 1700300000003
+    }
+  ],
+  "run_id": "run-fixture-f-a",
+  "source_log": "claude-code.jsonl",
+  "v": 1
+}
