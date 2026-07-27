@@ -267,6 +267,14 @@ fn f_c_ids() -> (Vec<&'static str>, Vec<&'static str>) {
         "kriya.watch.heartbeat",
         "kriya.watch.run.start",
         "kriya.watch.run.exit",
+        // B3 (doc 27 §4 / docs/design/b3-drift-sentinel.md D2's cross-item build-order trap): the
+        // local drift sentinel's own two vocabularies — excluded from B4's corpus automatically by
+        // the SAME namespace default-exclude rule (no predicate change on this side; B3 touches no
+        // runtime source at all). Required here too, or THIS generator test would silently
+        // regenerate the fixture below without them the next time `cargo test` runs, clobbering B3's
+        // fixture edit.
+        "kriya.drift.observation",
+        "kriya.drift.baseline",
     ];
     let governed = vec![
         "claude-code__bash",
