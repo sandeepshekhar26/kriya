@@ -25,7 +25,8 @@ use std::path::PathBuf;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use kriya::audit::{Actor, Receipt, Signer};
 use kriya::corr::{self, Correlation};
-use kriya::session_cond;
+use kriya::permissions::{TemporalDecision, TemporalPolicy};
+use kriya::session_cond::{self, SessionEvent};
 use serde_json::Value;
 
 // A fixed, PUBLIC, synthetic 32-byte seed — deliberately NOT an RFC 8032 published test vector,
@@ -317,5 +318,37 @@ fn f_c_this_repos_own_predicate_matches_every_listed_verdict() {
     for id in base_covered {
         assert!(session_cond::is_governance_internal(id), "{id} should be covered by the BASE predicate too");
         assert!(internal.iter().any(|s| s == id), "{id} (base-covered) must appear in F-C's internal bucket");
+    }
+}
+
+/// F-B — the three EVALUATOR twins agree given IDENTICAL pre-folded input (R3): a wildcard
+/// `action: "*"` + `predicate: count` rule over 2 folded events must yield `match_count == 2` (here,
+/// observably via the DECISION: the rule's `cmp: ">=", n: 2` makes it match). Mirrored byte-for-byte
+/// into `../kriya-console/test/fixtures/temporal/wildcard-counts-prefolded.json`; the Console side
+/// asserts the SAME fixture against `simulate_temporal` (kriya-verify) and `evaluateTemporal` (TS).
+#[test]
+fn f_b_wildcard_counts_prefolded_fixture_matches_this_repos_evaluate() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/temporal/wildcard-counts-prefolded.json");
+    let text = std::fs::read_to_string(&path).expect("F-B fixture must be committed");
+    let fixture: Value = serde_json::from_str(&text).unwrap();
+
+    let policy: TemporalPolicy = serde_json::from_value(fixture["policy"].clone()).unwrap();
+    let events: Vec<SessionEvent> = serde_json::from_value(fixture["events"].clone()).unwrap();
+    let action_id = fixture["action_id"].as_str().unwrap();
+    let command = fixture["command"].as_str();
+    let now_ms = fixture["now_ms"].as_u64().unwrap();
+    let expected_decision = fixture["expected_decision"].as_str().unwrap();
+
+    let decision = policy.evaluate(&events, action_id, command, now_ms);
+    match expected_decision {
+        "deny" => assert!(matches!(decision, TemporalDecision::Deny(_)), "expected Deny, got {decision:?}"),
+        "approval" => assert!(matches!(decision, TemporalDecision::Approval(_)), "expected Approval, got {decision:?}"),
+        "pass" => assert_eq!(decision, TemporalDecision::Pass),
+        other => panic!("unknown expected_decision {other}"),
+    }
+    if let TemporalDecision::Deny(rec) | TemporalDecision::Approval(rec) = decision {
+        let expected_match_count = fixture["expected_match_count"].as_u64().unwrap();
+        assert_eq!(rec.conditions.len(), 1);
+        assert_eq!(rec.conditions[0].match_count, expected_match_count);
     }
 }
