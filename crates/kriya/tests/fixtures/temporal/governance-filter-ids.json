@@ -40,7 +40,9 @@
     "kriya.exec.deterministic",
     "kriya.watch.heartbeat",
     "kriya.watch.run.start",
-    "kriya.watch.run.exit"
+    "kriya.watch.run.exit",
+    "kriya.drift.observation",
+    "kriya.drift.baseline"
   ],
   "v": 1
 }
