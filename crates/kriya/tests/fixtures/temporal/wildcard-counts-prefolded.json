@@ -1,0 +1,30 @@
+{
+  "v": 1,
+  "policy": {
+    "rules": [
+      {
+        "id": "wildcard-count-check",
+        "selector": { "action": "some-trigger-action" },
+        "tier": "deny",
+        "when": [
+          {
+            "predicate": "count",
+            "selector": { "action": "*" },
+            "cmp": ">=",
+            "n": 2,
+            "expect": "satisfied"
+          }
+        ]
+      }
+    ]
+  },
+  "events": [
+    { "action_id": "claude-code__bash", "success": true, "ts_ms": 1000, "command": "npm test" },
+    { "action_id": "claude-code__bash", "success": false, "ts_ms": 2000, "command": "git push origin main" }
+  ],
+  "action_id": "some-trigger-action",
+  "command": null,
+  "now_ms": 3000,
+  "expected_decision": "deny",
+  "expected_match_count": 2
+}

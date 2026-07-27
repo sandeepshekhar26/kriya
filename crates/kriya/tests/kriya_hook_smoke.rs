@@ -1101,3 +1101,251 @@ fn a_non_memory_file_write_emits_no_kriya_memory_receipt() {
 
     let _ = std::fs::remove_dir_all(log.parent().unwrap());
 }
+
+// --- B4: temporal policy conditions (doc 27 §4 / docs/design/b4-temporal-conditions.md) --------
+//
+// The canonical demo (design §5 acceptance criterion 1): "deny git push unless npm test succeeded
+// earlier this session." Uses `sandbox_with_state_dir()` — B4 reuses C2's `state_dir_for_audit_log`
+// seam for its own session-cond cache, so it needs the SAME hermetic-state-dir layout the budget
+// tests use (a flat `sandbox()` would resolve `<audit-dir>/../state` OUTSIDE the sandbox, into a
+// path shared with other parallel tests).
+
+/// The exact canonical rule from the design doc: action-tier allows Bash outright; the temporal
+/// section denies a `git push` unless a `npm test` bash call SUCCEEDED earlier this session.
+fn deny_push_without_tests_policy_yaml() -> String {
+    "rules:\n  - { action: \"claude-code__bash\", allow: true }\n\
+     temporal:\n  \
+       rules:\n    \
+         - id: \"deny-push-without-tests\"\n      \
+           selector: { action: \"claude-code__bash\", command: { contains: \"git push\" } }\n      \
+           tier: deny\n      \
+           when:\n        \
+             - predicate: succeeded\n          \
+               selector: { action: \"claude-code__bash\", command: { contains: \"npm test\" } }\n          \
+               expect: unsatisfied\n"
+        .to_string()
+}
+
+#[test]
+fn git_push_without_tests_demo_denies_then_allows_after_a_successful_test_this_session() {
+    let bin = build_binary();
+    let (log, key, policy, state_dir) = sandbox_with_state_dir();
+    std::fs::write(&policy, deny_push_without_tests_policy_yaml()).unwrap();
+    let args: Vec<&str> = vec![
+        "--policy",
+        policy.to_str().unwrap(),
+        "--audit-log",
+        log.to_str().unwrap(),
+        "--signing-key",
+        key.to_str().unwrap(),
+    ];
+
+    // 1) No prior test this session -> the push is DENIED, and the deny receipt shows WHY.
+    let r1 = run(&bin, "pre", &args, &pre_payload("Bash", r#"{"command":"git push origin main"}"#));
+    assert_eq!(r1.status.code(), Some(2), "no prior successful test this session must deny the push: stderr={:?}", r1.stderr);
+    let receipts = read_receipts(&log);
+    assert_eq!(receipts.len(), 1, "the blocked attempt is itself evidence");
+    let cond = &receipts[0];
+    assert_eq!(cond["action_id"], "kriya.policy.cond.deny");
+    assert_eq!(cond["success"], false);
+    assert_eq!(cond["params"]["rule_id"], "deny-push-without-tests");
+    assert_eq!(cond["params"]["action_id"], "claude-code__bash");
+    assert_eq!(cond["params"]["tier"], "deny");
+    assert_eq!(cond["params"]["index_source"], "rebuilt", "first-ever consult on this session: a cold-cache full rebuild");
+    let conditions = cond["params"]["conditions"].as_array().unwrap();
+    assert_eq!(conditions.len(), 1);
+    assert_eq!(conditions[0]["predicate"], "succeeded");
+    assert_eq!(conditions[0]["expect"], "unsatisfied");
+    assert_eq!(conditions[0]["observed"], false, "no npm test succeeded yet -> succeeded() observed false");
+    assert_eq!(conditions[0]["match_count"], 0);
+    assert_eq!(conditions[0]["result"], true, "observed(false) == expect(unsatisfied) -> this condition holds -> rule matches");
+    // Privacy audit (D4): the agent's own command text must never appear in the receipt.
+    let wire = serde_json::to_string(cond).unwrap();
+    assert!(!wire.contains("origin main"), "the agent's push target leaked into the receipt: {wire}");
+
+    // 2) Record a SUCCESSFUL `npm test` on the SAME session (the base action receipt post-mode
+    //    writes — this is the receipt a real governed test run produces).
+    let r_test = run(
+        &bin,
+        "post",
+        &args,
+        &post_payload_full("Bash", r#"{"command":"npm test"}"#, r#"{"success":true}"#, "s1"),
+    );
+    assert_eq!(r_test.status.code(), Some(0), "stderr={}", r_test.stderr);
+
+    // 3) The SAME push now falls through to the base tier's allow — the temporal rule no longer
+    //    matches (`succeeded(npm test)` is now true, so `expect: unsatisfied` is UNMET).
+    let r2 = run(&bin, "pre", &args, &pre_payload("Bash", r#"{"command":"git push origin main"}"#));
+    assert_eq!(r2.status.code(), Some(0), "a governed, successful test this session must clear the push: stderr={:?}", r2.stderr);
+    // No NEW cond.deny receipt was appended by this second pre call.
+    let receipts_after = read_receipts(&log);
+    let cond_denies: Vec<_> = receipts_after.iter().filter(|r| r["action_id"] == "kriya.policy.cond.deny").collect();
+    assert_eq!(cond_denies.len(), 1, "only the FIRST push attempt should have been denied");
+
+    let _ = std::fs::remove_dir_all(&state_dir);
+    let _ = std::fs::remove_dir_all(log.parent().unwrap().parent().unwrap());
+}
+
+#[test]
+fn temporal_deny_is_never_reached_when_the_subject_selector_does_not_match() {
+    let bin = build_binary();
+    let (log, key, policy, state_dir) = sandbox_with_state_dir();
+    std::fs::write(&policy, deny_push_without_tests_policy_yaml()).unwrap();
+
+    // A bash call that doesn't contain "git push" never even reaches the `when:` evaluation.
+    let r = run(
+        &bin,
+        "pre",
+        &["--policy", policy.to_str().unwrap(), "--audit-log", log.to_str().unwrap(), "--signing-key", key.to_str().unwrap()],
+        &pre_payload("Bash", r#"{"command":"ls -la"}"#),
+    );
+    assert_eq!(r.status.code(), Some(0));
+    assert!(read_receipts(&log).is_empty(), "an unrelated command must sign nothing at pre-stage");
+
+    let _ = std::fs::remove_dir_all(&state_dir);
+    let _ = std::fs::remove_dir_all(log.parent().unwrap().parent().unwrap());
+}
+
+/// B0 matrix row: fail-closed on an UNREADABLE session log (D2 — genuinely "unavailable", never
+/// merely "empty"). Simulated portably: chmod the log write-only (0200) so `session_cond`'s
+/// `read_to_string` fails with permission-denied (not NotFound), while the signer's OWN append-only
+/// `OpenOptions::new().append(true)` write still succeeds — exactly the asymmetry a real
+/// unreadable-but-still-appendable log would have. Empirically verified on this filesystem before
+/// writing this test.
+#[test]
+#[cfg(unix)]
+fn temporal_deny_fails_closed_when_the_session_log_is_unreadable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let bin = build_binary();
+    let (log, key, policy, state_dir) = sandbox_with_state_dir();
+    std::fs::write(&policy, deny_push_without_tests_policy_yaml()).unwrap();
+    std::fs::write(&log, "").unwrap(); // the log must exist as a FILE before we lock it down
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o200)).unwrap();
+
+    let r = run(
+        &bin,
+        "pre",
+        &["--policy", policy.to_str().unwrap(), "--audit-log", log.to_str().unwrap(), "--signing-key", key.to_str().unwrap()],
+        &pre_payload("Bash", r#"{"command":"git push origin main"}"#),
+    );
+
+    // Restore readability before asserting, regardless of outcome, so cleanup never leaks a
+    // permission-locked file.
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    assert_eq!(r.status.code(), Some(2), "an unreadable session log on a deny rule must fail CLOSED: stderr={:?}", r.stderr);
+    let receipts = read_receipts(&log);
+    assert_eq!(receipts.len(), 1, "the write-only log could still be appended to");
+    assert_eq!(receipts[0]["action_id"], "kriya.policy.cond.deny");
+    assert_eq!(receipts[0]["params"]["index_source"], "unavailable");
+    assert_eq!(receipts[0]["params"]["conditions"].as_array().unwrap().len(), 0, "the fold never ran — no condition trace to show");
+
+    let _ = std::fs::remove_dir_all(&state_dir);
+    let _ = std::fs::remove_dir_all(log.parent().unwrap().parent().unwrap());
+}
+
+#[test]
+fn temporal_tighten_only_a_base_deny_is_never_reopened_by_an_allow_tier_temporal_rule() {
+    let bin = build_binary();
+    let (log, key, policy, state_dir) = sandbox_with_state_dir();
+    // Action tier DENIES bash outright; an (deliberately misguided) temporal `allow` rule can never
+    // re-open that — axiom 5. `tier: allow` never loosens (D3); this proves it end to end.
+    std::fs::write(
+        &policy,
+        "rules:\n  - { action: \"claude-code__bash\", allow: false }\n\
+         temporal:\n  rules:\n    - { id: \"loosen-attempt\", selector: { action: \"claude-code__bash\" }, tier: allow }\n",
+    )
+    .unwrap();
+
+    let r = run(
+        &bin,
+        "pre",
+        &["--policy", policy.to_str().unwrap(), "--audit-log", log.to_str().unwrap(), "--signing-key", key.to_str().unwrap()],
+        &pre_payload("Bash", r#"{"command":"echo hi"}"#),
+    );
+    assert_eq!(r.status.code(), Some(2), "the base action-tier deny must stand — a temporal allow rule is never consulted for an already-denied action");
+    let receipts = read_receipts(&log);
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0]["action_id"], "claude-code__bash", "the base tier's own deny receipt, not a temporal one");
+
+    let _ = std::fs::remove_dir_all(&state_dir);
+    let _ = std::fs::remove_dir_all(log.parent().unwrap().parent().unwrap());
+}
+
+#[test]
+fn temporal_approval_tier_denies_when_not_granted_and_allows_when_auto_approved() {
+    let bin = build_binary();
+    let policy_yaml = "rules:\n  - { action: \"claude-code__bash\", allow: true }\n\
+         temporal:\n  rules:\n    \
+           - id: \"deploy-needs-review\"\n      \
+             selector: { action: \"claude-code__bash\", command: { contains: \"deploy\" } }\n      \
+             tier: approval\n      \
+             when:\n        \
+               - predicate: happened\n          \
+                 selector: { action: \"claude-code__bash\", command: { contains: \"never-happened-xyz\" } }\n          \
+                 expect: unsatisfied\n";
+
+    // Not granted (default --approval deny) -> blocks, signs kriya.policy.cond.approval.
+    {
+        let (log, key, policy, state_dir) = sandbox_with_state_dir();
+        std::fs::write(&policy, policy_yaml).unwrap();
+        let r = run(
+            &bin,
+            "pre",
+            &["--policy", policy.to_str().unwrap(), "--audit-log", log.to_str().unwrap(), "--signing-key", key.to_str().unwrap()],
+            &pre_payload("Bash", r#"{"command":"deploy prod"}"#),
+        );
+        assert_eq!(r.status.code(), Some(2));
+        let receipts = read_receipts(&log);
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0]["action_id"], "kriya.policy.cond.approval");
+        assert_eq!(receipts[0]["success"], false);
+        let _ = std::fs::remove_dir_all(&state_dir);
+        let _ = std::fs::remove_dir_all(log.parent().unwrap().parent().unwrap());
+    }
+
+    // Granted (--approval auto) -> proceeds, signs nothing at pre-stage.
+    {
+        let (log, key, policy, state_dir) = sandbox_with_state_dir();
+        std::fs::write(&policy, policy_yaml).unwrap();
+        let r = run(
+            &bin,
+            "pre",
+            &["--policy", policy.to_str().unwrap(), "--approval", "auto", "--audit-log", log.to_str().unwrap(), "--signing-key", key.to_str().unwrap()],
+            &pre_payload("Bash", r#"{"command":"deploy prod"}"#),
+        );
+        assert_eq!(r.status.code(), Some(0));
+        assert!(read_receipts(&log).is_empty());
+        let _ = std::fs::remove_dir_all(&state_dir);
+        let _ = std::fs::remove_dir_all(log.parent().unwrap().parent().unwrap());
+    }
+}
+
+#[test]
+fn temporal_cond_warn_is_reserved_not_emitted_in_v1() {
+    // M-1: there is no hook wiring that could ever emit kriya.policy.cond.warn in v1 — this is a
+    // structural/behavioral guard, not just a grep: an `allow`-tier match (the only way a v1
+    // TemporalDecision could ever be "observe-only") always resolves to a silent Pass (proven at the
+    // unit level in permissions::temporal_tests::a_matched_allow_tier_rule_is_always_a_no_op_pass).
+    // Confirmed end-to-end here: with an allow-tier rule matching, and the log fully readable,
+    // nothing is ever recorded.
+    let bin = build_binary();
+    let (log, key, policy, state_dir) = sandbox_with_state_dir();
+    std::fs::write(
+        &policy,
+        "rules:\n  - { action: \"claude-code__bash\", allow: true }\ntemporal:\n  rules:\n    - { id: \"observe\", selector: { action: \"claude-code__bash\" }, tier: allow }\n",
+    )
+    .unwrap();
+    let r = run(
+        &bin,
+        "pre",
+        &["--policy", policy.to_str().unwrap(), "--audit-log", log.to_str().unwrap(), "--signing-key", key.to_str().unwrap()],
+        &pre_payload("Bash", r#"{"command":"echo hi"}"#),
+    );
+    assert_eq!(r.status.code(), Some(0));
+    assert!(read_receipts(&log).is_empty(), "v1 has no path that emits kriya.policy.cond.warn");
+
+    let _ = std::fs::remove_dir_all(&state_dir);
+    let _ = std::fs::remove_dir_all(log.parent().unwrap().parent().unwrap());
+}
