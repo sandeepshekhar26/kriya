@@ -95,8 +95,8 @@ use kriya::mcp::{
     TtyApproval,
 };
 use kriya::permissions::{
-    url_host, BudgetCtx, BudgetGateDecision, BudgetGateRecord, CondRecord, Decision,
-    OnUnavailable, Policy, TemporalDecision,
+    url_host, BudgetCtx, BudgetGateDecision, BudgetGateRecord, CondRecord, Decision, GateDecision,
+    GateRecord, OnUnavailable, Policy, TemporalDecision,
 };
 use kriya::secrets::{
     find_placeholder_aliases, json_escape_inner, read_keychain_secret, redact_broker_values,
@@ -324,6 +324,20 @@ fn cond_params(r: &CondRecord) -> Value {
 /// `egress_target_for`/`budget_gate_params` sibling.
 fn command_of(params: &Value) -> Option<&str> {
     params.get("command").and_then(Value::as_str)
+}
+
+/// F-2: the `kriya.gate.<class>.*` receipt params — [`GateRecord`]'s serde shape (ids, class,
+/// tier, matcher kind, recipient CLASS; never command content — design §5) + the schema-version
+/// marker + `corr_step` pointing at the blocked attempt's own action receipt when one was written.
+fn gate_params(rec: &GateRecord, corr_step: Option<&str>) -> Value {
+    let mut v = serde_json::to_value(rec).unwrap_or(Value::Null);
+    if let Value::Object(ref mut map) = v {
+        map.insert("v".to_string(), serde_json::json!(1));
+        if let Some(step) = corr_step {
+            map.insert("corr_step".to_string(), serde_json::json!(step));
+        }
+    }
+    v
 }
 
 /// Sign the action receipt and return its `step_id` so a correlated `kriya.io.*` receipt can carry
@@ -753,11 +767,93 @@ fn main() -> ExitCode {
                 }
             }
 
+            // F-2 (kriya-console doc 31 §3.3 / docs/ideas/design/F2-gates.md) — action gates.
+            // Placed FIRST among the escalation dimensions (before B4 temporal and the C2 budget
+            // gate): gates are pure in-process pattern matching — no session fold, no external
+            // state — so a gate-denied action is blocked before any state producer runs at all.
+            // Tighten-only, exactly like B4: a gate can only ESCALATE the already-resolved
+            // Allow/granted-approval above to approval/deny; the deny/ungranted-approval outcomes
+            // already returned. Receipt vocabulary: kriya.gate.<class>.{evaluated,held,approved,
+            // denied}. On a block, the ACTION receipt (success:false, params = tool_input — exactly
+            // what the action-tier deny path records) is written first and the gate receipt points
+            // at it via `corr_step`, so the Console shows the exact command without the gate
+            // receipt itself carrying command content (design §5 privacy discipline).
+            if let Some(gates) = policy.gates() {
+                match gates.evaluate(tool_name, &params, &action_id) {
+                    GateDecision::Pass => {}
+                    GateDecision::Receipt(rec) => {
+                        record(
+                            &signer,
+                            &actor,
+                            &format!("kriya.gate.{}.evaluated", rec.class),
+                            gate_params(&rec, None),
+                            true,
+                            &corr,
+                        );
+                    }
+                    GateDecision::Approval(rec) => {
+                        let gate = match approval_gate(&args.approval) {
+                            Ok(g) => g,
+                            Err(e) => {
+                                eprintln!("kriya-hook: {e} — blocking (fail closed)");
+                                return ExitCode::from(2);
+                            }
+                        };
+                        if gate.request(&action_id, &params) {
+                            record(
+                                &signer,
+                                &actor,
+                                &format!("kriya.gate.{}.approved", rec.class),
+                                gate_params(&rec, None),
+                                true,
+                                &corr,
+                            );
+                        } else {
+                            let step_id =
+                                record(&signer, &actor, &action_id, params.clone(), false, &corr);
+                            record(
+                                &signer,
+                                &actor,
+                                &format!("kriya.gate.{}.held", rec.class),
+                                gate_params(&rec, Some(&step_id)),
+                                false,
+                                &corr,
+                            );
+                            eprintln!(
+                                "kriya-hook: the {} gate requires human approval for '{action_id}' \
+                                 and it was not granted (rule: {}; approval mode: {}). A signed \
+                                 receipt of the held attempt was recorded.",
+                                rec.class, rec.rule_id, args.approval
+                            );
+                            return ExitCode::from(2);
+                        }
+                    }
+                    GateDecision::Deny(rec) => {
+                        let step_id =
+                            record(&signer, &actor, &action_id, params.clone(), false, &corr);
+                        record(
+                            &signer,
+                            &actor,
+                            &format!("kriya.gate.{}.denied", rec.class),
+                            gate_params(&rec, Some(&step_id)),
+                            false,
+                            &corr,
+                        );
+                        eprintln!(
+                            "kriya-hook: the {} gate denied '{action_id}' (rule: {}). A signed \
+                             receipt of the blocked attempt was recorded.",
+                            rec.class, rec.rule_id
+                        );
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+
             // B4 (doc 27 §4 / docs/design/b4-temporal-conditions.md D3) — temporal policy
-            // conditions. Placed HERE, immediately after the action-tier `Decision::Allow` /
-            // granted-approval resolution above and BEFORE the C2 budget gate below (temporal is a
-            // *workflow-ordering* precondition — cheaper, no external state producer — so a
-            // workflow-illegal action is blocked before any spend/keychain work runs at all).
+            // conditions. Placed HERE, immediately after the F-2 gates block above (temporal is a
+            // *workflow-ordering* precondition — cheaper than the C2 budget gate below, no
+            // external state producer — so a workflow-illegal action is blocked before any
+            // spend/keychain work runs at all).
             // Tighten-only (axiom 5): a temporal rule can only ESCALATE this already-resolved
             // Allow/granted-approval to approval/deny; it can never loosen the deny/ungranted-
             // approval outcomes above, which already returned.

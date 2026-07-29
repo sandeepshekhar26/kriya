@@ -155,6 +155,17 @@ pub struct Policy {
     /// `egress`/`detection`/`secrets`/`model`/`budgets`/`exec`/`memory` already established).
     #[serde(default)]
     temporal: Option<TemporalPolicy>,
+    /// F-2 (kriya-console doc 31 §3.3 / docs/ideas/design/F2-gates.md): **action gates** — the
+    /// Console-compiled high-stakes-class matcher rules (deploy, destructive-git, publish, prod-DB,
+    /// infra, outbound-send, self-modification). Evaluated by the hook `pre` lane as a
+    /// TIGHTEN-ONLY escalation over the action tier (the exact B4 idiom), with the receipt
+    /// vocabulary `kriya.gate.<class>.{evaluated,held,approved,denied}`. Absent `gates:` ⇒ no gate
+    /// behavior at all, byte-identical to pre-F2 (the same BC discipline every optional section
+    /// above established). The Console's authoring state rides the same YAML under `gates.classes`,
+    /// which this struct deliberately does NOT model — serde ignores unknown fields; the compiled
+    /// `gates.rules` list is the enforcement truth.
+    #[serde(default)]
+    gates: Option<GatePolicy>,
 }
 
 impl Default for Policy {
@@ -196,6 +207,7 @@ impl Default for Policy {
             exec: None,
             memory: None,
             temporal: None,
+            gates: None,
         }
     }
 }
@@ -333,6 +345,12 @@ impl Policy {
     /// performs no temporal consult at all, byte-identical to pre-B4 behaviour.
     pub fn temporal(&self) -> Option<&TemporalPolicy> {
         self.temporal.as_ref()
+    }
+
+    /// F-2: the action-gate rules, if configured. `None` → the hook `pre` lane performs no gate
+    /// consult at all, byte-identical to pre-F2 behaviour.
+    pub fn gates(&self) -> Option<&GatePolicy> {
+        self.gates.as_ref()
     }
 
     pub fn check(&self, action_id: &str) -> Decision {
@@ -485,6 +503,7 @@ pub fn default_broker_policy(namespaces: &[String]) -> Policy {
         exec: None,
         memory: None,
         temporal: None,
+        gates: None,
     }
 }
 
@@ -542,6 +561,7 @@ pub fn default_proxy_policy() -> Policy {
         exec: None,
         memory: None,
         temporal: None,
+        gates: None,
     }
 }
 
@@ -2682,6 +2702,456 @@ mod temporal_tests {
         // The subject selector and condition selectors are operator-authored PATTERNS ("git push",
         // "npm test") — those are expected. The agent's actual command ("--force") must not appear.
         assert!(!text.contains("--force"), "the agent's own command text leaked into the receipt: {text}");
+    }
+}
+
+// ─── F-2 — Action gates (kriya-console doc 31 §3.3 / docs/ideas/design/F2-gates.md) ─────────────
+// The Console-compiled matcher rules for the high-stakes action classes. The engine is policy
+// authoring + receipt vocabulary over the EXISTING enforcement path — evaluated by the hook `pre`
+// lane in the exact tighten-only slot/idiom of the B4 temporal block: a gate can escalate an
+// already-resolved Allow/granted-approval to approval/deny, never loosen a Deny.
+//
+// Matching is over regex patterns (the `regex-lite` crate: zero transitive deps, ASCII semantics
+// shared with the Console's JS `RegExp` evaluation of the SAME table — see the design's §2 dialect
+// note and the cross-repo `gate-matcher-vectors.json` parity test). This is a deliberate,
+// documented departure from B4's substring-only `CommandMatch`: B4 selectors are OPERATOR-authored
+// free text (worst-case ambiguity — substring is the honest ceiling there); gate rules are
+// PRODUCT-defined vocabulary compiled from one audited table and parity-locked across both
+// implementations.
+
+/// Gate tier — `allow | receipt | approve | deny`, mapping onto the existing decision semantics:
+/// `approve` ≡ [`Decision::RequiresApproval`] (same approval gate flow), `deny` ≡
+/// [`Decision::Deny`] (same exit-2 block), `receipt` ≡ Allow + a `kriya.gate.<class>.evaluated`
+/// receipt, `allow` ≡ Allow with no gate receipt (the action receipt itself always exists).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GateTier {
+    Allow,
+    Receipt,
+    Approve,
+    Deny,
+}
+
+/// One tool-name matcher: `tool` regex (+ optional `server` regex — a rule with `server` never
+/// matches a call that has no server component).
+#[derive(Debug, Clone, Deserialize)]
+pub struct GateToolMatcher {
+    pub tool: String,
+    #[serde(default)]
+    pub server: Option<String>,
+}
+
+/// The outbound-send class's recipient split (design §4): when `internal_domains` is configured
+/// and EVERY recipient domain found in the tool input is internal, the rule's `internal_tier`
+/// applies instead of its primary tier. Receipts record only `internal|external|unknown` + a
+/// count — never an address.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SendGateConfig {
+    #[serde(default)]
+    pub internal_domains: Vec<String>,
+    #[serde(default = "default_internal_tier")]
+    pub internal_tier: GateTier,
+}
+
+fn default_internal_tier() -> GateTier {
+    GateTier::Receipt
+}
+
+/// One compiled gate rule. Exactly one matcher kind is populated (`command_any` / `path_any` /
+/// `tool_any`); the Console compiler guarantees this, and a rule with none never matches.
+/// Rules are evaluated IN ORDER; the first match wins (the house `rules` idiom — prod/non-prod
+/// and protected/unprotected splits are two ordered rules of the same class).
+#[derive(Debug, Clone, Deserialize)]
+pub struct GateRule {
+    pub class: String,
+    pub rule_id: String,
+    pub tier: GateTier,
+    /// ≥1 must match the Bash `command` string.
+    #[serde(default)]
+    pub command_any: Vec<String>,
+    /// ALL must match (same command).
+    #[serde(default)]
+    pub command_all: Vec<String>,
+    /// NONE may match (same command).
+    #[serde(default)]
+    pub command_not: Vec<String>,
+    /// ≥1 must match the `file_path` param — or any whitespace token of a Bash command
+    /// (`cat .env`, `echo x > ~/.claude/settings.json`).
+    #[serde(default)]
+    pub path_any: Vec<String>,
+    /// ≥1 must match the (tool, server) pair.
+    #[serde(default)]
+    pub tool_any: Vec<GateToolMatcher>,
+    /// Outbound-send recipient split (send-class rules only).
+    #[serde(default)]
+    pub send: Option<SendGateConfig>,
+}
+
+/// The `gates:` policy section. The Console's `classes` authoring key rides the same YAML but is
+/// deliberately not modeled here (serde ignores unknown fields) — `rules` is the enforcement truth.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GatePolicy {
+    #[serde(default)]
+    pub rules: Vec<GateRule>,
+}
+
+/// The privacy-audited receipt payload for `kriya.gate.<class>.*` (design §5): ids, class, tier,
+/// matcher kind, the action id, recipient CLASS — never command content (the blocked attempt's own
+/// action receipt carries the params; the gate receipt points at it via `corr_step`, added by the
+/// hook at record time).
+#[derive(Debug, Clone, Serialize)]
+pub struct GateRecord {
+    pub class: String,
+    pub rule_id: String,
+    pub tier: GateTier,
+    /// `command` | `path` | `tool`.
+    pub matcher_kind: &'static str,
+    pub action_id: String,
+    /// Send-class rules only: `internal` | `external` | `unknown`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recipients_class: Option<&'static str>,
+    /// Send-class rules only: how many recipient strings were found.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recipients_count: Option<usize>,
+}
+
+/// The gate's tighten-only decision for one pre-exec evaluation.
+#[derive(Debug, Clone)]
+pub enum GateDecision {
+    /// No rule matched, or the matched tier is `allow`.
+    Pass,
+    /// `receipt` tier: record `kriya.gate.<class>.evaluated` and proceed.
+    Receipt(GateRecord),
+    /// `approve` tier: run the existing approval gate; `approved`/`held` receipts follow.
+    Approval(GateRecord),
+    /// `deny` tier: block (exit 2) with a `denied` receipt.
+    Deny(GateRecord),
+}
+
+/// Compile a pattern, tolerating an invalid one as never-matching. An invalid pattern is a
+/// Console-compiler bug, not an operator error — failing closed here would brick every action on
+/// a typo'd custom pattern, a worse failure than one silent matcher (the parity vectors test is
+/// the guard against silent drift).
+fn gate_re(pattern: &str) -> Option<regex_lite::Regex> {
+    regex_lite::Regex::new(pattern).ok()
+}
+
+fn any_match(patterns: &[String], text: &str) -> bool {
+    patterns
+        .iter()
+        .any(|p| gate_re(p).is_some_and(|re| re.is_match(text)))
+}
+
+fn all_match(patterns: &[String], text: &str) -> bool {
+    patterns
+        .iter()
+        .all(|p| gate_re(p).is_some_and(|re| re.is_match(text)))
+}
+
+/// Recipient field names scanned for the send split — the common MCP send-tool shapes.
+const RECIPIENT_FIELDS: [&str; 6] = ["to", "cc", "bcc", "recipient", "recipients", "email"];
+
+/// Collect recipient-ish strings from the tool input (string or array-of-string fields).
+fn recipient_strings(tool_input: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(map) = tool_input.as_object() else {
+        return out;
+    };
+    for field in RECIPIENT_FIELDS {
+        match map.get(field) {
+            Some(Value::String(s)) => out.push(s.clone()),
+            Some(Value::Array(items)) => {
+                out.extend(items.iter().filter_map(Value::as_str).map(str::to_string));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The domain after the last `@`, lowercased, trailing punctuation trimmed. `None` when the
+/// string is not address-shaped.
+fn domain_of(recipient: &str) -> Option<String> {
+    let at = recipient.rfind('@')?;
+    let domain: String = recipient[at + 1..]
+        .trim_end_matches(['>', ')', '"', '\'', ',', ';'])
+        .to_ascii_lowercase();
+    if domain.is_empty() {
+        None
+    } else {
+        Some(domain)
+    }
+}
+
+impl GatePolicy {
+    /// Evaluate the ordered rules against one pre-exec tool call. `tool_name` is the raw hook
+    /// payload tool name (`Bash`, `Edit`, `mcp__server__tool`, …); extraction mirrors the
+    /// Console's `severity.ts` exactly (the parity vectors lock this).
+    pub fn evaluate(&self, tool_name: &str, tool_input: &Value, action_id: &str) -> GateDecision {
+        let command = if tool_name.eq_ignore_ascii_case("bash") {
+            tool_input.get("command").and_then(Value::as_str)
+        } else {
+            None
+        };
+        let file_path = tool_input.get("file_path").and_then(Value::as_str);
+        // `mcp__<server>__<tool>` → (server, tool); a bare non-builtin name is a gateway tool.
+        let (server, mcp_tool) = if let Some(rest) = tool_name.strip_prefix("mcp__") {
+            match rest.split_once("__") {
+                Some((s, t)) => (Some(s), Some(t)),
+                None => (Some(rest), Some(rest)),
+            }
+        } else {
+            (None, Some(tool_name))
+        };
+
+        for rule in &self.rules {
+            let (matched_kind, mut tier) = if !rule.command_any.is_empty() {
+                let Some(cmd) = command else { continue };
+                if !any_match(&rule.command_any, cmd)
+                    || !all_match(&rule.command_all, cmd)
+                    || rule.command_not.iter().any(|p| gate_re(p).is_some_and(|re| re.is_match(cmd)))
+                {
+                    continue;
+                }
+                ("command", rule.tier)
+            } else if !rule.path_any.is_empty() {
+                // The file_path lane gates WRITE-shaped tools only (Edit/Write/NotebookEdit — the
+                // self-mod class is "agent WRITES its own config"); a Read of the same path is the
+                // view layer's business, never a block. The Bash token lane stays strict both ways:
+                // shell read-vs-write is not parseable (the B4 ambiguity), so a command touching a
+                // gated path is gated regardless.
+                let read_like = tool_name.eq_ignore_ascii_case("read")
+                    || tool_name.eq_ignore_ascii_case("grep")
+                    || tool_name.eq_ignore_ascii_case("glob");
+                let path_hit =
+                    !read_like && file_path.is_some_and(|p| any_match(&rule.path_any, p));
+                let token_hit = !path_hit
+                    && command.is_some_and(|cmd| {
+                        cmd.split_ascii_whitespace().any(|tok| any_match(&rule.path_any, tok))
+                    });
+                if !path_hit && !token_hit {
+                    continue;
+                }
+                ("path", rule.tier)
+            } else if !rule.tool_any.is_empty() {
+                let Some(tool) = mcp_tool else { continue };
+                // Builtin file/shell tools are never MCP-shaped — a tool rule must not match
+                // `Bash`/`Edit` themselves (their governance is the command/path lanes above).
+                if tool_name.eq_ignore_ascii_case("bash")
+                    || tool_name.eq_ignore_ascii_case("edit")
+                    || tool_name.eq_ignore_ascii_case("write")
+                    || tool_name.eq_ignore_ascii_case("read")
+                {
+                    continue;
+                }
+                let hit = rule.tool_any.iter().any(|m| {
+                    let tool_ok = gate_re(&m.tool).is_some_and(|re| re.is_match(tool));
+                    match &m.server {
+                        Some(srv_pat) => {
+                            server.is_some_and(|s| gate_re(srv_pat).is_some_and(|re| re.is_match(s)))
+                                && tool_ok
+                        }
+                        None => tool_ok,
+                    }
+                });
+                if !hit {
+                    continue;
+                }
+                ("tool", rule.tier)
+            } else {
+                continue; // a rule with no matcher never matches
+            };
+
+            // Outbound-send split: all-internal recipients demote to the internal tier;
+            // unknown (no recipient field found) stays at the rule's primary tier — fail-visible.
+            let mut recipients_class = None;
+            let mut recipients_count = None;
+            if let Some(send) = &rule.send {
+                let recipients = recipient_strings(tool_input);
+                recipients_count = Some(recipients.len());
+                if recipients.is_empty() {
+                    recipients_class = Some("unknown");
+                } else {
+                    let domains: Vec<String> =
+                        recipients.iter().filter_map(|r| domain_of(r)).collect();
+                    let all_internal = !domains.is_empty()
+                        && domains.iter().all(|d| {
+                            send.internal_domains.iter().any(|i| i.eq_ignore_ascii_case(d))
+                        });
+                    if all_internal {
+                        recipients_class = Some("internal");
+                        tier = send.internal_tier;
+                    } else {
+                        recipients_class = Some("external");
+                    }
+                }
+            }
+
+            let record = GateRecord {
+                class: rule.class.clone(),
+                rule_id: rule.rule_id.clone(),
+                tier,
+                matcher_kind: matched_kind,
+                action_id: action_id.to_string(),
+                recipients_class,
+                recipients_count,
+            };
+            return match tier {
+                GateTier::Allow => GateDecision::Pass,
+                GateTier::Receipt => GateDecision::Receipt(record),
+                GateTier::Approve => GateDecision::Approval(record),
+                GateTier::Deny => GateDecision::Deny(record),
+            };
+        }
+        GateDecision::Pass
+    }
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn gates_yaml(yaml: &str) -> GatePolicy {
+        let p: Policy = serde_yaml::from_str(yaml).expect("policy parses");
+        p.gates.expect("gates section present")
+    }
+
+    /// A minimal hand-authored gates section covering every matcher kind + the doc-30 incident
+    /// shapes. The Console-compiled default set is exercised by `tests/gate_vectors.rs` over the
+    /// committed `default-gates.yaml` + `gate-matcher-vectors.json` (the cross-repo parity lock).
+    fn sample() -> GatePolicy {
+        gates_yaml(
+            r#"
+rules: [{action: "*", allow: true}]
+gates:
+  rules:
+    - class: destructive-git
+      rule_id: git-force-push--protected
+      tier: deny
+      command_any: ["\\bgit\\s+push\\b[^|;&]*(\\s--force(-with-lease)?\\b|\\s-f\\b)"]
+      command_all: ["(?:\\bmain\\b|\\brelease/)"]
+    - class: destructive-git
+      rule_id: git-force-push
+      tier: receipt
+      command_any: ["\\bgit\\s+push\\b[^|;&]*(\\s--force(-with-lease)?\\b|\\s-f\\b)"]
+    - class: publish
+      rule_id: npm-publish
+      tier: approve
+      command_any: ["\\b(npm|pnpm|yarn)\\s+publish\\b"]
+    - class: prod-db
+      rule_id: prisma-migrate-deploy
+      tier: approve
+      command_any: ["\\bprisma\\s+migrate\\s+deploy\\b"]
+      command_not: ["(?i)\\b(localhost|127\\.0\\.0\\.1|preview|branch|staging|dev|test)\\b"]
+    - class: self-mod
+      rule_id: self-config-path
+      tier: deny
+      path_any: ["(?i)(^|/)\\.claude/settings[^/]*$|(^|/)\\.claude/hooks(/|$)|(^|/)\\.?mcp\\.json$"]
+    - class: send
+      rule_id: send-tool
+      tier: approve
+      tool_any: [{tool: "(?i)(^|_|\\b)(send|post)_(email|mail|message|dm|sms)\\b|^send_|_send$"}]
+      send: {internal_domains: ["acme.com"], internal_tier: receipt}
+"#,
+        )
+    }
+
+    #[test]
+    fn force_push_to_protected_ref_denies_and_elsewhere_receipts() {
+        let g = sample();
+        let d = g.evaluate("Bash", &json!({"command": "git push --force origin main"}), "claude-code__bash");
+        assert!(matches!(d, GateDecision::Deny(ref r) if r.rule_id == "git-force-push--protected"));
+        let d = g.evaluate("Bash", &json!({"command": "git push -f origin feat/x"}), "claude-code__bash");
+        assert!(matches!(d, GateDecision::Receipt(ref r) if r.rule_id == "git-force-push"));
+    }
+
+    #[test]
+    fn npm_publish_routes_to_approval_and_plain_push_passes() {
+        let g = sample();
+        assert!(matches!(
+            g.evaluate("Bash", &json!({"command": "npm publish --access public"}), "claude-code__bash"),
+            GateDecision::Approval(ref r) if r.class == "publish"
+        ));
+        assert!(matches!(
+            g.evaluate("Bash", &json!({"command": "git push origin feat/x"}), "claude-code__bash"),
+            GateDecision::Pass
+        ));
+    }
+
+    #[test]
+    fn prisma_migrate_deploy_gated_on_prod_but_not_on_branch_urls() {
+        let g = sample();
+        assert!(matches!(
+            g.evaluate("Bash", &json!({"command": "DATABASE_URL=postgres://prod-db/main prisma migrate deploy"}), "claude-code__bash"),
+            GateDecision::Approval(_)
+        ));
+        assert!(matches!(
+            g.evaluate("Bash", &json!({"command": "DATABASE_URL=postgres://localhost/dev prisma migrate deploy"}), "claude-code__bash"),
+            GateDecision::Pass
+        ));
+    }
+
+    #[test]
+    fn hooks_file_edit_denies_via_path_and_via_command_token() {
+        let g = sample();
+        assert!(matches!(
+            g.evaluate("Edit", &json!({"file_path": "/Users/x/.claude/settings.json"}), "claude-code__edit"),
+            GateDecision::Deny(ref r) if r.class == "self-mod" && r.matcher_kind == "path"
+        ));
+        assert!(matches!(
+            g.evaluate("Bash", &json!({"command": "echo '{}' > /Users/x/.claude/settings.json"}), "claude-code__bash"),
+            GateDecision::Deny(ref r) if r.matcher_kind == "path"
+        ));
+    }
+
+    #[test]
+    fn send_split_internal_receipts_external_approves_unknown_stays_strict() {
+        let g = sample();
+        let d = g.evaluate("mcp__gmail__send_email", &json!({"to": "a@acme.com"}), "claude-code__mcp__gmail__send_email");
+        assert!(matches!(d, GateDecision::Receipt(ref r) if r.recipients_class == Some("internal")));
+        let d = g.evaluate("mcp__gmail__send_email", &json!({"to": ["a@acme.com", "b@other.io"]}), "claude-code__mcp__gmail__send_email");
+        assert!(matches!(d, GateDecision::Approval(ref r) if r.recipients_class == Some("external")));
+        let d = g.evaluate("mcp__gmail__send_email", &json!({"subject": "hi"}), "claude-code__mcp__gmail__send_email");
+        assert!(matches!(d, GateDecision::Approval(ref r) if r.recipients_class == Some("unknown")));
+    }
+
+    #[test]
+    fn absent_gates_section_means_no_consult_and_receipts_never_leak_command_content() {
+        let p: Policy = serde_yaml::from_str(r#"rules: [{action: "*", allow: true}]"#).unwrap();
+        assert!(p.gates().is_none());
+        let g = sample();
+        let GateDecision::Deny(rec) =
+            g.evaluate("Bash", &json!({"command": "git push --force origin main --secret-token abc123"}), "claude-code__bash")
+        else {
+            panic!("expected deny");
+        };
+        let text = serde_json::to_value(&rec).unwrap().to_string();
+        assert!(!text.contains("abc123"), "command content leaked into the gate receipt: {text}");
+        assert!(!text.contains("--force"), "command content leaked into the gate receipt: {text}");
+    }
+
+    #[test]
+    fn tool_rules_never_match_builtin_bash_or_edit() {
+        let g = gates_yaml(
+            r#"
+rules: [{action: "*", allow: true}]
+gates:
+  rules:
+    - class: send
+      rule_id: catchall-tool
+      tier: deny
+      tool_any: [{tool: ".*"}]
+"#,
+        );
+        assert!(matches!(
+            g.evaluate("Bash", &json!({"command": "ls"}), "claude-code__bash"),
+            GateDecision::Pass
+        ));
+        assert!(matches!(
+            g.evaluate("mcp__gmail__send_email", &json!({}), "claude-code__mcp__gmail__send_email"),
+            GateDecision::Deny(_)
+        ));
     }
 }
 

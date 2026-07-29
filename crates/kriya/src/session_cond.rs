@@ -435,6 +435,22 @@ mod tests {
     }
 
     #[test]
+    fn gate_receipts_are_governance_internal_by_construction() {
+        // F-2: kriya.gate.<class>.* is the gate engine's own bookkeeping — the UNDERLYING action
+        // receipt is the governed event; counting both would double a single agent action in the
+        // temporal fold. Excluded structurally (kriya.* minus the governed allowlist), asserted
+        // here explicitly so the F-C fixture disposition ("internal") is code-backed.
+        for id in [
+            "kriya.gate.self-mod.denied",
+            "kriya.gate.publish.held",
+            "kriya.gate.deploy.approved",
+            "kriya.gate.destructive-git.evaluated",
+        ] {
+            assert!(is_governance_internal_b4(id), "{id} must be governance-internal");
+        }
+    }
+
+    #[test]
     fn watch_evidence_prefixes_are_governed_but_liveness_is_not() {
         for id in ["kriya.watch.proc.exec", "kriya.watch.file.write", "kriya.watch.net.connect", "kriya.watch.dns.lookup"] {
             assert!(!is_governance_internal_b4(id), "{id} is EVIDENCE — must be governed/countable");
