@@ -1349,3 +1349,157 @@ fn temporal_cond_warn_is_reserved_not_emitted_in_v1() {
     let _ = std::fs::remove_dir_all(&state_dir);
     let _ = std::fs::remove_dir_all(log.parent().unwrap().parent().unwrap());
 }
+
+// ─── F-2 action gates (kriya-console doc 31 §3.3 / docs/ideas/design/F2-gates.md) ───────────────
+// The doc-22 B0 discipline applied to the gates dimension: prove at the COMPILED-BINARY boundary
+// that a gate deny actually blocks in the Claude Code lane (exit 2 + signed evidence), that the
+// receipt tier records-and-proceeds, and that the approve tier holds when no approval is granted.
+
+fn gates_policy_yaml() -> &'static str {
+    r#"
+rules:
+  - { action: "*", allow: true }
+gates:
+  rules:
+    - class: self-mod
+      rule_id: self-config-path
+      tier: deny
+      path_any: ["(?i)(^|/)\\.claude/settings[^/]*$|(^|/)\\.claude/hooks(/|$)|(^|/)\\.?mcp\\.json$"]
+    - class: publish
+      rule_id: npm-publish
+      tier: approve
+      command_any: ["\\b(npm|pnpm|yarn)\\s+publish\\b"]
+    - class: destructive-git
+      rule_id: git-force-push
+      tier: receipt
+      command_any: ["\\bgit\\s+push\\b[^|;&]*(\\s--force(-with-lease)?\\b|\\s-f\\b)"]
+"#
+}
+
+/// B0 for gates: a self-mod gate deny BLOCKS the agent editing its own hooks/settings file (the
+/// CurXecute vector, doc 30 §5) even though the action tier allows everything — and both the
+/// blocked attempt's action receipt and the `kriya.gate.self-mod.denied` receipt are signed, the
+/// gate receipt pointing at the action receipt via `corr_step` and carrying no file content.
+#[test]
+fn gates_self_mod_deny_blocks_hooks_file_edit_and_signs_gate_receipts() {
+    let bin = build_binary();
+    let (log, key, policy) = sandbox();
+    std::fs::write(&policy, gates_policy_yaml()).unwrap();
+
+    let r = run(
+        &bin,
+        "pre",
+        &[
+            "--policy",
+            policy.to_str().unwrap(),
+            "--audit-log",
+            log.to_str().unwrap(),
+            "--signing-key",
+            key.to_str().unwrap(),
+        ],
+        &pre_payload("Edit", r#"{"file_path":"/Users/x/.claude/settings.json","old_string":"a","new_string":"b"}"#),
+    );
+
+    assert_eq!(
+        r.status.code(),
+        Some(2),
+        "a self-mod gate deny must block via exit 2 (B0): stderr={:?}",
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("self-mod") && r.stderr.contains("denied"),
+        "stderr names the gate so Claude sees why: {:?}",
+        r.stderr
+    );
+
+    let receipts = read_receipts(&log);
+    assert_eq!(receipts.len(), 2, "action receipt + gate receipt");
+    assert_eq!(receipts[0]["action_id"], "claude-code__edit");
+    assert_eq!(receipts[0]["success"], false);
+    assert_eq!(receipts[1]["action_id"], "kriya.gate.self-mod.denied");
+    assert_eq!(receipts[1]["success"], false);
+    assert_eq!(receipts[1]["params"]["class"], "self-mod");
+    assert_eq!(receipts[1]["params"]["rule_id"], "self-config-path");
+    assert_eq!(receipts[1]["params"]["tier"], "deny");
+    assert_eq!(receipts[1]["params"]["matcher_kind"], "path");
+    assert_eq!(receipts[1]["params"]["corr_step"], receipts[0]["step_id"]);
+    assert!(
+        !receipts[1]["params"].to_string().contains("settings.json"),
+        "the gate receipt must not carry the path/content — the action receipt does: {}",
+        receipts[1]["params"]
+    );
+
+    let _ = std::fs::remove_dir_all(log.parent().unwrap());
+}
+
+/// The receipt tier records `kriya.gate.<class>.evaluated` and PROCEEDS (exit 0) — governance
+/// visibility without a block, exactly what "Receipt-only" promises in the Console UI.
+#[test]
+fn gates_receipt_tier_signs_evaluated_and_proceeds() {
+    let bin = build_binary();
+    let (log, key, policy) = sandbox();
+    std::fs::write(&policy, gates_policy_yaml()).unwrap();
+
+    let r = run(
+        &bin,
+        "pre",
+        &[
+            "--policy",
+            policy.to_str().unwrap(),
+            "--audit-log",
+            log.to_str().unwrap(),
+            "--signing-key",
+            key.to_str().unwrap(),
+        ],
+        &pre_payload("Bash", r#"{"command":"git push --force origin feat/x"}"#),
+    );
+
+    assert_eq!(r.status.code(), Some(0), "receipt tier must not block: stderr={:?}", r.stderr);
+    let receipts = read_receipts(&log);
+    assert_eq!(receipts.len(), 1, "exactly the evaluated receipt (the action's own receipt lands post-hook)");
+    assert_eq!(receipts[0]["action_id"], "kriya.gate.destructive-git.evaluated");
+    assert_eq!(receipts[0]["success"], true);
+    assert_eq!(receipts[0]["params"]["rule_id"], "git-force-push");
+
+    let _ = std::fs::remove_dir_all(log.parent().unwrap());
+}
+
+/// The approve tier under `--approval deny` (the default, headless posture) holds the action:
+/// exit 2 + the blocked attempt's action receipt + `kriya.gate.publish.held` pointing at it.
+#[test]
+fn gates_approve_tier_holds_npm_publish_when_no_approval_granted() {
+    let bin = build_binary();
+    let (log, key, policy) = sandbox();
+    std::fs::write(&policy, gates_policy_yaml()).unwrap();
+
+    let r = run(
+        &bin,
+        "pre",
+        &[
+            "--policy",
+            policy.to_str().unwrap(),
+            "--audit-log",
+            log.to_str().unwrap(),
+            "--signing-key",
+            key.to_str().unwrap(),
+            "--approval",
+            "deny",
+        ],
+        &pre_payload("Bash", r#"{"command":"npm publish --access public"}"#),
+    );
+
+    assert_eq!(r.status.code(), Some(2), "unapproved approve-tier gate must block: stderr={:?}", r.stderr);
+    assert!(
+        r.stderr.contains("publish") && r.stderr.contains("approval"),
+        "stderr names the gate + the missing approval: {:?}",
+        r.stderr
+    );
+    let receipts = read_receipts(&log);
+    assert_eq!(receipts.len(), 2, "action receipt + held receipt");
+    assert_eq!(receipts[0]["action_id"], "claude-code__bash");
+    assert_eq!(receipts[0]["success"], false);
+    assert_eq!(receipts[1]["action_id"], "kriya.gate.publish.held");
+    assert_eq!(receipts[1]["params"]["corr_step"], receipts[0]["step_id"]);
+
+    let _ = std::fs::remove_dir_all(log.parent().unwrap());
+}
