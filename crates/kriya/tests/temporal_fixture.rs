@@ -321,6 +321,10 @@ fn f_c_ids() -> (Vec<&'static str>, Vec<&'static str>) {
         // policy.cond; listed here (a representative instance of the kriya.gate.<class>.* family)
         // so this generator never clobbers the disposition out of the fixture.
         "kriya.gate.self-mod.denied",
+        // F-3 (kriya-console doc 31 §3.3): pack-lifecycle receipts — Console-signed operator
+        // bookkeeping (a pack applied/edited on the device), never governed agent activity.
+        "kriya.policy.pack.applied",
+        "kriya.policy.pack.changed",
     ];
     let governed = vec![
         "claude-code__bash",

@@ -72,7 +72,9 @@
     "kriya.io.ingress.file.approve",
     "kriya.drift.observation",
     "kriya.drift.baseline",
-    "kriya.gate.self-mod.denied"
+    "kriya.gate.self-mod.denied",
+    "kriya.policy.pack.applied",
+    "kriya.policy.pack.changed"
   ],
   "v": 1
 }
