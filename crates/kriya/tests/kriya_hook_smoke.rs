@@ -1350,7 +1350,7 @@ fn temporal_cond_warn_is_reserved_not_emitted_in_v1() {
     let _ = std::fs::remove_dir_all(log.parent().unwrap().parent().unwrap());
 }
 
-// ─── F-2 action gates (kriya-console doc 31 §3.3 / docs/ideas/design/F2-gates.md) ───────────────
+// ─── F-2 action gates (kriya-console doc 31 §3.3 / the F2-gates design doc (kriya-console)) ───────────────
 // The doc-22 B0 discipline applied to the gates dimension: prove at the COMPILED-BINARY boundary
 // that a gate deny actually blocks in the Claude Code lane (exit 2 + signed evidence), that the
 // receipt tier records-and-proceeds, and that the approve tier holds when no approval is granted.

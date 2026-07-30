@@ -155,7 +155,7 @@ pub struct Policy {
     /// `egress`/`detection`/`secrets`/`model`/`budgets`/`exec`/`memory` already established).
     #[serde(default)]
     temporal: Option<TemporalPolicy>,
-    /// F-2 (kriya-console doc 31 §3.3 / docs/ideas/design/F2-gates.md): **action gates** — the
+    /// F-2 (kriya-console doc 31 §3.3 / the F2-gates design doc (kriya-console)): **action gates** — the
     /// Console-compiled high-stakes-class matcher rules (deploy, destructive-git, publish, prod-DB,
     /// infra, outbound-send, self-modification). Evaluated by the hook `pre` lane as a
     /// TIGHTEN-ONLY escalation over the action tier (the exact B4 idiom), with the receipt
@@ -2705,7 +2705,7 @@ mod temporal_tests {
     }
 }
 
-// ─── F-2 — Action gates (kriya-console doc 31 §3.3 / docs/ideas/design/F2-gates.md) ─────────────
+// ─── F-2 — Action gates (kriya-console doc 31 §3.3 / the F2-gates design doc (kriya-console)) ─────────────
 // The Console-compiled matcher rules for the high-stakes action classes. The engine is policy
 // authoring + receipt vocabulary over the EXISTING enforcement path — evaluated by the hook `pre`
 // lane in the exact tighten-only slot/idiom of the B4 temporal block: a gate can escalate an
