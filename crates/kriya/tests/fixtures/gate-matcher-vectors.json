@@ -1,0 +1,325 @@
+[
+  {
+    "name": "force-push main (protected)",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "git push --force origin main"
+    },
+    "expect": {
+      "kind": "deny",
+      "class": "destructive-git",
+      "rule_id": "git-force-push--protected",
+      "tier": "deny"
+    }
+  },
+  {
+    "name": "force-push release branch (protected glob)",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "git push --force-with-lease origin release/2.0"
+    },
+    "expect": {
+      "kind": "deny",
+      "class": "destructive-git",
+      "rule_id": "git-force-push--protected",
+      "tier": "deny"
+    }
+  },
+  {
+    "name": "force-push feature branch",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "git push -f origin feat/x"
+    },
+    "expect": {
+      "kind": "receipt",
+      "class": "destructive-git",
+      "rule_id": "git-force-push",
+      "tier": "receipt"
+    }
+  },
+  {
+    "name": "reset --hard",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "git reset --hard HEAD~3"
+    },
+    "expect": {
+      "kind": "receipt",
+      "class": "destructive-git",
+      "rule_id": "git-reset-hard",
+      "tier": "receipt"
+    }
+  },
+  {
+    "name": "plain push is ungated",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "git push origin feat/x"
+    },
+    "expect": null
+  },
+  {
+    "name": "npm publish",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "npm publish --access public"
+    },
+    "expect": {
+      "kind": "approval",
+      "class": "publish",
+      "rule_id": "npm-publish",
+      "tier": "approve"
+    }
+  },
+  {
+    "name": "cargo publish",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "cargo publish -p kriya-verify"
+    },
+    "expect": {
+      "kind": "approval",
+      "class": "publish",
+      "rule_id": "cargo-publish",
+      "tier": "approve"
+    }
+  },
+  {
+    "name": "dep install receipts (gate only publishes)",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "npm install left-pad"
+    },
+    "expect": {
+      "kind": "receipt",
+      "class": "deps",
+      "rule_id": "dep-install",
+      "tier": "receipt"
+    }
+  },
+  {
+    "name": "lockfile restore is ungated",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "npm ci"
+    },
+    "expect": null
+  },
+  {
+    "name": "fly deploy",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "fly deploy --app kriya-api-prod"
+    },
+    "expect": {
+      "kind": "approval",
+      "class": "deploy",
+      "rule_id": "fly-deploy",
+      "tier": "approve"
+    }
+  },
+  {
+    "name": "vercel prod",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "vercel deploy --prod"
+    },
+    "expect": {
+      "kind": "approval",
+      "class": "deploy",
+      "rule_id": "vercel-prod",
+      "tier": "approve"
+    }
+  },
+  {
+    "name": "vercel preview (demoted)",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "vercel deploy"
+    },
+    "expect": {
+      "kind": "receipt",
+      "class": "deploy",
+      "rule_id": "vercel-preview",
+      "tier": "receipt"
+    }
+  },
+  {
+    "name": "kubectl apply",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "kubectl apply -f k8s/prod.yaml"
+    },
+    "expect": {
+      "kind": "approval",
+      "class": "deploy",
+      "rule_id": "kubectl-mutate",
+      "tier": "approve"
+    }
+  },
+  {
+    "name": "terraform apply",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "terraform apply -auto-approve"
+    },
+    "expect": {
+      "kind": "approval",
+      "class": "infra",
+      "rule_id": "tf-apply",
+      "tier": "approve"
+    }
+  },
+  {
+    "name": "iam mutation",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "aws iam attach-role-policy --role-name x --policy-arn y"
+    },
+    "expect": {
+      "kind": "approval",
+      "class": "infra",
+      "rule_id": "iam-mutate",
+      "tier": "approve"
+    }
+  },
+  {
+    "name": "prisma migrate deploy on prod URL",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "DATABASE_URL=postgres://prod-db.example.com/main prisma migrate deploy"
+    },
+    "expect": {
+      "kind": "approval",
+      "class": "prod-db",
+      "rule_id": "prisma-migrate-deploy",
+      "tier": "approve"
+    }
+  },
+  {
+    "name": "destructive SQL on localhost (demoted to allow)",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "psql postgres://localhost/dev -c 'DROP TABLE t'"
+    },
+    "expect": null
+  },
+  {
+    "name": "destructive SQL on prod",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "psql postgres://db.example.com/main -c 'DROP TABLE users'"
+    },
+    "expect": {
+      "kind": "approval",
+      "class": "prod-db",
+      "rule_id": "destructive-sql",
+      "tier": "approve"
+    }
+  },
+  {
+    "name": "edit own settings",
+    "tool_name": "Edit",
+    "tool_input": {
+      "file_path": "/Users/x/.claude/settings.json"
+    },
+    "expect": {
+      "kind": "deny",
+      "class": "self-mod",
+      "rule_id": "self-config-path",
+      "tier": "deny"
+    }
+  },
+  {
+    "name": "write own hooks",
+    "tool_name": "Write",
+    "tool_input": {
+      "file_path": "/Users/x/.claude/hooks/pre.sh"
+    },
+    "expect": {
+      "kind": "deny",
+      "class": "self-mod",
+      "rule_id": "self-config-path",
+      "tier": "deny"
+    }
+  },
+  {
+    "name": "bash redirect into settings (token lane)",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "echo '{}' > /Users/x/.claude/settings.json"
+    },
+    "expect": {
+      "kind": "deny",
+      "class": "self-mod",
+      "rule_id": "self-config-path",
+      "tier": "deny"
+    }
+  },
+  {
+    "name": "READ of own settings is not gate-blocked",
+    "tool_name": "Read",
+    "tool_input": {
+      "file_path": "/Users/x/.claude/settings.json"
+    },
+    "expect": null
+  },
+  {
+    "name": "mcp send external",
+    "tool_name": "mcp__gmail__send_email",
+    "tool_input": {
+      "to": "a@other.io"
+    },
+    "expect": {
+      "kind": "receipt",
+      "class": "send",
+      "rule_id": "send-tool",
+      "tier": "receipt"
+    }
+  },
+  {
+    "name": "mcp deploy tool",
+    "tool_name": "mcp__vercel__deploy_to_vercel",
+    "tool_input": {},
+    "expect": {
+      "kind": "approval",
+      "class": "deploy",
+      "rule_id": "mcp-deploy",
+      "tier": "approve"
+    }
+  },
+  {
+    "name": "neon prepare (branch step, demoted to allow)",
+    "tool_name": "mcp__neon__prepare_database_migration",
+    "tool_input": {},
+    "expect": null
+  },
+  {
+    "name": "neon complete",
+    "tool_name": "mcp__neon__complete_database_migration",
+    "tool_input": {},
+    "expect": {
+      "kind": "approval",
+      "class": "prod-db",
+      "rule_id": "db-migration-complete",
+      "tier": "approve"
+    }
+  },
+  {
+    "name": "cargo test is ungated",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "cargo test -p kriya"
+    },
+    "expect": null
+  },
+  {
+    "name": "file edit outside gated paths",
+    "tool_name": "Edit",
+    "tool_input": {
+      "file_path": "/work/src/main.rs"
+    },
+    "expect": null
+  }
+]

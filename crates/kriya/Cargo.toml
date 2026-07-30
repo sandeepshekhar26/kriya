@@ -148,6 +148,13 @@ aws-lc-rs = { version = "=1.17.3", optional = true }
 # new supply-chain surface. Used for credential brokering (doc 24 §11 B13 / EG-B): a secret read
 # from OS Keychain is wrapped the moment it's in hand and zeroed on drop.
 zeroize = "1"
+# F-2 action gates (permissions::GatePolicy): the matcher engine for the Console-compiled gate
+# rules. `regex-lite` deliberately, not `regex`: ZERO transitive dependencies, pure Rust, from the
+# rust-lang regex team — and its ASCII semantics match the Console's JS `RegExp` evaluation of the
+# SAME pattern table (the cross-repo gate-matcher-vectors parity test locks the dialect). The one
+# unconditional dependency this crate has added since sha2/uuid; accepted because it IS the gate
+# matcher engine, not incidental (the wasmtime precedent).
+regex-lite = "0.1"
 uuid = { version = "1", features = ["v4"] }
 ureq = { version = "2", features = ["json", "tls"], optional = true }
 rusqlite = { version = "0.31", features = ["bundled"] }

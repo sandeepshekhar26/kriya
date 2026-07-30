@@ -315,6 +315,12 @@ fn f_c_ids() -> (Vec<&'static str>, Vec<&'static str>) {
         // fixture edit.
         "kriya.drift.observation",
         "kriya.drift.baseline",
+        // F-2 (kriya-console doc 31 §3.3): the action-gate engine's own decision receipts — the
+        // UNDERLYING action receipt is the governed event; counting the gate receipt too would
+        // double one agent action in the fold. Same namespace default-exclude as spend.gate/
+        // policy.cond; listed here (a representative instance of the kriya.gate.<class>.* family)
+        // so this generator never clobbers the disposition out of the fixture.
+        "kriya.gate.self-mod.denied",
     ];
     let governed = vec![
         "claude-code__bash",
