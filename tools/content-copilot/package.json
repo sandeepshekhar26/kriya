@@ -1,0 +1,22 @@
+{
+  "name": "content-copilot",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Human-in-the-loop marketing co-pilot for kriya: find relevant discussions, draft platform-tailored posts, and post ONLY what you approve.",
+  "bin": {
+    "content-copilot": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.6.0"
+  }
+}

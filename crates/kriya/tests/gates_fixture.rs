@@ -1,4 +1,4 @@
-//! F-2 parity fixture (kriya-console doc 31 §3.3 / docs/ideas/design/F2-gates.md §5): a small,
+//! F-2 parity fixture (kriya-console doc 31 §3.3 / the F2-gates design doc (kriya-console) §5): a small,
 //! DETERMINISTIC chain of action + `kriya.gate.<class>.*` receipts that the kriya-console suite
 //! imports to prove its TS verifier re-derives the runtime's bytes byte-identically — one receipt
 //! per verb of the new vocabulary ({evaluated, held, approved, denied}), with the held/denied

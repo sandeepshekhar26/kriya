@@ -153,6 +153,21 @@ budgets need the long-running gateway, and hooks are a cooperative seam — whoe
 runs against **your own AWS Bedrock** (`CLAUDE_CODE_USE_BEDROCK=1`): the model stays in your cloud
 boundary, the action evidence stays on your machine.
 
+**Action gates** — the policy file may carry a `gates:` section of ordered matcher rules
+(`{class, rule_id, tier, command_any/all/not, path_any, tool_any}`) classifying the high-stakes
+action shapes — deploys, destructive git, publishes, production-DB writes, infra mutation,
+outbound sends, agent **self-modification** — into `allow | receipt | approve | deny`. The hook
+evaluates them pre-execution as a **tighten-only** escalation over your action rules (a gate can
+escalate an allowed action to approval/deny; it can never loosen a deny), reusing the same
+approval gate and the same exit-2 blocking contract. Every decision is a signed
+`kriya.gate.<class>.{evaluated,held,approved,denied}` receipt; on a block, the attempt's own
+action receipt is recorded first and the gate receipt chain-links to it — the gate receipt itself
+never carries command content. Absent `gates:` ⇒ behavior is byte-identical to earlier releases.
+The [kriya Console](https://github.com/sandeepshekhar26/kriya-console) authors and compiles this
+section (per-class tiers, protected refs, prod matchers, packs); the format is plain YAML, so you
+can also write it by hand — see `crates/kriya/tests/fixtures/default-gates.yaml` for the complete
+default set and `tests/gate_vectors.rs` for the cross-implementation parity corpus.
+
 ## Govern local inference — `kriya-llm-proxy` (F1)
 
 Sovereign/air-gapped orgs run models **locally** — Ollama, llama.cpp's server, vLLM's OpenAI-compat

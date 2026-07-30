@@ -767,7 +767,7 @@ fn main() -> ExitCode {
                 }
             }
 
-            // F-2 (kriya-console doc 31 §3.3 / docs/ideas/design/F2-gates.md) — action gates.
+            // F-2 (kriya-console doc 31 §3.3 / the F2-gates design doc (kriya-console)) — action gates.
             // Placed FIRST among the escalation dimensions (before B4 temporal and the C2 budget
             // gate): gates are pure in-process pattern matching — no session fold, no external
             // state — so a gate-denied action is blocked before any state producer runs at all.

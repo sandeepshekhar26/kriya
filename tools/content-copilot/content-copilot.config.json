@@ -1,0 +1,24 @@
+{
+  "product": {
+    "name": "kriya",
+    "repoUrl": "https://github.com/your-org/kriya",
+    "pitch": "A governed in-process action layer for local, API-less apps: expose your app's real typed actions to any agent over MCP, with permission, human approval, budget, and signed audit built in, on-device."
+  },
+  "topics": [
+    "MCP",
+    "model context protocol",
+    "agent governance",
+    "local-first AI",
+    "computer use",
+    "AI agent safety",
+    "desktop agent",
+    "tool calling"
+  ],
+  "sources": {
+    "hackernews": true,
+    "reddit": ["LocalLLaMA", "mcp", "ArtificialIntelligence"],
+    "rss": []
+  },
+  "platforms": ["x", "linkedin", "reddit"],
+  "queueDir": ".content-copilot"
+}
