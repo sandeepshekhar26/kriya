@@ -279,6 +279,10 @@ fn f_c_ids() -> (Vec<&'static str>, Vec<&'static str>) {
         // bookkeeping about a window, never a governed agent action.
         "kriya.attest.shift.report",
         "kriya.attest.shift.gap",
+        // F-6 enforcement: the hook's fail-closed clamp receipt is enforcement bookkeeping (the
+        // underlying blocked action is the governed event), so it is governance-internal like the
+        // gate/cond decision records.
+        "kriya.shift.clamp",
         "kriya.artifact.provenance",
         "kriya.diode.export",
         "kriya.diode.import",

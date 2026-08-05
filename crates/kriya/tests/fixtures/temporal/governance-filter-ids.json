@@ -41,6 +41,7 @@
     "kriya.attest.sandbox",
     "kriya.attest.shift.report",
     "kriya.attest.shift.gap",
+    "kriya.shift.clamp",
     "kriya.artifact.provenance",
     "kriya.diode.export",
     "kriya.diode.import",

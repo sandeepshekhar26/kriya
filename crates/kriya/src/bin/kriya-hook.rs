@@ -97,8 +97,9 @@ use kriya::mcp::{
 };
 use kriya::permissions::{
     url_host, BudgetCtx, BudgetGateDecision, BudgetGateRecord, CondRecord, Decision, GateDecision,
-    GateRecord, OnUnavailable, Policy, TemporalDecision,
+    GateRecord, OnUnavailable, Policy, TemporalDecision, Tier,
 };
+use kriya::shift_guard;
 use kriya::secrets::{
     find_placeholder_aliases, json_escape_inner, read_keychain_secret, redact_broker_values,
     substitute_placeholders,
@@ -1016,6 +1017,67 @@ fn main() -> ExitCode {
                             rec.rule_id
                         );
                         return ExitCode::from(2);
+                    }
+                }
+            }
+
+            // F-6 (doc 31 §9 / doc 33 §4-C; design ../kriya-console/docs/ideas/design/F6-shift.md) —
+            // the shift-armed fail-closed clamp. Placed HERE in the same tighten-only slot as the
+            // temporal (B4) lane above and the budget (C2) lane below: it can only ESCALATE the
+            // already-resolved Allow/granted-approval to approval|deny, never loosen the deny/
+            // ungranted-approval outcomes that already returned. Reads the Console-written armed
+            // state (~/.kriya/state/shift.json) + the freshest heartbeat; state absent/unparseable ⇒
+            // NO clamp (the session_cond "cache is never the source of truth" law — availability is
+            // never held hostage to the state file; the enforcement fail-closed IS the clamp, applied
+            // only when the state is readable and says a beat was actually missed inside the window).
+            {
+                let log_path = resolved_audit_log_path(&args);
+                let state_dir = state_dir_for_audit_log(&log_path);
+                if let Some(guard) = shift_guard::load(&state_dir) {
+                    let last_beat = shift_guard::last_heartbeat_ms(&log_path);
+                    if let Some(tier) = guard.clamp(now_ms() as u64, last_beat) {
+                        let age_ms = last_beat.map(|b| (now_ms() as u64).saturating_sub(b));
+                        let clamp_params = serde_json::json!({
+                            "reason": "missed-heartbeat",
+                            "tier": if tier == Tier::Deny { "deny" } else { "approval" },
+                            "shift_start_ms": guard.start_ms,
+                            "shift_end_ms": guard.end_ms,
+                            "cadence_ms": guard.cadence_ms,
+                            "last_heartbeat_age_ms": age_ms,
+                            "last_heartbeat_seen": last_beat.is_some(),
+                        });
+                        match tier {
+                            Tier::Approval => {
+                                let gate = match approval_gate(&args.approval) {
+                                    Ok(g) => g,
+                                    Err(e) => {
+                                        eprintln!("kriya-hook: {e} — blocking (fail closed)");
+                                        return ExitCode::from(2);
+                                    }
+                                };
+                                if !gate.request(&action_id, &params) {
+                                    record(&signer, &actor, "kriya.shift.clamp", clamp_params, false, &corr);
+                                    eprintln!(
+                                        "kriya-hook: unattended shift armed and a heartbeat was missed \
+                                         — '{action_id}' held for approval (fail-closed tier) and was \
+                                         not granted (approval mode: {}). A signed receipt of the \
+                                         blocked attempt was recorded.",
+                                        args.approval
+                                    );
+                                    return ExitCode::from(2);
+                                }
+                            }
+                            Tier::Deny => {
+                                record(&signer, &actor, "kriya.shift.clamp", clamp_params, false, &corr);
+                                eprintln!(
+                                    "kriya-hook: unattended shift armed and a heartbeat was missed — \
+                                     '{action_id}' denied (fail-closed tier). A signed receipt of the \
+                                     blocked attempt was recorded."
+                                );
+                                return ExitCode::from(2);
+                            }
+                            Tier::Allow => {} // shift_guard::fail_tier never yields Allow (axiom 5)
+                        }
                     }
                 }
             }

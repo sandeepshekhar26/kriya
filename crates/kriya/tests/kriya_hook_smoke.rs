@@ -1680,3 +1680,116 @@ fn payment_held_is_the_two_of_three_chain_with_honest_unknown_amount() {
 
     let _ = std::fs::remove_dir_all(log.parent().unwrap());
 }
+
+// --- F-6 (doc 31 §9 / doc 33 §4-C): the shift-armed fail-closed clamp (gap → tier-drop) -----
+// The Console arms a shift (~/.kriya/state/shift.json); while armed, a MISSED heartbeat drops
+// policy to the pre-declared fail-closed tier. These prove the runtime enforcement end-to-end
+// across the real process boundary: an otherwise-ALLOWED action is blocked (+ a signed
+// kriya.shift.clamp receipt) when a beat is missed, and proceeds untouched when the watcher is
+// alive. shift_guard.rs unit-tests the pure clamp logic; these test the wired hook.
+
+/// Write an armed `shift.json` into `state_dir`, its window bracketing `now_ms`.
+fn write_shift_armed(state_dir: &PathBuf, fail_tier: &str, now_ms: u64) {
+    std::fs::create_dir_all(state_dir).unwrap();
+    let body = serde_json::json!({
+        "armed": true,
+        "start_ms": now_ms - 3_600_000,
+        "end_ms": now_ms + 3_600_000,
+        "fail_tier": fail_tier,
+        "cadence_ms": 60_000,
+    });
+    std::fs::write(state_dir.join("shift.json"), body.to_string()).unwrap();
+}
+
+#[test]
+fn shift_armed_missed_heartbeat_clamps_an_allowed_action_to_deny() {
+    let bin = build_binary();
+    let (log, key, policy, state_dir) = sandbox_with_state_dir();
+    std::fs::write(&policy, "rules:\n  - { action: \"*\", allow: true }\n").unwrap();
+    let now = fresh_as_of_ms();
+    write_shift_armed(&state_dir, "deny", now);
+    // NO heartbeat anywhere in the audit log → a beat is missed by definition (the watcher is silent).
+
+    let r = run(
+        &bin,
+        "pre",
+        &[
+            "--policy",
+            policy.to_str().unwrap(),
+            "--approval",
+            "auto",
+            "--audit-log",
+            log.to_str().unwrap(),
+            "--signing-key",
+            key.to_str().unwrap(),
+        ],
+        &pre_payload("Bash", r#"{"command":"echo hi"}"#),
+    );
+
+    assert_eq!(
+        r.status.code(),
+        Some(2),
+        "armed shift + missed heartbeat must block an otherwise-allowed action (fail-closed deny): stderr={:?}",
+        r.stderr
+    );
+    let receipts = read_receipts(&log);
+    let clamp = receipts
+        .iter()
+        .find(|v| v["action_id"] == "kriya.shift.clamp")
+        .expect("a signed kriya.shift.clamp receipt of the blocked attempt");
+    assert_eq!(clamp["params"]["reason"], "missed-heartbeat");
+    assert_eq!(clamp["params"]["tier"], "deny");
+    assert_eq!(clamp["params"]["last_heartbeat_seen"], false);
+    assert_eq!(clamp["success"], false);
+
+    let _ = std::fs::remove_dir_all(log.parent().unwrap().parent().unwrap());
+}
+
+#[test]
+fn shift_armed_with_a_fresh_heartbeat_does_not_clamp() {
+    let bin = build_binary();
+    let (log, key, policy, state_dir) = sandbox_with_state_dir();
+    std::fs::write(&policy, "rules:\n  - { action: \"*\", allow: true }\n").unwrap();
+    let now = fresh_as_of_ms();
+    write_shift_armed(&state_dir, "deny", now);
+    // A FRESH heartbeat (30s ago, < 2x the 60s cadence) in the audit log → the watcher is alive.
+    std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+    std::fs::write(
+        &log,
+        format!(
+            r#"{{"step_id":"hb","action_id":"kriya.watch.heartbeat","params":{{}},"success":true,"ts_ms":{}}}"#,
+            now - 30_000
+        ),
+    )
+    .unwrap();
+
+    let r = run(
+        &bin,
+        "pre",
+        &[
+            "--policy",
+            policy.to_str().unwrap(),
+            "--approval",
+            "auto",
+            "--audit-log",
+            log.to_str().unwrap(),
+            "--signing-key",
+            key.to_str().unwrap(),
+        ],
+        &pre_payload("Read", r#"{"file_path":"a.txt"}"#),
+    );
+
+    assert_eq!(
+        r.status.code(),
+        Some(0),
+        "a fresh heartbeat means no missed beat → no clamp: stderr={:?}",
+        r.stderr
+    );
+    let receipts = read_receipts(&log);
+    assert!(
+        receipts.iter().all(|v| v["action_id"] != "kriya.shift.clamp"),
+        "no clamp receipt when the watcher is alive"
+    );
+
+    let _ = std::fs::remove_dir_all(log.parent().unwrap().parent().unwrap());
+}
