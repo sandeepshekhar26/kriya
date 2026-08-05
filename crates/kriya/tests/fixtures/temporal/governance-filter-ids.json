@@ -39,6 +39,8 @@
     "kriya.model.gate",
     "kriya.attest.pipeline",
     "kriya.attest.sandbox",
+    "kriya.attest.shift.report",
+    "kriya.attest.shift.gap",
     "kriya.artifact.provenance",
     "kriya.diode.export",
     "kriya.diode.import",

@@ -274,6 +274,11 @@ fn f_c_ids() -> (Vec<&'static str>, Vec<&'static str>) {
         "kriya.model.gate",
         "kriya.attest.pipeline",
         "kriya.attest.sandbox",
+        // F-6 (doc 31 §9 / doc 33 §4-C): signed shift reports + the heartbeat-gap receipt are the
+        // Console's own on-device evidence roll-up (kriya.* minus the governed allowlist) — internal
+        // bookkeeping about a window, never a governed agent action.
+        "kriya.attest.shift.report",
+        "kriya.attest.shift.gap",
         "kriya.artifact.provenance",
         "kriya.diode.export",
         "kriya.diode.import",
