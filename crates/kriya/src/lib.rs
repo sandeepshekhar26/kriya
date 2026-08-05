@@ -78,6 +78,9 @@ pub mod secrets;
 // feeding `permissions::TemporalPolicy::evaluate`. Always compiled (no feature gate) — the hook's
 // `pre` gate needs it unconditionally, exactly like `spend_state` below.
 pub mod session_cond;
+/// F-6 (doc 31 §9 / doc 33 §4-C) — the runtime side of the shift lane: read the Console-written
+/// armed state and clamp the action tier to the fail-closed tier on a missed heartbeat.
+pub mod shift_guard;
 pub mod sidecar;
 pub mod spend_state;
 // F4-wasm (doc 28 §F4): the Deterministic Execution lane. Off by default — pulls in `wasmtime` +
