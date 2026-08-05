@@ -40,6 +40,9 @@ gates:
     self-mod:
       tier: "deny"
       demoted_tier: "deny"
+    payment:
+      tier: "approve"
+      demoted_tier: "approve"
   rules:
     - class: "destructive-git"
       rule_id: "git-force-push--protected"
@@ -199,6 +202,11 @@ gates:
         - "\\s(-c|-f)\\s"
       command_not:
         - "(?i)\\b(localhost|127\\.0\\.0\\.1|preview|branch|staging|dev|test)\\b"
+    - class: "payment"
+      rule_id: "stripe-cli"
+      tier: "approve"
+      command_any:
+        - "\\bstripe\\s+(charges|payment_intents|payment_links|invoices|subscriptions)\\s+(create|capture|confirm|pay|update)\\b"
     - class: "deps"
       rule_id: "dep-install"
       tier: "receipt"
@@ -209,6 +217,17 @@ gates:
       tier: "deny"
       path_any:
         - "(?i)(^|/)\\.claude/settings[^/]*$|(^|/)\\.claude/hooks(/|$)|(^|/)\\.?mcp\\.json$|(^|/)\\.cursor/mcp\\.json$|(^|/)\\.codex/config[^/]*$|(^|/)\\.kriya/|(^|/)agent-policy\\.ya?ml$|(^|/)settings\\.local\\.json$"
+    - class: "payment"
+      rule_id: "pay-server"
+      tier: "approve"
+      tool_any:
+        - tool: ".*"
+          server: "(?i)\\b(stripe|paypal|x402|square|braintree|razorpay)\\b"
+    - class: "payment"
+      rule_id: "pay-tool"
+      tier: "approve"
+      tool_any:
+        - tool: "(?i)(^|_|\\b)(pay|payment|charge|checkout|purchase|refund|payout)(s)?(_|\\b)"
     - class: "prod-db"
       rule_id: "db-migration-complete"
       tier: "approve"

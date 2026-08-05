@@ -307,6 +307,51 @@
     }
   },
   {
+    "name": "stripe CLI charge (payment)",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "stripe charges create --amount 2000 --currency usd"
+    },
+    "expect": {
+      "kind": "approval",
+      "class": "payment",
+      "rule_id": "stripe-cli",
+      "tier": "approve"
+    }
+  },
+  {
+    "name": "stripe MCP payment tool (payment server)",
+    "tool_name": "mcp__stripe__create_payment_intent",
+    "tool_input": {
+      "amount": 4200
+    },
+    "expect": {
+      "kind": "approval",
+      "class": "payment",
+      "rule_id": "pay-server",
+      "tier": "approve"
+    }
+  },
+  {
+    "name": "checkout tool on a non-payment server (payment tool name)",
+    "tool_name": "mcp__acme__checkout_cart",
+    "tool_input": {},
+    "expect": {
+      "kind": "approval",
+      "class": "payment",
+      "rule_id": "pay-tool",
+      "tier": "approve"
+    }
+  },
+  {
+    "name": "plain stripe list is ungated (not a mutating verb)",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "stripe charges list --limit 3"
+    },
+    "expect": null
+  },
+  {
     "name": "cargo test is ungated",
     "tool_name": "Bash",
     "tool_input": {
