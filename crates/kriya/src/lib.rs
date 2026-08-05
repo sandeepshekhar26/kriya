@@ -69,6 +69,7 @@ pub mod memory;
 // `memory` above (that's the in-process agent's own episodic SQLite recall) — see this module's
 // doc comment for the distinction.
 pub mod memwrite;
+pub mod pay;
 pub mod permissions;
 pub mod protocol;
 pub mod registry;

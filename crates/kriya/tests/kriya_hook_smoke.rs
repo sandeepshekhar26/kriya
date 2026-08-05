@@ -1503,3 +1503,180 @@ fn gates_approve_tier_holds_npm_publish_when_no_approval_granted() {
 
     let _ = std::fs::remove_dir_all(log.parent().unwrap());
 }
+
+// --- F-4 Inc 3: the payment lane — the purchase-receipt chain (kriya-console doc 31 §3.6) --------
+//
+// When a governed call matches a `payment`-class action gate, kriya-hook emits the
+// kriya.pay.{intent,decision,outcome} chain alongside the kriya.gate.payment.* receipt. These
+// end-to-end tests spawn the real binary and assert the chain the Console's `purchases.ts` folds:
+// a shared `pay_id`, best-effort/honest amount, and the three decision states (executed · denied ·
+// held). The `pay_id` is deterministic (session + tool + tool_input) so the post-hook outcome
+// chains onto the pre-hook intent without any marker file.
+
+/// A gates policy whose ONE payment rule fires at the requested tier for any `stripe`-server MCP
+/// tool. Kept self-contained so the pay tests never perturb the shared `gates_policy_yaml()`.
+fn pay_gate_policy_yaml(tier: &str) -> String {
+    format!(
+        "rules:\n  - {{ action: \"*\", allow: true }}\n\
+         gates:\n  rules:\n    - class: payment\n      rule_id: pay-server\n      \
+         tier: {tier}\n      tool_any:\n        - {{ server: \"stripe\", tool: \".*\" }}\n"
+    )
+}
+
+/// The pay receipts (kriya.pay.*) from a log, in order.
+fn pay_receipts(log: &PathBuf) -> Vec<serde_json::Value> {
+    read_receipts(log)
+        .into_iter()
+        .filter(|r| r["action_id"].as_str().unwrap_or("").starts_with("kriya.pay."))
+        .collect()
+}
+
+/// A denied payment never runs, so the WHOLE chain closes synchronously in the pre hook:
+/// intent → decision(denied) → outcome(denied). Amount is extracted best-effort (Stripe minor
+/// units), and the merchant is the processor name only — never a PAN.
+#[test]
+fn payment_deny_emits_the_full_intent_decision_outcome_chain() {
+    let bin = build_binary();
+    let (log, key, policy) = sandbox();
+    std::fs::write(&policy, pay_gate_policy_yaml("deny")).unwrap();
+    let args: Vec<&str> = vec![
+        "--policy", policy.to_str().unwrap(),
+        "--audit-log", log.to_str().unwrap(),
+        "--signing-key", key.to_str().unwrap(),
+    ];
+
+    let r = run(
+        &bin,
+        "pre",
+        &args,
+        &pre_payload(
+            "mcp__stripe__create_payment_intent",
+            r#"{"amount":4200,"currency":"usd"}"#,
+        ),
+    );
+    assert_eq!(r.status.code(), Some(2), "a denied payment gate blocks: stderr={:?}", r.stderr);
+
+    let pay = pay_receipts(&log);
+    assert_eq!(pay.len(), 3, "denied payment closes the full 3-link chain in pre");
+    let (intent, decision, outcome) = (&pay[0], &pay[1], &pay[2]);
+    assert_eq!(intent["action_id"], "kriya.pay.intent");
+    assert_eq!(intent["params"]["amount_minor"], 4200);
+    assert_eq!(intent["params"]["currency"], "usd");
+    assert_eq!(intent["params"]["amount_known"], true);
+    assert_eq!(intent["params"]["merchant"], "stripe", "processor name only — never a PAN");
+    assert_eq!(intent["params"]["tool"], "mcp__stripe__create_payment_intent");
+    assert_eq!(intent["success"], true, "the intent is a true record of the request");
+
+    assert_eq!(decision["action_id"], "kriya.pay.decision");
+    assert_eq!(decision["params"]["decision"], "denied");
+    assert_eq!(decision["params"]["matched_rule"], "pay-server");
+    assert_eq!(decision["success"], false);
+
+    assert_eq!(outcome["action_id"], "kriya.pay.outcome");
+    assert_eq!(outcome["params"]["result"], "denied");
+    assert_eq!(outcome["success"], false);
+
+    // The whole chain shares one pay_id (the Console folds by it).
+    let pid = intent["params"]["pay_id"].as_str().unwrap();
+    assert!(pid.starts_with("pay-"));
+    assert_eq!(decision["params"]["pay_id"], pid);
+    assert_eq!(outcome["params"]["pay_id"], pid);
+
+    // Privacy: no card-shaped content ever reaches a receipt (there is none in the input, but the
+    // whole chain must also never carry the raw amount as anything but the structured minor field).
+    let wire = read_receipts(&log).iter().map(|r| r.to_string()).collect::<String>();
+    assert!(!wire.contains("card"), "no card content in the chain: {wire}");
+
+    let _ = std::fs::remove_dir_all(log.parent().unwrap());
+}
+
+/// A receipt-tier payment PROCEEDS: pre writes intent + decision(approved); the post hook — driven
+/// by the real tool_response — closes the chain with outcome(executed) carrying the response status.
+/// The post outcome chains onto the pre intent by the SAME deterministic pay_id (no marker file).
+#[test]
+fn payment_receipt_tier_pre_then_post_emits_executed_chain_with_status() {
+    let bin = build_binary();
+    let (log, key, policy) = sandbox();
+    std::fs::write(&policy, pay_gate_policy_yaml("receipt")).unwrap();
+    let args: Vec<&str> = vec![
+        "--policy", policy.to_str().unwrap(),
+        "--audit-log", log.to_str().unwrap(),
+        "--signing-key", key.to_str().unwrap(),
+    ];
+    let tool = "mcp__stripe__create_payment_intent";
+    let input = r#"{"amount":4200,"currency":"usd"}"#;
+
+    // pre: receipt tier proceeds (exit 0), opening the chain.
+    let r_pre = run(&bin, "pre", &args, &pre_payload(tool, input));
+    assert_eq!(r_pre.status.code(), Some(0), "receipt tier must not block: stderr={:?}", r_pre.stderr);
+
+    // post: the real tool_response drives the outcome (executed + status 200).
+    let r_post = run(
+        &bin,
+        "post",
+        &args,
+        &post_payload_full(tool, input, r#"{"success":true,"status_code":200}"#, "s1"),
+    );
+    assert_eq!(r_post.status.code(), Some(0), "post is best-effort exit 0: stderr={:?}", r_post.stderr);
+
+    let pay = pay_receipts(&log);
+    assert_eq!(pay.len(), 3, "intent + decision (pre) + outcome (post)");
+    let intent = pay.iter().find(|r| r["action_id"] == "kriya.pay.intent").unwrap();
+    let decision = pay.iter().find(|r| r["action_id"] == "kriya.pay.decision").unwrap();
+    let outcome = pay.iter().find(|r| r["action_id"] == "kriya.pay.outcome").unwrap();
+
+    assert_eq!(decision["params"]["decision"], "approved");
+    assert_eq!(decision["success"], true);
+    assert_eq!(outcome["params"]["result"], "executed");
+    assert_eq!(outcome["params"]["status"], "200", "best-effort status from the governed lane");
+    assert_eq!(outcome["success"], true);
+
+    // The post outcome chained onto the pre intent — the same deterministic pay_id across processes.
+    let pid = intent["params"]["pay_id"].as_str().unwrap();
+    assert_eq!(decision["params"]["pay_id"], pid);
+    assert_eq!(outcome["params"]["pay_id"], pid, "post re-derived the identical pay_id — no marker file");
+
+    let _ = std::fs::remove_dir_all(log.parent().unwrap());
+}
+
+/// A held payment (approve tier, no approval granted) is the honest 2/3 shape: intent +
+/// decision(held), NO outcome — it neither executed nor failed; it awaits a human. And an
+/// un-parseable amount is carried as amount_known:false, never a guessed number.
+#[test]
+fn payment_held_is_the_two_of_three_chain_with_honest_unknown_amount() {
+    let bin = build_binary();
+    let (log, key, policy) = sandbox();
+    std::fs::write(&policy, pay_gate_policy_yaml("approve")).unwrap();
+    let args: Vec<&str> = vec![
+        "--policy", policy.to_str().unwrap(),
+        "--audit-log", log.to_str().unwrap(),
+        "--signing-key", key.to_str().unwrap(),
+        "--approval", "deny",
+    ];
+
+    // A float amount is major-unit-shaped — the hook refuses to guess-scale it ⇒ amount_known:false.
+    let r = run(
+        &bin,
+        "pre",
+        &args,
+        &pre_payload("mcp__stripe__create_payment_intent", r#"{"amount":42.00}"#),
+    );
+    assert_eq!(r.status.code(), Some(2), "unapproved approve-tier payment holds: stderr={:?}", r.stderr);
+
+    let pay = pay_receipts(&log);
+    assert_eq!(pay.len(), 2, "held payment is intent + decision only — the honest 2/3 shape");
+    let intent = &pay[0];
+    let decision = &pay[1];
+    assert_eq!(intent["action_id"], "kriya.pay.intent");
+    assert_eq!(intent["params"]["amount_known"], false, "un-parseable amount is honest, not guessed");
+    assert!(intent["params"].get("amount_minor").is_none(), "no number invented");
+    assert_eq!(decision["action_id"], "kriya.pay.decision");
+    assert_eq!(decision["params"]["decision"], "held");
+    assert_eq!(decision["success"], false);
+    assert!(
+        !pay.iter().any(|r| r["action_id"] == "kriya.pay.outcome"),
+        "a held payment has NO outcome receipt"
+    );
+
+    let _ = std::fs::remove_dir_all(log.parent().unwrap());
+}

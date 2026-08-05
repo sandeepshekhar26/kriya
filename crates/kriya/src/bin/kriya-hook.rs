@@ -88,6 +88,7 @@ use std::process::ExitCode;
 use kriya::audit::{default_audit_dir, now_ms, Actor, Receipt, Signer};
 use kriya::corr::{self, Correlation};
 use kriya::memwrite;
+use kriya::pay;
 #[cfg(target_os = "macos")]
 use kriya::mcp::GuiApproval;
 use kriya::mcp::{
@@ -338,6 +339,49 @@ fn gate_params(rec: &GateRecord, corr_step: Option<&str>) -> Value {
         }
     }
     v
+}
+
+/// F-4 Inc 3 (kriya-console doc 31 §3.6 / doc 33 §4-A): the payment lane. When a governed call
+/// matches a `payment`-class action gate, the hook emits the purchase-receipt CHAIN alongside the
+/// `kriya.gate.payment.*` receipt — `kriya.pay.intent` (what the agent asked, best-effort amount) →
+/// `kriya.pay.decision` (the gate result). The `pay_id` is derived deterministically from the call
+/// (see [`pay::pay_id_for`]) so the *post* hook's `kriya.pay.outcome` chains on without any marker
+/// file. This writes the OPEN half of the chain (intent + decision); the outcome is written by the
+/// deny arm (below, synchronously) or by the post hook (for calls that actually run). Returns the
+/// shared `pay_id`. Merchant is a processor/host string only (custody stays in EG-B — no PAN here).
+fn emit_pay_open(
+    signer: &Signer,
+    actor: &Actor,
+    corr: &Correlation,
+    session_id: Option<&str>,
+    tool_name: &str,
+    action_id: &str,
+    params: &Value,
+    rec: &GateRecord,
+    decision: &str,
+    approver: Option<&str>,
+) -> String {
+    let pay_id = pay::pay_id_for(session_id, tool_name, &canonical_json_string(params));
+    let merchant = egress_target_for(tool_name, params).and_then(|(_, host, server)| host.or(server));
+    record(
+        signer,
+        actor,
+        pay::PAY_INTENT,
+        pay::intent_params(&pay_id, merchant.as_deref(), tool_name, action_id, params),
+        true,
+        corr,
+    );
+    // A held/denied decision is not a success (mirrors the gate held/denied receipts' `success:false`);
+    // an approved one is. The Console folds by `pay_id`, reading `decision`/`success` for the chip.
+    record(
+        signer,
+        actor,
+        pay::PAY_DECISION,
+        pay::decision_params(&pay_id, decision, &rec.rule_id, approver),
+        decision == "approved",
+        corr,
+    );
+    pay_id
 }
 
 /// Sign the action receipt and return its `step_id` so a correlated `kriya.io.*` receipt can carry
@@ -790,6 +834,14 @@ fn main() -> ExitCode {
                             true,
                             &corr,
                         );
+                        // F-4 Inc 3: a receipt-tier payment gate lets the call proceed — open the
+                        // purchase chain as approved; the post hook writes the outcome.
+                        if rec.class == "payment" {
+                            emit_pay_open(
+                                &signer, &actor, &corr, payload.session_id.as_deref(),
+                                tool_name, &action_id, &params, &rec, "approved", None,
+                            );
+                        }
                     }
                     GateDecision::Approval(rec) => {
                         let gate = match approval_gate(&args.approval) {
@@ -808,6 +860,15 @@ fn main() -> ExitCode {
                                 true,
                                 &corr,
                             );
+                            // F-4 Inc 3: a human granted the approve-tier payment gate — open the
+                            // chain as approved with the operator as approver; post writes outcome.
+                            if rec.class == "payment" {
+                                emit_pay_open(
+                                    &signer, &actor, &corr, payload.session_id.as_deref(),
+                                    tool_name, &action_id, &params, &rec, "approved",
+                                    Some(actor.user.as_str()),
+                                );
+                            }
                         } else {
                             let step_id =
                                 record(&signer, &actor, &action_id, params.clone(), false, &corr);
@@ -819,6 +880,15 @@ fn main() -> ExitCode {
                                 false,
                                 &corr,
                             );
+                            // F-4 Inc 3: a held payment is the honest 2/3 chain shape — intent +
+                            // decision(held), NO outcome (it neither executed nor failed; it awaits
+                            // a human). The Console renders "2/3 steps · held".
+                            if rec.class == "payment" {
+                                emit_pay_open(
+                                    &signer, &actor, &corr, payload.session_id.as_deref(),
+                                    tool_name, &action_id, &params, &rec, "held", None,
+                                );
+                            }
                             eprintln!(
                                 "kriya-hook: the {} gate requires human approval for '{action_id}' \
                                  and it was not granted (rule: {}; approval mode: {}). A signed \
@@ -839,6 +909,23 @@ fn main() -> ExitCode {
                             false,
                             &corr,
                         );
+                        // F-4 Inc 3: a denied payment never runs, so the outcome is known NOW —
+                        // the full chain closes synchronously (intent → decision(denied) →
+                        // outcome(denied)); there is no post hook for a blocked call.
+                        if rec.class == "payment" {
+                            let pay_id = emit_pay_open(
+                                &signer, &actor, &corr, payload.session_id.as_deref(),
+                                tool_name, &action_id, &params, &rec, "denied", None,
+                            );
+                            record(
+                                &signer,
+                                &actor,
+                                pay::PAY_OUTCOME,
+                                pay::outcome_params(&pay_id, "denied", None),
+                                false,
+                                &corr,
+                            );
+                        }
                         eprintln!(
                             "kriya-hook: the {} gate denied '{action_id}' (rule: {}). A signed \
                              receipt of the blocked attempt was recorded.",
@@ -1135,6 +1222,38 @@ fn main() -> ExitCode {
                 success,
                 &corr,
             );
+            // F-4 Inc 3 (kriya-console doc 31 §3.6 / doc 33 §4-A): close the purchase chain for a
+            // payment-class call that actually RAN. The pre hook wrote intent + decision(approved);
+            // this writes `kriya.pay.outcome`, chained by the SAME deterministic `pay_id` (derived
+            // from session + tool + tool_input — identical in both invocations, so no marker file
+            // is needed). `result` = executed | denied from the real `tool_response`; `status` is
+            // best-effort from that response (absent ⇒ omitted, never invented). We only reach post
+            // when pre let the call through, so a payment gate that returns Receipt/Approval here
+            // was the approved/receipt tier (deny/held short-circuit pre with exit 2). Derived from
+            // `safe_params` so a credential-brokered call's placeholder form matches pre's `pay_id`.
+            if let Some(gates) = policy.gates() {
+                let is_payment = matches!(
+                    gates.evaluate(tool_name, &safe_params, &action_id),
+                    GateDecision::Receipt(rec) | GateDecision::Approval(rec) if rec.class == "payment"
+                );
+                if is_payment {
+                    let pay_id = pay::pay_id_for(
+                        payload.session_id.as_deref(),
+                        tool_name,
+                        &canonical_json_string(&safe_params),
+                    );
+                    let result = if success { "executed" } else { "denied" };
+                    let status = pay::status_of(payload.tool_response.as_ref());
+                    record(
+                        &signer,
+                        &actor,
+                        pay::PAY_OUTCOME,
+                        pay::outcome_params(&pay_id, result, status.as_deref()),
+                        success,
+                        &corr,
+                    );
+                }
+            }
             // D1 (doc 27 §4 / docs/design/d1-memory-receipts.md D-4): classify + emit a
             // `kriya.memory.*` receipt for a write to a governed persistent-memory surface —
             // unconditional (no policy opt-in), mirroring the base action receipt's own always-on
