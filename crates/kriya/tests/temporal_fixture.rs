@@ -283,6 +283,11 @@ fn f_c_ids() -> (Vec<&'static str>, Vec<&'static str>) {
         // underlying blocked action is the governed event), so it is governance-internal like the
         // gate/cond decision records.
         "kriya.shift.clamp",
+        // F-5 (kriya-console doc 31 §3.5): the governed launcher's launch attestation — a
+        // launch-governance self-attestation (`kriya-run` signs it), never governed agent activity;
+        // excluded by the same kriya.* namespace default-exclude. Listed so this generator never
+        // clobbers the disposition out of the fixture.
+        "kriya.run.launched",
         "kriya.artifact.provenance",
         "kriya.diode.export",
         "kriya.diode.import",

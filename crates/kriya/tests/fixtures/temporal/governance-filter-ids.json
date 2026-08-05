@@ -42,6 +42,7 @@
     "kriya.attest.shift.report",
     "kriya.attest.shift.gap",
     "kriya.shift.clamp",
+    "kriya.run.launched",
     "kriya.artifact.provenance",
     "kriya.diode.export",
     "kriya.diode.import",
