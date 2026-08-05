@@ -255,6 +255,12 @@ fn f_c_ids() -> (Vec<&'static str>, Vec<&'static str>) {
         "kriya.spend.gate.warn",
         "kriya.spend.gate.approval",
         "kriya.spend.gate.deny",
+        // F-4 (kriya-console doc 31 §3.6): the payment gate's purchase-receipt chain — kriya's own
+        // enforcement/decision bookkeeping about a payment-shaped agent action, never the governed
+        // event itself (default-exclude, same family as kriya.spend.gate.* / kriya.gate.*).
+        "kriya.pay.intent",
+        "kriya.pay.decision",
+        "kriya.pay.outcome",
         "kriya.spend.session",
         "kriya.spend.rollup",
         "kriya.memory.write",
