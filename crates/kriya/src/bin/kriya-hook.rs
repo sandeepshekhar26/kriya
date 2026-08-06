@@ -105,6 +105,7 @@ use kriya::secrets::{
     substitute_placeholders,
 };
 use kriya::session_cond;
+use kriya::duration;
 use kriya::spend_state::{state_dir_for_audit_log, SpendState};
 use serde::Deserialize;
 use serde_json::Value;
@@ -762,6 +763,26 @@ fn main() -> ExitCode {
 
     match args.mode.as_str() {
         "pre" => {
+            // O-3 (kriya-console doc 32 §4 O-3 / doc 33 §5.5): capture this call's START instant +
+            // its identity correlation key up front. The marker is written ONLY on the allow paths
+            // below (a denied call, which post never follows, leaves none); the *post* invocation
+            // reads+deletes it to stamp `kriya.dur.ms`. Key = session+tool+canonical(`params`) — the
+            // same derivation `pay_id` uses, and the same `params` (raw tool_input, pre-brokering)
+            // that post re-derives from its placeholder-redacted `safe_params` (they canonicalize
+            // identically — see the post-hook pay_id note). All best-effort: a marker failure NEVER
+            // affects the decision (the session_cond "cache is never the source of truth" law).
+            let dur_t_start = now_ms() as u64;
+            let dur_log_path = resolved_audit_log_path(&args);
+            let dur_state_dir = state_dir_for_audit_log(&dur_log_path);
+            let dur_key = duration::call_key(
+                payload.session_id.as_deref(),
+                tool_name,
+                &canonical_json_string(&params),
+            );
+            // Opportunistic, bounded sweep of markers whose post never arrived (session ended, key
+            // collision) — runs on pre so a marker written later this run is never its own victim.
+            duration::sweep_stale(&dur_state_dir, dur_t_start, duration::MAX_MARKER_AGE_MS);
+
             match policy.check(&action_id) {
                 Decision::Allow => {} // the post hook records the outcome
                 Decision::RequiresApproval => {
@@ -1220,6 +1241,8 @@ fn main() -> ExitCode {
                                             "updatedInput": updated_input,
                                         }
                                     });
+                                    // O-3: the brokered call proceeds → stamp its start marker for post.
+                                    duration::write_start(&dur_state_dir, &dur_key, dur_t_start);
                                     println!("{out}");
                                     return ExitCode::SUCCESS;
                                 }
@@ -1244,6 +1267,8 @@ fn main() -> ExitCode {
                 }
             }
 
+            // O-3: a plain (non-brokered) allow proceeds → stamp its start marker for post.
+            duration::write_start(&dur_state_dir, &dur_key, dur_t_start);
             ExitCode::SUCCESS
         }
         "post" => {
@@ -1276,11 +1301,32 @@ fn main() -> ExitCode {
                 None => params.clone(),
             };
             let success = outcome_success(payload.tool_response.as_ref());
+            // O-3 (doc 33 §5.5): stamp the measured duration onto THIS action receipt when the pre
+            // hook left a start marker for this exact call. The key is derived from `safe_params`
+            // (post's placeholder-redacted form), which canonicalizes identically to pre's raw
+            // `params` for both plain and brokered calls — the same property that lets `pay_id`
+            // chain across the two processes. Absent marker ⇒ params stay byte-identical (honest
+            // absence, never an estimate); a negative interval (a collided key) is likewise dropped.
+            // Read+delete is best-effort and only ever ADDS optional params — it never blocks.
+            let mut action_params = safe_params.clone();
+            {
+                let dur_state_dir = state_dir_for_audit_log(&resolved_audit_log_path(&args));
+                let dur_key = duration::call_key(
+                    payload.session_id.as_deref(),
+                    tool_name,
+                    &canonical_json_string(&safe_params),
+                );
+                if let Some(t_start) = duration::take_end(&dur_state_dir, &dur_key) {
+                    if let Some(dur_ms) = duration::compute_dur_ms(t_start, now_ms() as u64) {
+                        duration::annotate_duration(&mut action_params, dur_ms, duration::BASIS_HOOK_PRE_POST);
+                    }
+                }
+            }
             let step_id = record(
                 &signer,
                 &actor,
                 &action_id,
-                safe_params.clone(),
+                action_params,
                 success,
                 &corr,
             );

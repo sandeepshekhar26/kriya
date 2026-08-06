@@ -1793,3 +1793,120 @@ fn shift_armed_with_a_fresh_heartbeat_does_not_clamp() {
 
     let _ = std::fs::remove_dir_all(log.parent().unwrap().parent().unwrap());
 }
+
+// --- O-3 duration lane (doc 33 §5.5): the pre-marker → post-stamp round trip ---------------------
+
+/// The allow policy every duration test uses (gates/temporal/budget out of scope here).
+fn allow_all_policy() -> &'static str {
+    "rules:\n  - { action: \"*\", allow: true }\n"
+}
+
+#[test]
+fn o3_pre_marker_then_post_stamps_kriya_dur_ms() {
+    let bin = build_binary();
+    let (log, key, policy, _state_dir) = sandbox_with_state_dir();
+    std::fs::write(&policy, allow_all_policy()).unwrap();
+    let flags = [
+        "--policy", policy.to_str().unwrap(),
+        "--audit-log", log.to_str().unwrap(),
+        "--signing-key", key.to_str().unwrap(),
+    ];
+    let tool_input = r#"{"command":"echo hi"}"#;
+
+    // pre — allowed → writes the start marker (signs nothing itself).
+    let r_pre = run(&bin, "pre", &flags, &pre_payload("Bash", tool_input));
+    assert_eq!(r_pre.status.code(), Some(0), "allow must not block: {:?}", r_pre.stderr);
+    assert!(read_receipts(&log).is_empty(), "pre signs nothing on a cleared allow");
+
+    // post — SAME session/tool/input → reads+deletes the marker and stamps the duration.
+    let r_post = run(
+        &bin,
+        "post",
+        &flags,
+        &post_payload_full("Bash", tool_input, r#"{"success":true}"#, "s1"),
+    );
+    assert_eq!(r_post.status.code(), Some(0), "post is best-effort exit 0: {:?}", r_post.stderr);
+
+    let receipts = read_receipts(&log);
+    let action = receipts
+        .iter()
+        .find(|r| r["action_id"] == "claude-code__bash")
+        .expect("the action receipt is written");
+    assert!(
+        action["params"]["kriya.dur.ms"].is_u64(),
+        "the action receipt carries a measured duration (u64 ms); params={}",
+        action["params"]
+    );
+    assert_eq!(
+        action["params"]["kriya.dur.basis"], "hook-pre-post",
+        "the basis names how it was measured"
+    );
+
+    let _ = std::fs::remove_dir_all(log.parent().unwrap().parent().unwrap());
+}
+
+#[test]
+fn o3_post_without_a_pre_marker_omits_the_duration_honest_absence() {
+    let bin = build_binary();
+    let (log, key, policy, _state_dir) = sandbox_with_state_dir();
+    std::fs::write(&policy, allow_all_policy()).unwrap();
+    let flags = [
+        "--policy", policy.to_str().unwrap(),
+        "--audit-log", log.to_str().unwrap(),
+        "--signing-key", key.to_str().unwrap(),
+    ];
+
+    // post with no preceding pre ⇒ no marker ⇒ no duration params (never estimated/zero-filled).
+    let r_post = run(
+        &bin,
+        "post",
+        &flags,
+        &post_payload_full("Bash", r#"{"command":"echo hi"}"#, r#"{"success":true}"#, "s1"),
+    );
+    assert_eq!(r_post.status.code(), Some(0));
+
+    let receipts = read_receipts(&log);
+    let action = receipts
+        .iter()
+        .find(|r| r["action_id"] == "claude-code__bash")
+        .expect("the action receipt is written");
+    assert!(
+        action["params"].get("kriya.dur.ms").is_none(),
+        "no duration without a pre marker"
+    );
+    assert!(action["params"].get("kriya.dur.basis").is_none());
+
+    let _ = std::fs::remove_dir_all(log.parent().unwrap().parent().unwrap());
+}
+
+#[test]
+fn o3_duration_marker_never_blocks_when_the_state_dir_is_unwritable() {
+    let bin = build_binary();
+    let (log, key, policy, state_dir) = sandbox_with_state_dir();
+    std::fs::write(&policy, allow_all_policy()).unwrap();
+    // Make the state dir a FILE so `<state_dir>/durations` can never be created — the marker write
+    // (and the sweep) must silently no-op and the gate must still proceed (the session_cond law).
+    if let Some(parent) = state_dir.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(&state_dir, b"i am a file, not a dir").unwrap();
+
+    let r_pre = run(
+        &bin,
+        "pre",
+        &[
+            "--policy", policy.to_str().unwrap(),
+            "--audit-log", log.to_str().unwrap(),
+            "--signing-key", key.to_str().unwrap(),
+        ],
+        &pre_payload("Bash", r#"{"command":"echo hi"}"#),
+    );
+    assert_eq!(
+        r_pre.status.code(),
+        Some(0),
+        "an unwritable marker store must never block the gate: {:?}",
+        r_pre.stderr
+    );
+
+    let _ = std::fs::remove_dir_all(log.parent().unwrap().parent().unwrap());
+}

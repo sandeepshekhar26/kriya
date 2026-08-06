@@ -57,6 +57,7 @@ pub mod audit;
 pub mod budget;
 pub mod corr;
 pub mod crypto;
+pub mod duration;
 // F1 (doc 28 §F1): the attested-local-inference proxy. Off by default so the library stays lean
 // for embedders that never proxy local inference — see `llm/mod.rs` for the layering.
 #[cfg(feature = "llm-proxy")]
