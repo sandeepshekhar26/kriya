@@ -168,6 +168,43 @@ section (per-class tiers, protected refs, prod matchers, packs); the format is p
 can also write it by hand — see `crates/kriya/tests/fixtures/default-gates.yaml` for the complete
 default set and `tests/gate_vectors.rs` for the cross-implementation parity corpus.
 
+**Payment governance** — `payment` is a first-class gate now (not a preview): a payment-shaped call
+(a processor SDK/tool/host) is gated like any other class, and the hook also writes a **content-free
+`kriya.pay.{intent,decision,outcome}` chain**. The three links join across the fresh pre/post hook
+processes by a deterministic `pay_id` (session + tool + tool input) — **no marker file** — so a
+denied payment closes all three synchronously, a held one is the honest 2/3 shape, and a proceeding
+one gets its real `executed｜denied` outcome from the post hook. The amount is **best-effort and
+honest** (integer minor-units + currency ⇒ `amount_known:true`, otherwise `false` — never a guessed
+number); the merchant is the processor/host string only; **card material never enters a receipt**
+(custody stays with credential brokering). Pure logic lives in `crates/kriya/src/pay.rs`
+(unit-tested); the parity corpus is `tests/pay_fixture.rs` → `tests/fixtures/pay_ledger.jsonl`.
+
+**Shift clamp** — for unattended windows, the hook reads an optional `~/.kriya/state/shift.json`
+(armed · window · fail-tier, written by the Console) plus a bounded heartbeat tail: **armed + a
+missed heartbeat inside the window ⇒ the action tier is clamped tighter** (approval → gate, deny →
+exit 2), each decision a signed `kriya.shift.clamp` receipt. Tighten-only; state absent ⇒ no clamp;
+a state-read failure never blocks. Pure clamp logic is `crates/kriya/src/shift_guard.rs`
+(unit-tested), wired into the pre-decision path; the Console signs the matching
+`kriya.attest.shift.{report,gap}` evidence on its own chain.
+
+## Launch a governed run — `kriya-run`
+
+`kriya-run` is the govern-first launcher: it composes a policy **pack + lanes + agent**, signs one
+`kriya.run.launched` attestation, then execs the agent command — so a run's governance posture is on
+the record from the first byte.
+
+```bash
+cargo install kriya --bin kriya-run
+# start Claude Code under the Developer pack with the egress lane governed:
+kriya-run --pack developer --lane egress --agent claude-code -- claude
+```
+
+The attestation params are **content-free** — `{v, agent, pack, lanes, shift}` only, never the
+agent's argv or cwd. It is a **copy-first launcher, not a second enforcement path**: per-call
+governance still flows through the agent's own hook/gateway lane (the honest ceiling). Pure
+parse/compose logic is unit-tested; `tests/run_launched_fixture.rs` →
+`tests/fixtures/run_launched_ledger.jsonl` is the signed parity corpus.
+
 ## Govern local inference — `kriya-llm-proxy` (F1)
 
 Sovereign/air-gapped orgs run models **locally** — Ollama, llama.cpp's server, vLLM's OpenAI-compat
@@ -408,7 +445,9 @@ local-first finance app with **no HTTP API** — in ~37 lines, without changing 
 | [`kriya` (Python)](bindings/python/) | **Python binding** — `register_action` / `wrap_action` + the `Host` stdio driver, for PyQt/PySide/Tk apps, FreeCAD/Blender plugins, data & quant tools (`pip install kriya`) |
 
 **Binaries:** `kriya-gateway` (wrap any MCP server, zero changes) · `kriya-hook` (govern Claude
-Code's whole tool lane) · `kriya-hermes-hook` (Hermes' native tools) · `kriya-mcp` (governed MCP
+Code's whole tool lane — action gates, payment chain, shift clamp) · `kriya-hermes-hook` (Hermes'
+native tools) · `kriya-run` (the **govern-first launcher** — compose a pack + lanes + agent, sign one
+launch attestation, then exec) · `kriya-mcp` (governed MCP
 server — external agents drive your app through the gates) · `kriya-govern` (per-call govern + sign
 over stdio — the one signer the SDK middleware delegates to) · [`kriya-ci`](docs/GOVERNED-CI-LANE.md)
 (the governed CI lane — run an agent step in CI under a repo policy; fail the build on a block; signed
@@ -482,9 +521,9 @@ on-device.**
 
 The paid tier never changes how governance works — it consumes the same Ed25519-signed receipts and
 the same policy the free monitor already verifies and enforces. Tamper-evident audit plus
-correlated, exportable evidence is what **CMMC Level 2** (in new DoD contracts from Nov 10, 2026),
-**SOC 2**, and **EU AI Act** record-keeping ask for when an agent touches real data — on-device,
-where cloud MCP gateways structurally can't reach.
+correlated, exportable evidence is what **CMMC Level 2**, **SOC 2**, and **EU AI Act**
+record-keeping ask for when an agent touches real data — on-device, where cloud MCP gateways
+structurally can't reach.
 
 **Going fleet-wide:** [kriyaD](https://kriyanative.com/products/kriyad/) — the customer-hosted
 control-plane server + fleet cockpit (air-gap, on-prem, or your VPC; never a vendor cloud) — ships
