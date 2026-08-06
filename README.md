@@ -205,6 +205,31 @@ governance still flows through the agent's own hook/gateway lane (the honest cei
 parse/compose logic is unit-tested; `tests/run_launched_fixture.rs` →
 `tests/fixtures/run_launched_ledger.jsonl` is the signed parity corpus.
 
+## Ask your own evidence — `kriya-mcp --evidence`
+
+The evidence MCP server: a **stdio, zero-network, read-only** mode of `kriya-mcp` that lets any
+MCP client — including the governed agent itself — query the local audit store: `receipts_search`,
+`receipt_get`, `chain_verify`, `session_tree`, `spend_summary`.
+
+```bash
+cargo install kriya --bin kriya-mcp
+kriya-mcp --evidence            # serves the standard ~/.kriya/audit dir over stdio
+```
+
+The honesty axiom, enforced in tests: every answer is computed **only from receipts that pass
+verification** — a tampered line is counted `unverifiable` and excluded, never surfaced as data.
+No write tools exist, and hashes stay hashes. The reader is itself in evidence: boot signs one
+`kriya.evidence.mcp.start` receipt. (Wire it into Claude Code *through the governed lane* and the
+evidence queries become receipted tool calls themselves.)
+
+## Measured durations — honest per-action timing
+
+Receipts can carry two **additive, optional** params: `kriya.dur.ms` + `kriya.dur.basis`. The hook
+lane times a call across its fresh pre/post processes with an identity-keyed marker
+(`duration.rs`; marker I/O is best-effort and **never blocks the gate**); the gateway and
+llm-proxy lanes measure **in-process** (`basis: "in-process"`). No marker ⇒ no params — a missing
+duration is shown by consumers as absent, never estimated. Old receipts verify byte-unchanged.
+
 ## Govern local inference — `kriya-llm-proxy` (F1)
 
 Sovereign/air-gapped orgs run models **locally** — Ollama, llama.cpp's server, vLLM's OpenAI-compat
