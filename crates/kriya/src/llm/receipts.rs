@@ -123,6 +123,20 @@ impl ServeParams<'_> {
         m.insert("streaming".into(), json!(self.streaming));
         m.insert("duration_ms".into(), json!(self.duration_ms));
         m.insert("upstream_path".into(), json!(self.upstream_path));
+        // O-3 (doc 33 §5.5) — the `in-process` duration lane. `duration_ms` above is the model-domain
+        // field (shipped; the Local Models latency view reads it) and stays UNTOUCHED. We ADDITIONALLY
+        // surface the SAME measured interval under the standardized cross-lane keys so the Sessions
+        // waterfall / SLO reader pick up model serves through the identical `kriya.dur.ms` key every
+        // other lane uses — same number, disambiguated by `kriya.dur.basis` = "in-process". Additive:
+        // a duration-unaware verifier accepts the receipt byte-for-byte as before.
+        m.insert(
+            crate::duration::DUR_MS_KEY.into(),
+            json!(self.duration_ms),
+        );
+        m.insert(
+            crate::duration::DUR_BASIS_KEY.into(),
+            json!(crate::duration::BASIS_IN_PROCESS),
+        );
         Value::Object(m)
     }
 }
@@ -172,6 +186,12 @@ mod tests {
             v.get("digest").is_none(),
             "absent digest must be omitted, not null"
         );
+        // O-3 in-process duration lane: `duration_ms` stays the model-domain field AND the same
+        // interval is additionally surfaced under the standardized `kriya.dur.*` keys (basis
+        // "in-process") — additive, same number, so the waterfall/SLO reader see model serves too.
+        assert_eq!(v["duration_ms"], json!(1500), "model-domain field untouched");
+        assert_eq!(v["kriya.dur.ms"], json!(1500), "standardized cross-lane key mirrors it");
+        assert_eq!(v["kriya.dur.basis"], json!("in-process"));
         let dump = v.to_string();
         assert!(
             !dump.contains("temperature\":0.7") || dump.contains("sampler"),

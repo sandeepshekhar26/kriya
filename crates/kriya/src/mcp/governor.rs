@@ -361,8 +361,15 @@ impl Governor {
             EgressGate::NotApproved => return DispatchOutcome::NotApproved,
         };
 
-        // 4. Execute the cleared action.
+        // 4. Execute the cleared action. Time it in-process (O-3, doc 33 §5.5 — the `in-process`
+        //    duration lane). Unlike the hook's fresh-process pre→post marker (`duration.rs`), the
+        //    proxy governor brackets the real tool execution within ONE process, so the interval is
+        //    a direct measurement — always present, never a cross-process marker round-trip. It is
+        //    stamped below as the SAME two additive params the hook lane emits (`kriya.dur.ms` +
+        //    `kriya.dur.basis`), with basis `in-process`.
+        let exec_start = std::time::Instant::now();
         let mut outcome = self.executor.execute(action_id, params);
+        let exec_dur_ms = exec_start.elapsed().as_millis() as u64;
 
         // 4b. Ingress trust-class enforcement (doc 24 §11 B12) — the RESPONSE side of a governed
         //     MCP call, independent of egress (applies to stdio upstreams too, which have no host
@@ -379,13 +386,22 @@ impl Governor {
         //    receipt. The receipt carries who acted (R8) when the binary supplied an identity.
         // Run correlation (S3): stamp the per-session run_id (proxy lane has no parent/subagent
         // lineage — never fabricated). Empty run scope ⇒ params byte-identical to pre-S3.
-        let corr_params = crate::corr::attach(
+        let mut corr_params = crate::corr::attach(
             params.clone(),
             &crate::corr::Correlation {
                 run_id: self.run_id.clone(),
                 parent_step_id: None,
                 agent_id: None,
             },
+        );
+        // Additive, optional in-process duration params (O-3). No-op when `params` is not an object
+        // (defensive); every real tool-call params is an object, so the receipt carries the measured
+        // interval alongside the tool's own fields — a verifier with no duration awareness accepts it
+        // byte-for-byte as before (no new action_id, no envelope change).
+        crate::duration::annotate_duration(
+            &mut corr_params,
+            exec_dur_ms,
+            crate::duration::BASIS_IN_PROCESS,
         );
         let receipt = self.signer.record(
             Receipt::new(
@@ -917,7 +933,10 @@ mod tests {
             other => panic!("expected Executed, got {other:?}"),
         }
 
-        // Without run correlation (the router / in-process lanes): params are byte-clean — no key.
+        // Without run correlation (the router / in-process lanes): no `kriya.corr` key, and the tool's
+        // own params survive verbatim. The only ADDITIVE keys are the O-3 in-process duration params
+        // (`kriya.dur.*`, basis "in-process") — the proxy governor times the execute in-process, so an
+        // action receipt on this lane always carries a real (possibly sub-ms 0) measured interval.
         let mut g2 = Governor::new(
             Arc::new(Policy::default()),
             signer(),
@@ -926,8 +945,24 @@ mod tests {
         );
         match g2.dispatch("create_note", &json!({"title": "hi"})) {
             DispatchOutcome::Executed { receipt, .. } => {
-                assert_eq!(receipt.receipt.params, json!({"title": "hi"}));
-                assert!(receipt.receipt.params.get("kriya.corr").is_none());
+                let p = &receipt.receipt.params;
+                assert_eq!(p["title"], json!("hi"), "tool params survive verbatim");
+                assert!(p.get("kriya.corr").is_none(), "no run correlation on this lane");
+                assert_eq!(
+                    p["kriya.dur.basis"],
+                    json!("in-process"),
+                    "the proxy governor measures duration in-process"
+                );
+                assert!(
+                    p["kriya.dur.ms"].as_u64().is_some(),
+                    "a measured (non-negative) interval, never absent on the in-process lane"
+                );
+                // Exactly the tool param + the two additive duration params — nothing else leaked.
+                assert_eq!(
+                    p.as_object().unwrap().len(),
+                    3,
+                    "title + kriya.dur.ms + kriya.dur.basis"
+                );
             }
             other => panic!("expected Executed, got {other:?}"),
         }

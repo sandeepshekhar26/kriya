@@ -1,0 +1,4 @@
+node_modules/
+dist/
+# Runtime queue + audit log — local working state, never committed.
+.content-copilot/
