@@ -45,6 +45,7 @@
     "kriya.run.launched",
     "kriya.approvals.paged",
     "kriya.evidence.mcp.start",
+    "kriya.annotation.set",
     "kriya.artifact.provenance",
     "kriya.diode.export",
     "kriya.diode.import",

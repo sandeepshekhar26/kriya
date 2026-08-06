@@ -300,6 +300,13 @@ fn f_c_ids() -> (Vec<&'static str>, Vec<&'static str>) {
         // bookkeeping, never governed agent activity; excluded by the same kriya.* namespace
         // default-exclude. Listed so this generator never clobbers the disposition out of the fixture.
         "kriya.evidence.mcp.start",
+        // O-7 (kriya-console doc 33 §5.11): signed human annotation over a past verified receipt
+        // (`kriya.annotation.set`, closed label enum, no free text) — Console-signed operator
+        // bookkeeping (the packs/shift lineage), never governed agent activity; excluded by the
+        // same kriya.* namespace default-exclude. Listed so this generator never clobbers the
+        // disposition out of the fixture. (The runtime never emits it — a console-only vocabulary,
+        // carried here only for the byte-identity mirror.)
+        "kriya.annotation.set",
         "kriya.artifact.provenance",
         "kriya.diode.export",
         "kriya.diode.import",
