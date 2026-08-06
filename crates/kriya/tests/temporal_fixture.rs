@@ -288,6 +288,13 @@ fn f_c_ids() -> (Vec<&'static str>, Vec<&'static str>) {
         // excluded by the same kriya.* namespace default-exclude. Listed so this generator never
         // clobbers the disposition out of the fixture.
         "kriya.run.launched",
+        // F-7 Step 1 (kriya-console doc 31 §9 / doc 33 §4-D): the remote-approvals PAGER marker —
+        // the Console's own signed record that it paged a human about a held action. Console-signed
+        // operator bookkeeping (the packs/shift lineage), never governed agent activity; excluded by
+        // the same kriya.* namespace default-exclude. Listed so this generator never clobbers the
+        // disposition out of the fixture. (The runtime never emits it — a console-only vocabulary,
+        // carried here only for the byte-identity mirror.)
+        "kriya.approvals.paged",
         "kriya.artifact.provenance",
         "kriya.diode.export",
         "kriya.diode.import",
