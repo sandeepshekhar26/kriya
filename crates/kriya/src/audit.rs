@@ -88,7 +88,15 @@ pub const MEMORY_UPDATE: &str = "kriya.memory.update";
 /// to the hook), an honest gap disclosed in `docs/TRUST.md`, not filled by a guess here.
 pub const MEMORY_DELETE: &str = "kriya.memory.delete";
 
-#[derive(Debug, Clone, Serialize)]
+/// Reserved `action_id` for the O-10 evidence-MCP boot receipt (doc 33 §5.8) — a signed record that
+/// a **read-only** evidence MCP server ([`crate::mcp::evidence`]) started over the audit store,
+/// emitted once on boot by `kriya-mcp --evidence`. The evidence reader is itself in evidence: the
+/// receipt's `params` attest `{scope: "read-only", tools: [...]}` — never a query or a result. New
+/// `action_id` ⇒ fully additive: no existing receipt or verifier changes shape (the doc-27 §3.1
+/// pattern the other `kriya.*` constants above follow).
+pub const EVIDENCE_MCP_START: &str = "kriya.evidence.mcp.start";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Receipt {
     pub step_id: String,
     pub action_id: String,
@@ -139,6 +147,10 @@ impl Receipt {
     }
 }
 
+// NOTE: no derived `Deserialize` — the `#[serde(flatten)] receipt` combined with `Receipt`'s
+// `ts_ms: u128` trips serde's flatten limitation (flatten buffers through an internal `Content`
+// type that cannot represent 128-bit integers). Parse lines via [`parse_signed_line`] instead,
+// which reconstructs from a `serde_json::Value` and never flattens.
 #[derive(Debug, Clone, Serialize)]
 pub struct SignedReceipt {
     #[serde(flatten)]
@@ -1035,6 +1047,158 @@ fn canonical_value(v: &Value) -> Value {
     }
 }
 
+/// Re-derive the canonical signed bytes and check a signed receipt's Ed25519 signature against
+/// its own embedded public key — the runtime's single source of truth for line verification,
+/// identical to the offline CLI and the console's TS verifier. The receipt's `params` are
+/// re-canonicalized (R21 key sort) before the bytes are re-derived, so verification never depends
+/// on how a consumer's `serde_json` parsed the line. Only the Ed25519 lane is checked here (the
+/// primary signature every receipt carries); the optional ML-DSA-87 `pq_*` siblings are a separate
+/// concern (see `pq_verifies` in tests). A `signed` whose `receipt.params` were already
+/// canonicalized re-verifies unchanged (the sort is idempotent).
+pub fn signature_valid(signed: &SignedReceipt) -> bool {
+    let pub_bytes: [u8; 32] = match hex::decode(&signed.public_key)
+        .ok()
+        .and_then(|b| b.try_into().ok())
+    {
+        Some(b) => b,
+        None => return false,
+    };
+    let sig_bytes: [u8; 64] = match hex::decode(&signed.signature)
+        .ok()
+        .and_then(|b| b.try_into().ok())
+    {
+        Some(b) => b,
+        None => return false,
+    };
+    // Re-derive the exact bytes the signer covered: the unsigned Receipt, params key-sorted.
+    let mut receipt = signed.receipt.clone();
+    receipt.params = canonical_value(&receipt.params);
+    let msg = match serde_json::to_vec(&receipt) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    crypto::verify(&pub_bytes, &msg, &sig_bytes)
+}
+
+/// The verdict for one line of an audit log: whether it parses as a signed receipt and whether that
+/// receipt's signature re-verifies. On a parse or verify failure `signed` may still be present (a
+/// parsed-but-forged line) so callers can report *what* failed, and `reason` carries a short,
+/// machine-stable tag. This is the primitive the evidence MCP server ([`crate::mcp::evidence`]) uses
+/// so an unverifiable line is reported as such, never silently surfaced as if it were proven.
+#[derive(Debug, Clone)]
+pub struct LineVerdict {
+    /// The signed receipt when the line parsed as one (even if its signature is bad); `None` only
+    /// when the line was not valid signed-receipt JSON at all.
+    pub signed: Option<SignedReceipt>,
+    /// True iff the line parsed AND [`signature_valid`] returned true.
+    pub verified: bool,
+    /// A short reason when `!verified` (`"parse-error"` | `"bad-signature"`); `None` when verified.
+    pub reason: Option<&'static str>,
+}
+
+/// Parse one audit-log line into a [`SignedReceipt`] without flattening (see the note on
+/// `SignedReceipt`). Returns `None` when the line is not a well-formed signed receipt: a JSON
+/// object carrying the required `step_id`/`action_id`/`params`/`success`/`ts_ms` receipt fields
+/// plus `public_key` and `signature`. The `Receipt` core is reconstructed via `from_value`
+/// (unknown keys — `public_key`, `signature`, `pq_*` — are ignored), and the wire siblings are
+/// pulled off the same object.
+pub fn parse_signed_line(line: &str) -> Option<SignedReceipt> {
+    let v: Value = serde_json::from_str(line).ok()?;
+    if !v.is_object() {
+        return None;
+    }
+    let public_key = v.get("public_key")?.as_str()?.to_string();
+    let signature = v.get("signature")?.as_str()?.to_string();
+    let receipt: Receipt = serde_json::from_value(v.clone()).ok()?;
+    let pull = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
+    Some(SignedReceipt {
+        receipt,
+        public_key,
+        signature,
+        pq_alg: pull("pq_alg"),
+        pq_public_key: pull("pq_public_key"),
+        pq_sig: pull("pq_sig"),
+        pq_key_id: pull("pq_key_id"),
+    })
+}
+
+/// Verify a single audit-log line: parse it as a [`SignedReceipt`] and re-check its signature.
+pub fn verify_signed_line(line: &str) -> LineVerdict {
+    match parse_signed_line(line) {
+        Some(signed) => {
+            let verified = signature_valid(&signed);
+            LineVerdict {
+                signed: Some(signed),
+                verified,
+                reason: if verified { None } else { Some("bad-signature") },
+            }
+        }
+        None => LineVerdict {
+            signed: None,
+            verified: false,
+            reason: Some("parse-error"),
+        },
+    }
+}
+
+/// The verdict for a whole audit log: how many lines it holds, whether every line both verifies AND
+/// links to the SHA-256 of the exact previous line (the R20 hash-chain — so whole-receipt
+/// deletion/truncation/reorder is detectable), and the index of the first line that broke either
+/// property. Genesis (`prev_hash: None` on line 0) is legitimate; a `None` `prev_hash` on a later
+/// line is tolerated as *unchained* (pre-R20 shape) rather than reported as a break — only a
+/// *present* `prev_hash` that mismatches the previous line's hash, or an invalid signature, breaks
+/// the chain. Empty/blank lines are skipped (they are not receipts).
+#[derive(Debug, Clone)]
+pub struct ChainVerdict {
+    /// Count of non-blank receipt lines examined.
+    pub lines: usize,
+    /// True iff no line failed signature verification and no present `prev_hash` mismatched.
+    pub verified: bool,
+    /// 0-based index (among non-blank lines) of the first break, if any.
+    pub first_break: Option<usize>,
+}
+
+/// Verify a full audit log presented as raw lines (each the exact bytes written, no trailing
+/// newline). See [`ChainVerdict`] for the exact break semantics.
+pub fn verify_chain(raw_lines: &[String]) -> ChainVerdict {
+    let mut prev_line_hash: Option<String> = None;
+    let mut idx = 0usize;
+    for raw in raw_lines {
+        if raw.trim().is_empty() {
+            continue;
+        }
+        let verdict = verify_signed_line(raw);
+        let ok = match &verdict.signed {
+            Some(s) if verdict.verified => {
+                // Signature is good; now check the chain link where one is present.
+                match (&s.receipt.prev_hash, &prev_line_hash) {
+                    // A present prev_hash must equal the SHA-256 of the actual previous line.
+                    (Some(ph), Some(expected)) => ph == expected,
+                    // prev_hash present but this is line 0 (no previous line) — a dangling link.
+                    (Some(_), None) => false,
+                    // Unchained line (pre-R20) — tolerated, not a break.
+                    (None, _) => true,
+                }
+            }
+            _ => false,
+        };
+        if !ok {
+            return ChainVerdict {
+                lines: raw_lines.iter().filter(|l| !l.trim().is_empty()).count(),
+                verified: false,
+                first_break: Some(idx),
+            };
+        }
+        prev_line_hash = Some(sha256_hex(raw.as_bytes()));
+        idx += 1;
+    }
+    ChainVerdict {
+        lines: idx,
+        verified: true,
+        first_break: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1908,5 +2072,86 @@ mod tests {
                 .and_then(Value::as_str)
                 .map(str::to_string),
         }
+    }
+
+    // ---- Public verifier (verify_signed_line / verify_chain / signature_valid) ----
+
+    /// Record a small chain into a fresh log and return its exact on-disk lines.
+    fn recorded_lines(receipts: Vec<Receipt>) -> (Vec<String>, Signer) {
+        let s = signer();
+        for r in receipts {
+            s.record(r);
+        }
+        let text = std::fs::read_to_string(s.log_path()).unwrap();
+        (text.lines().map(str::to_string).collect(), s)
+    }
+
+    #[test]
+    fn verify_signed_line_accepts_a_genuine_line() {
+        let (lines, _s) = recorded_lines(vec![Receipt::new(
+            "step-1".into(),
+            "create_note".into(),
+            json!({ "b": 2, "a": 1 }),
+            true,
+            1_700_000_000_000,
+        )]);
+        let v = verify_signed_line(&lines[0]);
+        assert!(v.verified, "genuine line must verify: {:?}", v.reason);
+        assert_eq!(v.signed.unwrap().receipt.action_id, "create_note");
+    }
+
+    #[test]
+    fn verify_signed_line_rejects_a_tampered_param() {
+        let (lines, _s) = recorded_lines(vec![Receipt::new(
+            "step-1".into(),
+            "wire.transfer".into(),
+            json!({ "amount": 100 }),
+            true,
+            1_700_000_000_000,
+        )]);
+        // Flip the amount in the raw line without re-signing.
+        let tampered = lines[0].replace("\"amount\":100", "\"amount\":999999");
+        assert_ne!(tampered, lines[0], "the replace must have changed the line");
+        let v = verify_signed_line(&tampered);
+        assert!(!v.verified, "a tampered line must not verify");
+        assert_eq!(v.reason, Some("bad-signature"));
+        // It still parsed — the caller can see WHAT was forged.
+        assert!(v.signed.is_some());
+    }
+
+    #[test]
+    fn verify_signed_line_reports_parse_error_for_garbage() {
+        let v = verify_signed_line("{not json");
+        assert!(!v.verified);
+        assert_eq!(v.reason, Some("parse-error"));
+        assert!(v.signed.is_none());
+    }
+
+    #[test]
+    fn verify_chain_accepts_an_intact_log() {
+        let (lines, _s) = recorded_lines(vec![
+            Receipt::new("s1".into(), "a.one".into(), json!({}), true, 1),
+            Receipt::new("s2".into(), "a.two".into(), json!({}), true, 2),
+            Receipt::new("s3".into(), "a.three".into(), json!({}), true, 3),
+        ]);
+        let v = verify_chain(&lines);
+        assert!(v.verified, "intact chain must verify; break at {:?}", v.first_break);
+        assert_eq!(v.lines, 3);
+        assert_eq!(v.first_break, None);
+    }
+
+    #[test]
+    fn verify_chain_flags_a_deleted_middle_line() {
+        let (lines, _s) = recorded_lines(vec![
+            Receipt::new("s1".into(), "a.one".into(), json!({}), true, 1),
+            Receipt::new("s2".into(), "a.two".into(), json!({}), true, 2),
+            Receipt::new("s3".into(), "a.three".into(), json!({}), true, 3),
+        ]);
+        // Drop the middle line: line 2's signature is fine, but its prev_hash points at the
+        // deleted line 1, so the chain link mismatches.
+        let mutated = vec![lines[0].clone(), lines[2].clone()];
+        let v = verify_chain(&mutated);
+        assert!(!v.verified, "a deleted line must break the chain");
+        assert_eq!(v.first_break, Some(1));
     }
 }

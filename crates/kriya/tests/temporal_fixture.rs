@@ -295,6 +295,11 @@ fn f_c_ids() -> (Vec<&'static str>, Vec<&'static str>) {
         // disposition out of the fixture. (The runtime never emits it — a console-only vocabulary,
         // carried here only for the byte-identity mirror.)
         "kriya.approvals.paged",
+        // O-10 (kriya-console doc 33 §5.8): the read-only evidence MCP reader's boot receipt —
+        // `kriya-mcp --evidence` signs it so the reader is itself in evidence. Reader-attestation
+        // bookkeeping, never governed agent activity; excluded by the same kriya.* namespace
+        // default-exclude. Listed so this generator never clobbers the disposition out of the fixture.
+        "kriya.evidence.mcp.start",
         "kriya.artifact.provenance",
         "kriya.diode.export",
         "kriya.diode.import",

@@ -44,6 +44,7 @@
     "kriya.shift.clamp",
     "kriya.run.launched",
     "kriya.approvals.paged",
+    "kriya.evidence.mcp.start",
     "kriya.artifact.provenance",
     "kriya.diode.export",
     "kriya.diode.import",

@@ -20,6 +20,7 @@
 pub mod approval;
 pub mod executor;
 pub mod governor;
+pub mod evidence;
 pub mod jsonrpc;
 pub mod server;
 
@@ -71,6 +72,7 @@ pub use executor::{
     IoRecord, PersistentProcessExecutor, ProcessExecutor,
 };
 pub use governor::{DispatchOutcome, EgressControl, EgressTarget, Governor, IngressControl};
+pub use evidence::{expand_logs, EvidenceServer, EVIDENCE_TOOL_NAMES};
 pub use server::Server;
 
 #[cfg(feature = "mcp-client")]
