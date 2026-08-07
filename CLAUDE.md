@@ -49,14 +49,16 @@ they ever disagree with memory, the repo wins (decision [D-008](docs/DECISIONS.m
   approval is SHOULD-not-MUST + client-side, auth is OPTIONAL + excludes stdio). So ship a
   **standalone `kriya-gateway`** — a zero-change governance **proxy** that wraps any existing MCP
   server with policy + approval + signed audit — and reposition `wrapAction` as enterprise depth.
-  Architecture = **one transport-agnostic core + three reach fronts** (proxy / OS-accessibility
-  reach-in / computer-use), **build-over not rewrite**. See
+  Architecture = **one transport-agnostic core + the govern/audit fronts** (hooks / proxy / broker /
+  LLM proxy / egress lanes), **build-over not rewrite**. See
   [docs/SERVICE-ARCHITECTURE.md](docs/SERVICE-ARCHITECTURE.md) + D-016. The wedge (D-009) is
-  unchanged; only the GTM front door and the reach mechanism are sharpened.
-- **Next builds (PG tier — the current critical path, in order):** `R22` upstream MCP client +
+  unchanged. *(Update 2026-08-07: D-016's original "three reach fronts" included OS-accessibility
+  reach-in + computer-use; both desktop-reach lanes were removed — library is govern/audit-only,
+  git history has them, last released in crates.io kriya 0.1.4.)*
+- **Next builds (PG tier — the historical critical path, in order):** `R22` upstream MCP client +
   `McpProxyExecutor` → `R23` Front-1 transparent proxy loop (+ conformance test) → `R24` ⭐ the
-  shippable `kriya-gateway` product → `R25` Front-2 reach-in (coverage-gated) → `R26` Front-3
-  computer-use (deferred). The P0/P0.5 critical path (R1→R5, cross-shell parity) is **done**. See the roadmap.
+  shippable `kriya-gateway` product → `R25`/`R26` the desktop-reach fronts (shipped, then removed
+  2026-08-07). The P0/P0.5 critical path (R1→R5, cross-shell parity) is **done**. See the roadmap.
 - **Flagship goal (`R24`, ⭐):** a downloadable `kriya-gateway` that wraps a real existing MCP server
   with the approval modal + signed receipt in zero integration code — the new YC demo. The prior
   flagship (`R5` Actual Budget in-process bolt-on) is shipped and remains the enterprise-depth proof.

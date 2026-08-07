@@ -12,12 +12,14 @@ deliberately small so the pattern is legible.
 > shipped. For current feature state see [docs/PRODUCT_GAPS.md](docs/PRODUCT_GAPS.md); for what's
 > next and the strategic direction see [docs/ROADMAP.md](docs/ROADMAP.md) and [CLAUDE.md](CLAUDE.md).
 >
-> **Note (added 2026-06-24, [D-016](docs/DECISIONS.md)):** this file explains the *bolt-on / in-process
-> pattern*. The forward-looking **service architecture** — one governance core + three reach fronts
-> (a zero-change stdio **proxy** in front of any MCP server, an OS-accessibility **reach-in** for
-> no-API apps, computer-use fallback) ships as the standalone **`kriya-gateway`**, bundled inside the
-> downloadable **Kriya Console** app. The MCP-server mode below (`kriya-mcp`) is the seam the proxy
-> front extends.
+> **Note (added 2026-06-24, [D-016](docs/DECISIONS.md); updated 2026-08-07):** this file explains
+> the *bolt-on / in-process pattern*. The **service architecture** — one governance core behind the
+> surviving fronts: a zero-change stdio **proxy** in front of any MCP server and the **broker**
+> multiplexing N upstreams under one governor — ships as the standalone **`kriya-gateway`**, bundled
+> inside the downloadable **Kriya Console** app. The MCP-server mode below (`kriya-mcp`) is the seam
+> the proxy front extends. (The other two original reach fronts — OS-accessibility **reach-in** and
+> **computer-use** — were removed 2026-08-07 to keep the library govern/audit-only; git history has
+> them.)
 
 ## The core idea
 

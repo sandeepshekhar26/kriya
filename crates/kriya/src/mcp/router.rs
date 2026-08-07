@@ -1,17 +1,19 @@
-//! Router v2 — **one MCP endpoint that multiplexes multiple governed fronts under one Governor**
-//! (service-architecture; the unified `router` entry point). A single Claude Desktop config entry
-//! points at `kriya-gateway router`, and that one stdio session governs the **computer-use floor
-//! (any app)** *plus* one or more apps' **named reach-in controls** at once — every `tools/call`
-//! routed to the right front, all through the **same** policy + signer/audit + actor.
+//! Router — **one MCP endpoint that multiplexes multiple governed fronts under one Governor**.
+//! The broker (`kriya-gateway broker`, W2) is its consumer: a single MCP client config entry
+//! points at the broker, and that one stdio session governs N upstream MCP servers at once —
+//! every `tools/call` routed to the right front, all through the **same** policy + signer/audit
+//! + actor.
+//!
+//! (Until 2026-08-07 the router also composed the macOS desktop-reach fronts — reach-in +
+//! computer-use — since removed to keep the library govern/audit-only; see git history.)
 //!
 //! ## Why one Governor, not one-per-front
-//! Each existing front ([`super::reachin::ReachInServer`], [`super::computeruse::ComputerUseServer`],
-//! [`super::proxy_server::ProxyServer`]) wires its own [`Governor`] around its own
-//! [`ActionExecutor`]. The router does **not** reimplement those fronts — it *composes* their
+//! A standalone front like [`super::proxy_server::ProxyServer`] wires its own [`Governor`] around
+//! its own [`ActionExecutor`]. The router does **not** reimplement fronts — it *composes* their
 //! executors behind a single [`RouterExecutor`], wraps that one executor in **one** [`Governor`],
 //! and serves the union of their tools. The result: one policy decides every front, one signing key
-//! anchors one audit log, one actor attributes every receipt — the operator governs the whole
-//! desktop *and* the specific apps from a single, coherent governance posture.
+//! anchors one audit log, one actor attributes every receipt — the operator governs all upstreams
+//! from a single, coherent governance posture.
 //!
 //! ## Namespacing
 //! Every front contributes a `(namespace, Vec<Tool>, Box<dyn ActionExecutor>)`. The router renames
@@ -19,17 +21,15 @@
 //! [`RouterExecutor`] splits an incoming `action_id` on the **first** `"__"` back into
 //! `(ns, inner)`, looks up the sub-executor for `ns`, and calls it with the *inner* (un-namespaced)
 //! name — exactly the name that front's executor already understands. The `"__"` separator is the
-//! standard MCP server-prefix convention and never appears in a synthesized base name (the reach-in
-//! synthesizer collapses runs of non-alphanumerics to a single `_`, so a tool name never contains a
-//! doubled underscore — see [`super::reachin::synth`]); the computer-use catalog uses single-word
-//! `computer_*` names. So the split is unambiguous.
+//! standard MCP server-prefix convention; namespaces are slugified (runs of non-alphanumerics
+//! collapse to a single `_`), so a namespace never contains a doubled underscore and the split is
+//! unambiguous.
 //!
 //! ## Policy semantics
-//! **Policy rules match the *namespaced* tool name.** An operator gates `cu__computer_click` or
-//! `numbers__press_button_delete`, and may use globs against the namespace prefix — e.g.
-//! `numbers__*` to govern an entire app's reach-in surface, or `cu__*` to gate the whole
-//! computer-use floor. Both `tools/list` filtering and `tools/call` dispatch use the namespaced
-//! name, so what the agent sees and what the policy enforces are the same string.
+//! **Policy rules match the *namespaced* tool name.** An operator gates `notes__delete_note`, and
+//! may use globs against the namespace prefix — e.g. `notes__*` to govern an entire upstream's
+//! surface. Both `tools/list` filtering and `tools/call` dispatch use the namespaced name, so what
+//! the agent sees and what the policy enforces are the same string.
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -55,8 +55,8 @@ pub const NS_SEP: &str = "__";
 /// them. The router renames every tool to `"<namespace>__<tool.name>"` in the union and routes any
 /// matching `tools/call` to `executor` (with the original, un-namespaced inner name).
 pub struct Front {
-    /// Short, stable namespace for this front, e.g. `"cu"` for the computer-use floor or a slug of
-    /// the app name (`"numbers"`) for a reach-in front. Must not contain [`NS_SEP`].
+    /// Short, stable namespace for this front — a slug of the upstream's name (e.g. `"notes"`,
+    /// `"actual_budget"`). Must not contain [`NS_SEP`].
     pub namespace: String,
     /// The front's tools, with their **original** (un-namespaced) names — the router prefixes them.
     pub tools: Vec<Tool>,
@@ -82,9 +82,9 @@ impl Front {
 
 /// Multiplexing [`ActionExecutor`] — routes a *namespaced* `action_id` to the right sub-executor.
 ///
-/// `execute("numbers__press_button_save", …)` splits on the first [`NS_SEP`] into
-/// `("numbers", "press_button_save")`, looks up the `"numbers"` sub-executor, and calls it with the
-/// inner name `"press_button_save"` — the un-namespaced name that front's executor was built to
+/// `execute("notes__delete_note", …)` splits on the first [`NS_SEP`] into
+/// `("notes", "delete_note")`, looks up the `"notes"` sub-executor, and calls it with the
+/// inner name `"delete_note"` — the un-namespaced name that front's executor was built to
 /// understand. An unknown namespace (or a name with no separator) is a clean failed
 /// [`ActionOutcome`], **never a panic** — the governor still signs a failure receipt over it.
 pub struct RouterExecutor {
@@ -121,7 +121,7 @@ impl ActionExecutor for RouterExecutor {
 
 /// One MCP endpoint over many governed fronts. Owns the union tool list (namespaced + policy
 /// filtered on serve) and the single [`Governor`] wrapping the [`RouterExecutor`]. The serve loop
-/// mirrors [`super::reachin::ReachInServer`] exactly: `initialize` / `tools/list` (policy-filtered
+/// mirrors [`super::proxy_server::ProxyServer`]: `initialize` / `tools/list` (policy-filtered
 /// union) / `tools/call` (→ `governor.dispatch(namespaced_name, …)` → [`CallToolResult`], a block
 /// becomes an error *result*, never executed, never signed).
 pub struct RouterServer {
@@ -310,9 +310,9 @@ impl RouterServer {
         Ok(())
     }
 
-    /// Route one parsed client request. Returns `None` for a notification (no reply owed). Like the
-    /// reach-in/computer-use fronts, there is no single downstream to forward notifications to (each
-    /// front's "downstream" is its own backend), so a notification is accepted and dropped.
+    /// Route one parsed client request. Returns `None` for a notification (no reply owed). There is
+    /// no single downstream to forward notifications to (each front has its own downstream), so a
+    /// notification is accepted and dropped.
     pub fn handle(&mut self, req: Request) -> Option<Response> {
         if req.is_notification() {
             return None;
@@ -343,7 +343,7 @@ impl RouterServer {
     }
 
     /// Serve the namespaced union, **policy-filtered on the namespaced name** so a denied capability
-    /// (e.g. all of `cu__*`, or one app's `numbers__press_button_delete`) never appears to the agent.
+    /// (e.g. all of `notes__*`, or one upstream's `notes__delete_note`) never appears to the agent.
     fn handle_list(&mut self, id: Value) -> Response {
         let visible: Vec<Tool> = self
             .tools
@@ -357,7 +357,7 @@ impl RouterServer {
     /// Govern + route a `tools/call`. The governor dispatches on the **namespaced** name (so policy
     /// matches what the agent called and what `tools/list` showed); the [`RouterExecutor`] inside it
     /// splits that name back to the right front. A block maps to an MCP error *result* — exactly like
-    /// [`super::reachin::ReachInServer::handle_call`]: well-formed but refused, never executed,
+    /// [`super::proxy_server::ProxyServer`]'s call handling: well-formed but refused, never executed,
     /// never signed.
     fn handle_call(&mut self, id: Value, params: Option<Value>) -> Response {
         let Some(params) = params else {
@@ -413,15 +413,14 @@ fn namespaced(ns: &str, name: &str) -> String {
 }
 
 /// Turn an executor `data` value into MCP content blocks. The router relays whatever the chosen
-/// front's executor produced: a pre-formed content block (computer-use's screenshot image) passes
-/// through as one block, an array passes through verbatim, anything else is wrapped as text. This is
-/// the union of the reach-in and computer-use `content_from` rules so either front's output is
-/// faithfully relayed.
+/// front's executor produced: a pre-formed content block (an object carrying a `type` tag, e.g. an
+/// image block) passes through as one block, an array passes through verbatim, anything else is
+/// wrapped as text — so any front's output is faithfully relayed.
 fn content_from(data: Value) -> Vec<Value> {
     match data {
         Value::Array(blocks) => blocks,
         Value::Null => vec![],
-        // A pre-formed content block (e.g. the computer-use screenshot image block) — emit as one.
+        // A pre-formed content block (an object with a "type" tag) — emit as one.
         Value::Object(ref map) if map.contains_key("type") => vec![data],
         other => vec![json!({ "type": "text", "text": other.to_string() })],
     }
@@ -445,7 +444,8 @@ fn log_outcome(action_id: &str, outcome: &DispatchOutcome) {
             &receipt.signature[..receipt.signature.len().min(16)]
         ),
     };
-    eprintln!("[kriya-gateway router] tools/call {action_id}: {note}");
+    // Component name, not a subcommand: the router core serves the broker (`kriya-gateway broker`).
+    eprintln!("[kriya router] tools/call {action_id}: {note}");
 }
 
 #[cfg(test)]

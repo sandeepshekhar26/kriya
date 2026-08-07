@@ -115,7 +115,9 @@ first.
 
 **"Only works if the developer cooperates."** — Yes, that's the point. kriya is for apps built
 *with* agents as first-class users, not retrofitting agents onto arbitrary apps. For the
-retrofit case, use the computer-use/accessibility-tree stack.
+retrofit case, use a third-party computer-use/accessibility stack — and note kriya no longer
+ships one of its own (its desktop-reach lanes were removed 2026-08-07; the library is
+govern/audit-only).
 
 **"Tests? Production users?"** — 34 SDK + 13 host-crate tests, green on CI, integrated in two
 reference apps. No production users yet — alpha, MIT, please break it and tell me how.

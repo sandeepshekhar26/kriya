@@ -16,8 +16,7 @@ use serde_json::Value;
 /// destination + observed payload bytes + a content hash and hands it up here. It is crate-internal
 /// (NOT the wire receipt schema): the [`super::governor::Governor`] turns a present `io` into a
 /// standalone signed receipt in the reserved `kriya.io.*` vocabulary. `None` on every executor that
-/// isn't an egress lane — so nothing about the existing in-process / reach-in / computer-use fronts
-/// changes.
+/// isn't an egress lane — so nothing about the existing non-egress fronts changes.
 #[derive(Debug, Clone)]
 pub struct ActionOutcome {
     pub success: bool,

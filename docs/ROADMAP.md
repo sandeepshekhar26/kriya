@@ -78,18 +78,22 @@ Legend: ⬜ not started · 🟡 in progress · ✅ done · ⭐ flagship
   + 1 ignored real-AX test; verified the subcommand runs to the TCC gate. **Honest scope:** macOS
   only, needs user-granted Accessibility permission, degrades on Electron/Qt/custom-drawn UIs — the
   "any macOS app" claim was research-refuted. **Still ⬜:** Windows UIA backend; the **coverage-ratio
-  measurement on 5 real ICP apps** before this goes in a pitch.
+  measurement on 5 real ICP apps** before this goes in a pitch. — **removed 2026-08-07 (library
+  refocused govern/audit-only; last released in crates.io kriya 0.1.4, recover from git history).**
 - ✅ **R26 · Front-3 governed computer-use (D-017)** — SHIPPED (macOS; was deferred, pulled in by
   D-017 "support everything / sell governance"). `mcp::computeruse` (off-by-default `computer-use`
   feature): a fixed system-wide tool set (`computer_screenshot/click/move/scroll/type/key`,
   `list_apps`) that drives **any** app via pixels (CGEvent + `screencapture`, base64 PNG result),
   every action through the unchanged `Governor`. The **universal governed floor** — no app is
   unsupported. `kriya-gateway computer-use`. **Honest caveat:** pixel-tier policy is coarse (gate
-  clicks/keystrokes, not named actions); richest governance stays the instrumented fronts.
+  clicks/keystrokes, not named actions); richest governance stays the instrumented fronts. —
+  **removed 2026-08-07 (library refocused govern/audit-only).**
 - ✅ **R26.1 · Router v2 — auto-tier multiplexer (D-017)** — SHIPPED (`b7cadb7`). One MCP endpoint
   (`kriya-gateway router [--reach-in "App,…"]`) multiplexing the computer-use floor + per-app reach-in
   under ONE `Governor` (one policy/signer/audit/actor); tools served namespaced `<ns>__<tool>`, routed
-  per call. 14 router tests; verified live (`cu`(7) + `numbers`(1354) under one audit).
+  per call. 14 router tests; verified live (`cu`(7) + `numbers`(1354) under one audit). — **the
+  desktop `router` subcommand/feature was removed 2026-08-07 (library refocused govern/audit-only);
+  the router CORE survives under `mcp-client` as the broker's engine (W2).**
 
 ---
 
@@ -103,8 +107,9 @@ Legend: ⬜ not started · 🟡 in progress · ✅ done · ⭐ flagship
   (`ea24602`). The gateway **defaults** its signed-receipt log to the standard `~/.kriya/audit/` dir
   (`audit::default_audit_dir()`, the shared writer/reader convention; created on demand, temp-dir
   fallback). Each front writes a stable, hash-chain-continuing file there (`proxy → <server>.jsonl`,
-  `reach-in → reach-in-<app>.jsonl`, `computer-use → computer_use.jsonl`, `router → router.jsonl`);
-  `--audit-log` still overrides. `doctor` surfaces the location; `--signing-key` no longer needs
+  `broker → broker.jsonl`; historically also the removed desktop fronts' per-lane files);
+  `--audit-log` still overrides. `doctor` surfaced the location (removed 2026-08-07 with the
+  desktop lanes); `--signing-key` no longer needs
   `--audit-log` (the default log is always present). Verified live: a proxy with **no** `--audit-log`
   wrote `~/.kriya/audit/mock_mcp_server.jsonl`, receipt verifies offline. 97 crate + 4 new gateway
   unit tests green. The Console's **auto-discover + tail** of this dir lands in R28.

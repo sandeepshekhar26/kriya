@@ -566,8 +566,8 @@ mod tests {
     }
 
     /// Real integration test against the ACTUAL macOS login Keychain — not just the pure logic
-    /// above. `#[ignore]`d like `mcp::reachin::macos::tests::real_ax_snapshot_of_finder_when_trusted`
-    /// (needs real OS state / may prompt); run explicitly with `--ignored`. Creates, reads, and
+    /// above. `#[ignore]`d because it needs real OS state / may prompt; run explicitly with
+    /// `--ignored`. Creates, reads, and
     /// deletes a throwaway item under a `kriya-test-*` service/account so it never collides with a
     /// real credential — this is the test that actually proves `security find-generic-password -w`'s
     /// output shape (trailing newline, exact stdout bytes) is parsed the way the code above assumes.

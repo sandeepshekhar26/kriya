@@ -289,20 +289,21 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
   **on-startup on-device attestation** receipt (R13; genesis log line under a pinned key). ⬜
   remaining: cross-platform GUI approval (Windows/Linux), signed installers (dmg/Homebrew,
   msi/winget) + pinned public key. Repositions `wrapAction` as enterprise depth. **(R24)**
-- ✅ **Front 2 — reach-in adapter (no-MCP/no-API apps)** — shipped (macOS): `mcp::reachin`
+- ✅→🪦 **Front 2 — reach-in adapter (no-MCP/no-API apps)** — shipped (macOS): `mcp::reachin`
   (`AxBackend` trait + `MacAxBackend` FFI, AX-tree tool synthesis, `AxExecutor`, `ReachInServer`,
   same `Governor`), exposed as `kriya-gateway reach-in --app <App>`. 23 fake-backend unit tests + 1
   ignored real-AX test. **Coverage-gated** (macOS-only, needs Accessibility permission, degrades on
-  Electron/Qt/web UIs — "any macOS app" was research-refuted). ⬜ Windows UIA + the 5-ICP-app
-  coverage measurement. **(R25)**
-- ✅ **Front 3 — governed computer-use** — SHIPPED (macOS, D-017): `mcp::computeruse`
+  Electron/Qt/web UIs — "any macOS app" was research-refuted). **(R25)** — **REMOVED 2026-08-07:**
+  library refocused govern/audit-only; last released in crates.io kriya 0.1.4, git history has it.
+- ✅→🪦 **Front 3 — governed computer-use** — SHIPPED (macOS, D-017): `mcp::computeruse`
   (off-by-default `computer-use` feature) — a fixed system-wide tool set (screenshot/click/move/
   scroll/type/key + `list_apps`) driving **any** app via pixels (CGEvent + `screencapture`), every
-  action through the unchanged `Governor`. The **universal governed floor**. ⬜ Windows/Linux backends.
-  **(R26)** — pixel-tier governance is coarse by nature (gate clicks/keystrokes, not named actions).
-- ✅ **Router v2 — auto-tier multiplexer** — SHIPPED (D-017, `b7cadb7`): one endpoint
+  action through the unchanged `Governor`. **(R26)** — **REMOVED 2026-08-07** (same refocus).
+- ✅→🪦 **Router v2 — auto-tier multiplexer** — SHIPPED (D-017, `b7cadb7`): one endpoint
   (`kriya-gateway router [--reach-in "App,…"]`) multiplexing the computer-use floor + per-app reach-in
   under ONE `Governor`; tools namespaced `<ns>__<tool>`, routed per call. 14 tests; verified live.
+  — **the desktop `router` subcommand/feature REMOVED 2026-08-07; the router core survives under
+  `mcp-client` as the broker's engine (W2).**
 
 ## 9. Distribution / control-plane app (D-018)
 
@@ -313,8 +314,9 @@ Legend: ✅ done · 🟡 partial / proof-only · ⬜ not started
 
 - ✅ **Standard on-device audit-log location** *(public gateway)* — **shipped** (`ea24602`). Gateway
   **defaults** its signed-receipt log to `~/.kriya/audit/` (`audit::default_audit_dir()`), a stable
-  per-front file (`<server>.jsonl` / `reach-in-<app>.jsonl` / `computer_use.jsonl` / `router.jsonl`);
-  `--audit-log` overrides. Verified a front writes there with no flag + verifies offline. The
+  per-front file (`<server>.jsonl` / `broker.jsonl`; historically also the removed desktop fronts'
+  per-lane files); `--audit-log` overrides. Verified a front writes there with no flag + verifies
+  offline. The
   Console's **auto-discover + tail** of this dir is the R28 half. **(R27)**
 - ✅ **Tauri control-plane desktop app** — **shipped** in 🔒 `kriya-console`. Tauri rebuild: compiled
   **Rust backend** holds the paid value + license check; the React views are the thin viewer. The

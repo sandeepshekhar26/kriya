@@ -41,27 +41,13 @@ pub mod proxy_server;
 #[cfg(feature = "contain")]
 pub mod contain;
 
-// Front 2 — the reach-in adapter (service-architecture §5). Off-by-default `reach-in` feature so the
-// default build pulls in no macOS AX FFI. The platform-agnostic core (AxBackend trait, tool
-// synthesis, AxExecutor, ReachInServer) compiles on any OS for unit testing; the real AX backend
-// (`reachin::macos`) is gated `#[cfg(target_os = "macos")]` inside the module.
-#[cfg(feature = "reach-in")]
-pub mod reachin;
-
-// Front 3 — governed computer-use (service-architecture §6, D-017): a fixed, system-wide tool set
-// (screenshot/click/move/scroll/type/key/list_apps) that drives any app via pixels, every action
-// routed through the unchanged Governor. Off-by-default `computer-use` feature; the macOS backend
-// (CGEvent + screencapture) is gated inside the module, the core (trait/server/executor) is portable.
-#[cfg(feature = "computer-use")]
-pub mod computeruse;
-
-// Router v2 — ONE MCP endpoint multiplexing multiple governed fronts under ONE Governor (one
-// policy, one signer/audit, one actor). Composes the existing fronts (reach-in + computer-use)
-// behind a namespacing `RouterExecutor` and serves their union; it does NOT reimplement them.
-// Pulls in both reach-in and computer-use, so the feature enables them (see Cargo.toml).
-// ALSO available under `mcp-client` alone (W2): the broker multiplexes N proxied MCP upstreams
-// through the same machinery, and the router core itself is pure composition — no FFI, no OS deps.
-#[cfg(any(feature = "router", feature = "mcp-client"))]
+// Router — ONE MCP endpoint multiplexing multiple governed fronts under ONE Governor (one
+// policy, one signer/audit, one actor). The broker (`kriya-gateway broker`, W2) is its consumer:
+// it multiplexes N proxied MCP upstreams behind a namespacing `RouterExecutor` and serves their
+// union. Pure composition — no FFI, no OS deps — so it lives under `mcp-client` with the rest of
+// the proxy machinery. (The desktop fronts it once also composed — reach-in + computer-use — were
+// removed 2026-08-07; see git history.)
+#[cfg(feature = "mcp-client")]
 pub mod router;
 
 #[cfg(target_os = "macos")]
@@ -85,26 +71,7 @@ pub use proxy_server::ProxyServer;
 #[cfg(feature = "contain")]
 pub use contain::{seatbelt_profile, sha256_hex as contain_sha256_hex, ConnectProxy, RUN_EXIT, RUN_START};
 
-// Front 2 public surface: the trait + node type, the synthesis entry points, the executor, and the
-// serve loop. The macOS backend is re-exported only on macOS.
-#[cfg(feature = "reach-in")]
-pub use reachin::executor::AxExecutor;
-#[cfg(all(feature = "reach-in", target_os = "macos"))]
-pub use reachin::macos::MacAxBackend;
-#[cfg(feature = "reach-in")]
-pub use reachin::{AxBackend, AxNode, ReachInServer};
-
-// Front 3 public surface: the trait, the executor, and the system-wide serve loop. The macOS desktop
-// backend is re-exported only on macOS.
-#[cfg(feature = "computer-use")]
-pub use computeruse::executor::ComputerUseExecutor;
-#[cfg(all(feature = "computer-use", target_os = "macos"))]
-pub use computeruse::macos::MacDesktopBackend;
-#[cfg(feature = "computer-use")]
-pub use computeruse::{ComputerUseServer, DesktopBackend};
-
-// Router v2 public surface: the multiplexing executor + the unified serve loop. Portable (no FFI of
-// its own) — the macOS backends come from the reach-in / computer-use fronts it composes. Under
-// `mcp-client` it is the broker's engine (W2), multiplexing proxied MCP upstreams instead.
-#[cfg(any(feature = "router", feature = "mcp-client"))]
+// Router public surface: the multiplexing executor + the unified serve loop. Portable (no FFI) —
+// the broker's engine (W2), multiplexing proxied MCP upstreams under one Governor.
+#[cfg(feature = "mcp-client")]
 pub use router::{Front, RouterExecutor, RouterServer};

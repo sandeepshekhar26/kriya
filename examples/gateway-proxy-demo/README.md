@@ -135,11 +135,10 @@ Plus a 30-calls/minute budget so a looping agent can't hammer the downstream ser
 
 - **The proxy wraps apps that already speak MCP.** This demo is Front 1: the target app *already
   exposes an MCP server*; the gateway sits in front of it. That's the headline and it works today.
-- **Apps with no MCP and no API are not reached by this proxy.** Those are the job of the
-  *reach-in* front (Front 2), which synthesizes a governed MCP server from the OS accessibility
-  tree — that is **roadmap (R25), not shipped**, and it's coverage-bounded (it degrades on
-  custom-drawn / Electron / Qt UIs). Computer-use over pixels (Front 3) is a deferred fallback.
-  Do not assume either works today.
+- **Apps with no MCP and no API are not reached by this proxy.** kriya no longer ships a
+  desktop-reach lane for them: the reach-in (accessibility-tree) and computer-use (pixels) fronts
+  shipped historically but were **removed 2026-08-07** — the library is govern/audit-only (they
+  last released in crates.io `kriya 0.1.4` under non-default features; git history has them).
 - **Tamper-evident, not tamper-proof** (see verify section above).
 
 ## Files
@@ -153,7 +152,7 @@ Plus a 30-calls/minute budget so a looping agent can't hammer the downstream ser
 
 ## Learn more
 
-- [the repo README's reach-model section](../../README.md) — the gateway design: one governance
-  core and the reach fronts (computer-use floor + per-app reach-in).
+- [the repo README's "What kriya governs" section](../../README.md) — the gateway design: one
+  governance core behind the hook / proxy / broker / LLM-proxy / egress fronts.
 - [`examples/actual-budget-bolt-on/`](../actual-budget-bolt-on/) — the in-process `wrapAction`
   bolt-on (the enterprise-depth, non-bypassable topology) on a real finance app.

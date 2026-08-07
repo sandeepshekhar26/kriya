@@ -95,26 +95,28 @@ kriya-gateway proxy -- node your-mcp-server.js
 
 A runnable, no-human, end-to-end proof (a read goes through and is signed; a destructive call is
 blocked at the gate and is not) lives in
-[`examples/gateway-proxy-demo/`](examples/gateway-proxy-demo/) — `./run.sh`. The design is one
-governance core + a **4-tier reach model**, described next.
+[`examples/gateway-proxy-demo/`](examples/gateway-proxy-demo/) — `./run.sh`.
 
-### Reaches every app — governed (the 4-tier model)
+### What kriya governs
 
-One governance core, the reach picked by how the app exposes itself, richest first:
-**bolt-on/serve** (a kriya-instrumented app's real named handlers) → **proxy** (any MCP server,
-zero changes) → **reach-in** (typed tools synthesized from the macOS accessibility tree, for apps with
-no MCP/API — shipped, macOS) → **computer-use** (system-wide pixels: click/type/scroll/screenshot —
-shipped, macOS; the universal floor, so no app is unsupported). Governance *richness* is tiered by
-instrumentation: semantic deny/approve of a **named** action at the top, coarse click/keystroke
-gating at the floor.
+kriya governs agent actions through the surfaces where an agent already acts:
+**hooks** (Claude Code via `kriya-hook`, Hermes via `kriya-hermes-hook` — every native tool and
+every attached MCP server), the **MCP gateway/broker** (`kriya-gateway proxy` in front of any MCP
+server, `kriya-gateway broker` multiplexing N upstreams under one governor), the **LLM proxy**
+(`kriya-llm-proxy` in front of a local inference server), and the **governed egress/exec lanes**
+(`kriya-gateway run` containment, `kriya-run-wasm` deterministic execution). Every governed action
+gets a policy decision and an Ed25519-signed, hash-chained, offline-verifiable receipt — richness
+tiered by instrumentation: semantic deny/approve of a **named** action at the top (bolt-on/serve),
+tool-call gating through the proxy/hook seams elsewhere.
 
-> **Honest scope.** A named-action policy needs an instrumented app; reach-in is coverage-bounded
-> (degrades on Electron/Qt/web UIs); computer-use is universal but its governance is **coarse**
-> (gates/audits clicks & keystrokes, not named actions) and needs Accessibility + Screen Recording.
-> The audit trail is tamper-**evident** (hash-chained, offline-verifiable), not tamper-proof.
-> **Vs an ungoverned computer-use agent (e.g. Cowork):** the differentiator is that every action is
-> policy-gated + signed + on-device + **vendor-neutral** (governs *any* MCP agent, under the app
-> owner's rules) — not the ability to drive apps.
+> **Honest scope.** A named-action policy needs an instrumented app; the proxy/hook seams govern
+> tool calls, not what happens inside an app. The audit trail is tamper-**evident** (hash-chained,
+> offline-verifiable), not tamper-proof.
+
+> **Removed (2026-08-07):** the macOS desktop-reach lanes — **reach-in** (accessibility-tree tool
+> synthesis) and **computer-use** (system-wide pixel control) — were removed to keep the library
+> focused on govern/audit. They last shipped in crates.io `kriya 0.1.4` under non-default features;
+> recover them from git history if you need them.
 
 ### Govern the whole Claude Code lane — `kriya-hook`
 

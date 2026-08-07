@@ -2,10 +2,12 @@
 #
 # build-gateway-app.sh — package kriya-gateway as a signed macOS .app bundle + .dmg (R24).
 #
-# WHY a bundle: macOS TCC grants Accessibility to a stable app identity (CFBundleIdentifier), not to
-# a file path. A loose binary spawned by an Electron host (Claude Desktop) can't be granted
-# Accessibility — we proved this live — but a signed .app with a fixed CFBundleIdentifier can, and
-# the grant sticks across runs. This script reproduces that bundle deterministically.
+# WHY a bundle: a stable, signed app identity (CFBundleIdentifier) is what macOS keys durable
+# per-app grants and Gatekeeper trust to — not a bare file path. (Historical engineering record:
+# we proved live that a loose binary spawned by an Electron host can't hold a TCC Accessibility
+# grant, while a signed .app with a fixed CFBundleIdentifier can. That finding motivated this
+# bundle when the gateway had desktop-reach lanes; those lanes were removed 2026-08-07, so the
+# bundle is now just the distributable packaging for the govern/audit gateway.)
 #
 # Usage:
 #   bash scripts/macos/build-gateway-app.sh [--version X.Y.Z]
@@ -49,11 +51,11 @@ DMG_PATH="${DIST_DIR}/KriyaGateway.dmg"
 MANIFEST="${REPO_ROOT}/crates/kriya/Cargo.toml"
 PLIST_TEMPLATE="${SCRIPT_DIR}/Info.plist"
 
-echo "==> Building kriya-gateway (release, features: mcp-client,reach-in)"
+echo "==> Building kriya-gateway (release, features: mcp-client)"
 cargo build --release \
   --manifest-path "${MANIFEST}" \
   --no-default-features \
-  --features mcp-client,reach-in \
+  --features mcp-client \
   --bin kriya-gateway
 
 # The release dir is the workspace target/ if there is one, else the crate's target/. Find the
@@ -117,16 +119,11 @@ cat <<EOF
   1. Install: open the .dmg and drag "Kriya Gateway.app" to /Applications
      (or use the bundle in place).
 
-  2. Grant Accessibility ONCE (required for reach-in):
-       System Settings → Privacy & Security → Accessibility → add "Kriya Gateway.app"
-     Run the built-in preflight to check + open that pane for you:
-       "${GATEWAY_EXE}" doctor --app "Numbers"
-
-  3. Wire into Claude Desktop's claude_desktop_config.json ("mcpServers"), pointing
-     command at the BUNDLE path (not a loose binary, or TCC won't grant):
+  2. Wire into Claude Desktop's claude_desktop_config.json ("mcpServers"), pointing
+     command at the bundle's binary:
        "command": "${GATEWAY_EXE}"
-       "args":    ["reach-in", "--app", "<App Name>", "--approval", "gui"]
-     (\`doctor --app "<App Name>"\` prints this snippet ready to paste.)
+       "args":    ["proxy", "--approval", "gui", "--", "node", "your-mcp-server.js"]
+     (or "args": ["broker", "--config", "broker.yaml"] for N upstreams under one governor.)
 
   Ad-hoc signing is fine locally. For public distribution you need Developer ID +
   notarization — see scripts/macos/README.md.
